@@ -1,0 +1,14 @@
+# Code owners for WithVibe.
+#
+# These owners are requested for review automatically on any PR that
+# touches matching paths. Adjust the handle/team below to a real GitHub
+# user or team in the `withvibe` org before relying on auto-review.
+
+# Default owner for everything in the repo.
+*                       @withvibe/maintainers
+
+# Area owners (uncomment / adjust as the team grows).
+# /apps/api/            @withvibe/backend
+# /apps/web/            @withvibe/frontend
+# /packages/cli/        @withvibe/maintainers
+# /packages/db/         @withvibe/backend

@@ -1,0 +1,207 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+@plugin "@tailwindcss/typography";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --radius-sm: calc(var(--radius) * 0.5);
+  --radius-md: calc(var(--radius) * 0.75);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* Dark-first theme matching withvibe.dev palette (HSL 220/207/177).
+   :root == .dark (always dark). */
+:root,
+.dark {
+  --radius: 0.5rem;
+
+  --background: hsl(220 13% 12%);
+  --foreground: hsl(0 0% 80%);
+
+  --card: hsl(220 13% 15%);
+  --card-foreground: hsl(0 0% 90%);
+
+  --popover: hsl(220 13% 15%);
+  --popover-foreground: hsl(0 0% 90%);
+
+  --primary: hsl(207 90% 54%);
+  --primary-foreground: hsl(0 0% 100%);
+
+  --secondary: hsl(220 13% 18%);
+  --secondary-foreground: hsl(0 0% 90%);
+
+  --muted: hsl(220 13% 16%);
+  --muted-foreground: hsl(0 0% 60%);
+
+  --accent: hsl(177 48% 60%);
+  --accent-foreground: hsl(220 13% 12%);
+
+  --destructive: hsl(4 90% 58%);
+  --border: hsl(220 13% 22%);
+  --input: hsl(220 13% 22%);
+  --ring: hsl(207 90% 54%);
+
+  --success: hsl(177 48% 60%);
+  --warning: hsl(45 100% 71%);
+
+  --chart-1: hsl(207 90% 54%);
+  --chart-2: hsl(177 48% 60%);
+  --chart-3: hsl(45 100% 71%);
+  --chart-4: hsl(285 65% 65%);
+  --chart-5: hsl(330 75% 65%);
+
+  --sidebar: hsl(220 13% 10%);
+  --sidebar-foreground: hsl(0 0% 75%);
+  --sidebar-primary: hsl(207 90% 54%);
+  --sidebar-primary-foreground: hsl(0 0% 100%);
+  --sidebar-accent: hsl(220 13% 15%);
+  --sidebar-accent-foreground: hsl(207 90% 54%);
+  --sidebar-border: hsl(220 13% 18%);
+  --sidebar-ring: hsl(207 90% 54%);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+  html {
+    @apply font-sans;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+    letter-spacing: -0.02em;
+  }
+}
+
+@utility font-brand {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  letter-spacing: -0.02em;
+}
+
+@utility glow-primary {
+  box-shadow: 0 0 20px hsl(207 90% 54% / 0.3);
+}
+
+@utility transition-smooth {
+  transition-property: color, background-color, border-color, transform,
+    box-shadow, opacity;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 200ms;
+}
+
+@keyframes orb-drift-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33%      { transform: translate(40px, -60px) scale(1.1); }
+  66%      { transform: translate(-30px, 30px) scale(0.95); }
+}
+@keyframes orb-drift-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50%      { transform: translate(-50px, 40px) scale(1.15); }
+}
+@keyframes grid-drift {
+  from { background-position: 0 0; }
+  to   { background-position: 40px 40px; }
+}
+@keyframes caret-blink {
+  0%, 50%   { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(177 48% 60% / 0.6); }
+  70%      { box-shadow: 0 0 0 8px hsl(177 48% 60% / 0); }
+}
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes flow-dash {
+  to { stroke-dashoffset: -20; }
+}
+@keyframes container-glow {
+  0%, 100% {
+    box-shadow: 0 0 40px hsl(207 90% 54% / 0.25),
+                inset 0 0 20px hsl(207 90% 54% / 0.08);
+  }
+  50% {
+    box-shadow: 0 0 60px hsl(207 90% 54% / 0.45),
+                inset 0 0 30px hsl(207 90% 54% / 0.12);
+  }
+}
+@keyframes ai-pulse {
+  0%, 100% { transform: scale(1);    opacity: 1; }
+  50%      { transform: scale(1.05); opacity: 0.9; }
+}
+
+@utility animate-orb-1 { animation: orb-drift-1 18s ease-in-out infinite; }
+@utility animate-orb-2 { animation: orb-drift-2 22s ease-in-out infinite; }
+@utility animate-grid-drift { animation: grid-drift 12s linear infinite; }
+@utility animate-caret { animation: caret-blink 1s step-start infinite; }
+@utility animate-pulse-dot { animation: pulse-dot 2s ease-out infinite; }
+@utility animate-fade-up { animation: fade-up 600ms cubic-bezier(0.4, 0, 0.2, 1) backwards; }
+@utility animate-flow-dash { animation: flow-dash 1.5s linear infinite; }
+@utility animate-container-glow { animation: container-glow 3s ease-in-out infinite; }
+@utility animate-ai-pulse { animation: ai-pulse 2.4s ease-in-out infinite; }
+
+/* Kill Chrome's white autofill background + dark text. The long
+   transition is the standard trick — Chrome only applies its style
+   before the transition kicks in, so we freeze it in "after" state. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus,
+textarea:-webkit-autofill:active {
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: var(--foreground);
+  caret-color: var(--foreground);
+  transition: background-color 100000s ease-in-out 0s;
+  box-shadow: none !important;
+}

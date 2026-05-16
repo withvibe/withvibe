@@ -1,0 +1,622 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum WorkspaceRole {
+  admin
+  member
+}
+
+enum EnvStatus {
+  todo
+  in_progress
+  done
+}
+
+enum ChatEngine {
+  agent_sdk
+  claude_code
+}
+
+enum RoutingMode {
+  port
+  subdomain
+}
+
+enum QaBrowserMode {
+  sidecar       // headed Chromium in a Docker sidecar; agent drives it via CDP
+  user_browser  // user installs the WithVibe Chrome extension; agent drives the user's tab
+}
+
+enum StorageMode {
+  LOCAL  // write to API-host filesystem under Workspace.storageLocalPath
+  S3     // upload to Workspace.storageS3Bucket (+ optional storageS3Prefix)
+}
+
+model User {
+  id                  String            @id @default(cuid())
+  email               String            @unique
+  name                String?
+  passwordHash        String?
+  defaultWorkspaceId  String?
+  positions           String[]          @default([])
+  bio                 String?
+  createdAt           DateTime          @default(now())
+
+  memberships     WorkspaceMember[]
+  invitationsSent Invitation[]      @relation("InvitedBy")
+  messages        Message[]
+  agentSessions   AgentSession[]
+  sandboxes       Sandbox[]
+  createdEnvs     Env[]             @relation("EnvCreatedBy")
+  chatSessions    ChatSession[]
+  memories        MemberMemory[]
+  cloneAgents     Agent[]           @relation("CloneOwner")
+  questionsAskedOf HumanQuestion[]  @relation("AskedOf")
+  questionsAsker   HumanQuestion[]  @relation("AskedBy")
+  cliTokens       CliToken[]
+  cliAuthCodes    CliAuthCode[]
+}
+
+model CliToken {
+  id          String    @id @default(cuid())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String
+  tokenHash   String    @unique // sha256 of the secret the CLI holds
+  label       String?   // optional human label (e.g. "Alex's MacBook")
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+
+  @@index([userId])
+}
+
+model CliAuthCode {
+  id             String    @id @default(cuid())
+  code           String    @unique // URL-safe random, shown in the /cli-auth page path
+  label          String?   // CLI-supplied device label (e.g. hostname) shown to the user at confirm time
+  user           User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId         String?   // set when the user confirms in the browser
+  tokenHash      String?   // sha256 of the secret — matches the CliToken row created at confirm
+  deliverySecret String?   // transient plaintext for one-shot CLI pickup via poll; cleared on first read
+  createdAt      DateTime  @default(now())
+  expiresAt      DateTime
+  confirmedAt    DateTime?
+  consumedAt     DateTime? // set when CLI has fetched the token; further polls reject
+
+  @@index([expiresAt])
+}
+
+model Workspace {
+  id                String    @id @default(cuid())
+  name              String
+  description       String?
+  dbSchema          String?
+  repoContext       String?
+  anthropicApiKey   String?
+  githubToken       String?
+  allowDirectMerge  Boolean   @default(false)
+  debugMode         Boolean   @default(false)
+  // When true, refuse any push whose target ref is the env's baseBranch
+  // (or main/master). Defense in depth against AI accidentally pushing
+  // to the protected upstream branch — enforced server-side in
+  // GitService.push() and via a local pre-push hook installed in each
+  // env clone (see EnvCloneService.installPrePushHook).
+  protectBaseBranch Boolean   @default(true)
+  // Default Claude model for chat in this workspace. "auto" runs the model
+  // router each turn; concrete ids ("claude-opus-4-7", "claude-sonnet-4-6",
+  // "claude-haiku-4-5") pin every turn to that model. Envs may override per-env.
+  defaultModel      String    @default("auto")
+  // Where compose files and env assets live. LOCAL writes under
+  // `storageLocalPath` on the API host; S3 uploads to `storageS3Bucket`
+  // (optionally under `storageS3Prefix`). Credentials stored plaintext —
+  // same posture as `anthropicApiKey` / `githubToken`.
+  storageMode             StorageMode @default(LOCAL)
+  storageLocalPath        String?
+  storageS3Bucket         String?
+  storageS3Region         String?
+  storageS3AccessKeyId    String?
+  storageS3SecretAccessKey String?
+  storageS3Prefix         String?
+  deletedAt         DateTime?
+  createdAt         DateTime  @default(now())
+
+  members     WorkspaceMember[]
+  repos       Repo[]
+  envs        Env[]
+  invitations Invitation[]
+  agents      Agent[]
+  memberMemories MemberMemory[]
+  humanQuestions HumanQuestion[]
+  knowledge   WorkspaceKnowledge[]
+  envTemplates EnvTemplate[]
+  secrets     WorkspaceSecret[]
+}
+
+// Named secrets injected into env materialization for template variables of
+// kind "secret". Looked up by `secretName` (which falls back to the variable
+// `key`). Stored plaintext in v1 — same posture as `Workspace.anthropicApiKey`
+// and `Workspace.githubToken`. Future: encrypt-at-rest with a per-deployment
+// KMS key.
+model WorkspaceSecret {
+  id          String   @id @default(cuid())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  name        String   // UPPER_SNAKE_CASE — matches the env-var convention secretName uses
+  value       String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+}
+
+model WorkspaceKnowledge {
+  id          String    @id @default(cuid())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  slug        String
+  title       String
+  description String
+  content     String
+  source      String    @default("ai_self") // "ai_self" | "ai_from_correction" | "user"
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId, createdAt])
+}
+
+model MemberMemory {
+  id          String    @id @default(cuid())
+  user        User      @relation(fields: [userId], references: [id])
+  userId      String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  slug        String
+  title       String
+  description String
+  content     String
+  source      String    @default("ai_self") // "ai_self" | "ai_from_correction" | "user"
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([userId, workspaceId, slug])
+  @@index([userId, workspaceId, createdAt])
+}
+
+model WorkspaceMember {
+  id               String        @id @default(cuid())
+  workspace        Workspace     @relation(fields: [workspaceId], references: [id])
+  workspaceId      String
+  user             User          @relation(fields: [userId], references: [id])
+  userId           String
+  role             WorkspaceRole @default(member)
+  joinedAt         DateTime      @default(now())
+
+  @@unique([workspaceId, userId])
+}
+
+model Invitation {
+  id           String        @id @default(cuid())
+  workspace    Workspace     @relation(fields: [workspaceId], references: [id])
+  workspaceId  String
+  email        String?
+  token        String        @unique
+  role         WorkspaceRole @default(member)
+  invitedBy    User?         @relation("InvitedBy", fields: [invitedById], references: [id])
+  invitedById  String?
+  expiresAt    DateTime?
+  acceptedAt   DateTime?
+  createdAt    DateTime      @default(now())
+}
+
+model Repo {
+  id                String     @id @default(cuid())
+  workspace         Workspace  @relation(fields: [workspaceId], references: [id])
+  workspaceId       String
+  name              String
+  url               String
+  defaultForNewEnvs Boolean    @default(false)
+  clone             RepoClone?
+  envRepos          EnvRepo[]
+  templateRepos     EnvTemplateRepo[]
+  createdAt         DateTime   @default(now())
+
+  @@unique([workspaceId, name])
+}
+
+model RepoClone {
+  id           String   @id @default(cuid())
+  repo         Repo     @relation(fields: [repoId], references: [id])
+  repoId       String   @unique
+  localPath    String
+  branch       String   @default("main")
+  lastPulledAt DateTime?
+  cloneStatus  String   @default("pending")
+  errorMsg     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Env {
+  id               String         @id @default(cuid())
+  workspace        Workspace      @relation(fields: [workspaceId], references: [id])
+  workspaceId      String
+  title            String
+  description      String?
+  status           EnvStatus      @default(todo)
+  containerStatus  String         @default("stopped")
+  containerPorts   Json?
+  serviceUrls      Json?          // subdomain-mode only: { [serviceName]: "https://..." }
+  containerError   String?
+  lastContainerAt  DateTime?
+  composeFile      String?
+  assetFiles       Json?         // [{path, content}] — materialized under envDir alongside the compose
+  template         EnvTemplate?  @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateId       String?
+  templateVars     Json?         // user-supplied values for template variables, keyed by var key
+  routingMode       RoutingMode @default(port)
+  routingBaseDomain String?     // used when routingMode = subdomain; e.g. "localhost" or "envs.example.com"
+  allocatedPorts   AllocatedPort[]
+  detectedDatabases Json?         // [{service, engine, port, user, password, database}] — refreshed on start
+  dbViewerOverrides Json?         // user-provided corrections, same shape as detectedDatabases
+  dbViewerContainerId String?     // docker container id of the Adminer sidecar (null = not running)
+  dbViewerPort      Int?          // host port published for Adminer (127.0.0.1:<port>)
+  dbViewerStatus    String?       // "starting" | "running" | "stopped" | "error"
+  dbViewerError     String?
+  qaBrowserMode     QaBrowserMode @default(sidecar)
+  qaBrowserContainerId String?    // sidecar mode: docker container id of the headed Chromium sidecar
+  qaBrowserCdpPort  Int?          // sidecar mode: host port for Chrome DevTools Protocol
+  qaBrowserVncPort  Int?          // sidecar mode: host port for KasmVNC web UI
+  qaBrowserStatus   String?       // "starting" | "running" | "stopped" | "error"
+  qaBrowserError    String?
+  // Per-env browser-served VS Code (code-server) — same sidecar pattern as
+  // dbViewer/qaBrowser. Stopped automatically on env stop/rebuild.
+  codeServerContainerId String?
+  codeServerPort        Int?
+  codeServerStatus      String?   // "starting" | "running" | "stopped" | "error"
+  codeServerError       String?
+  // Per-(env,user) `code tunnel` lifecycle for the desktop VS Code path
+  // lives in CodeTunnelInstance; nothing per-env is stored here.
+  chatEngine       ChatEngine     @default(agent_sdk)
+  // Per-env override of the workspace defaultModel. null = inherit workspace.
+  // Same value space as Workspace.defaultModel ("auto" | model id).
+  modelChoice      String?
+
+  createdBy        User?          @relation("EnvCreatedBy", fields: [createdById], references: [id])
+  createdById      String?
+  deletedAt        DateTime?
+  createdAt        DateTime       @default(now())
+
+  envRepos      EnvRepo[]
+  document      Document?
+  messages      Message[]
+  codeFiles     CodeFile[]
+  agentSessions AgentSession[]
+  sandboxes     Sandbox[]
+  chatSessions  ChatSession[]
+  knowledge     EnvKnowledge[]
+  agentDisables EnvAgentDisabled[]
+  humanQuestions HumanQuestion[]
+}
+
+model EnvKnowledge {
+  id          String   @id @default(cuid())
+  env         Env      @relation(fields: [envId], references: [id], onDelete: Cascade)
+  envId       String
+  slug        String
+  title       String
+  description String
+  content     String
+  source      String   @default("ai_self") // "ai_self" | "ai_from_correction" | "user"
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([envId, slug])
+  @@index([envId, createdAt])
+}
+
+model ChatSession {
+  id        String    @id @default(cuid())
+  env       Env       @relation(fields: [envId], references: [id])
+  envId     String
+  user      User      @relation(fields: [userId], references: [id])
+  userId    String
+  agent     Agent?    @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  agentId   String?
+  title     String?
+  claudeSessionId String?
+  sdkSessionId    String?
+  createdAt DateTime  @default(now())
+  messages  Message[]
+  humanQuestions HumanQuestion[]
+
+  @@index([envId, userId, createdAt])
+  @@index([envId, agentId, userId])
+}
+
+model Agent {
+  id                String        @id @default(cuid())
+  workspace         Workspace     @relation(fields: [workspaceId], references: [id])
+  workspaceId       String
+  slug              String
+  name              String
+  description       String
+  systemPrompt      String
+  greetingTemplate  String
+  toolToggles       Json?         // { bash, read, edit, write, webFetch, webSearch, grep, glob }; null = all enabled
+  mcpServers        Json?         // array of MCP server specs — DB-only field for this phase (no UI)
+  kind              String        @default("user_defined") // "user_defined" | "member_clone"
+  cloneForUser      User?         @relation("CloneOwner", fields: [cloneForUserId], references: [id], onDelete: Cascade)
+  cloneForUserId    String?
+  builtIn           Boolean       @default(false)
+  pinned            Boolean       @default(false)
+  position          Int           @default(0)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  skills            AgentSkill[]
+  files             AgentFile[]
+  chatSessions      ChatSession[]
+  envDisables       EnvAgentDisabled[]
+  humanQuestions    HumanQuestion[]
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId, pinned, position])
+  @@index([cloneForUserId])
+}
+
+model HumanQuestion {
+  id             String    @id @default(cuid())
+  agent          Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId        String
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  askedOfUser    User      @relation("AskedOf", fields: [askedOfUserId], references: [id], onDelete: Cascade)
+  askedOfUserId  String    // who receives the question (clone owner for clones, speaker for regular agents)
+  askerUser      User?     @relation("AskedBy", fields: [askerUserId], references: [id], onDelete: SetNull)
+  askerUserId    String?   // who was chatting when the agent asked (for context)
+  session        ChatSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  sessionId      String?
+  env            Env?      @relation(fields: [envId], references: [id], onDelete: SetNull)
+  envId          String?
+  question       String
+  answer         String?
+  status         String    @default("pending") // "pending" | "answered" | "dismissed"
+  createdAt      DateTime  @default(now())
+  answeredAt     DateTime?
+
+  @@index([askedOfUserId, status, createdAt])
+  @@index([workspaceId, status])
+}
+
+model EnvAgentDisabled {
+  id        String   @id @default(cuid())
+  env       Env      @relation(fields: [envId], references: [id], onDelete: Cascade)
+  envId     String
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId   String
+  createdAt DateTime @default(now())
+
+  @@unique([envId, agentId])
+  @@index([envId])
+}
+
+model AgentSkill {
+  id           String   @id @default(cuid())
+  agent        Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId      String
+  scope        String   // "workspace" | "env"
+  envId        String?
+  slug         String   // filesystem-friendly identifier used as directory name
+  name         String   // human-readable name (used in SKILL.md frontmatter)
+  description  String   // frontmatter `description` — Claude uses this to decide when to invoke
+  content      String   // SKILL.md body
+  source       String   @default("user") // "user" | "ai_self" | "ai_from_correction" | "seed"
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([agentId, envId, slug])
+  @@index([agentId, scope, envId])
+}
+
+model AgentFile {
+  id           String   @id @default(cuid())
+  agent        Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId      String
+  scope        String   // "workspace" | "env"
+  envId        String?
+  name         String   // filename (e.g., "architecture.md")
+  content      String   @db.Text
+  mimeType     String   @default("text/markdown")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([agentId, scope, envId])
+}
+
+model EnvRepo {
+  id             String   @id @default(cuid())
+  env            Env      @relation(fields: [envId], references: [id])
+  envId          String
+  repo           Repo     @relation(fields: [repoId], references: [id])
+  repoId         String
+  branch         String?
+  baseBranch     String?
+  envClonePath   String?
+  envCloneStatus String   @default("pending")
+  envCloneError  String?
+  createdAt      DateTime @default(now())
+
+  @@unique([envId, repoId])
+}
+
+model Document {
+  id          String       @id @default(cuid())
+  env         Env          @relation(fields: [envId], references: [id])
+  envId       String       @unique
+  content     String       @default("")
+  aiGenerated Boolean      @default(false)
+  updatedAt   DateTime     @updatedAt
+  updatedById String?
+  versions    DocVersion[]
+}
+
+model DocVersion {
+  id         String   @id @default(cuid())
+  document   Document @relation(fields: [documentId], references: [id])
+  documentId String
+  content    String
+  savedAt    DateTime @default(now())
+  savedById  String?
+}
+
+model Message {
+  id        String       @id @default(cuid())
+  env       Env          @relation(fields: [envId], references: [id])
+  envId     String
+  user      User         @relation(fields: [userId], references: [id])
+  userId    String
+  session   ChatSession? @relation(fields: [sessionId], references: [id])
+  sessionId String?
+  role      String
+  content   String
+  metadata  Json?
+  createdAt DateTime     @default(now())
+  attachments Attachment[]
+
+  @@index([envId, userId, sessionId, createdAt])
+}
+
+// User-uploaded files attached to a chat message. Stored on disk under
+// `<envDir>/.uploads/<messageId>/<filename>` so the agent can `Read` them
+// directly with its CWD-relative tools. Lifecycle tied to the env: when the
+// env's clone is wiped on delete, attachments go with it.
+model Attachment {
+  id           String   @id @default(cuid())
+  message      Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  messageId    String
+  envId        String   // denormalized so the download route can scope by env without joining Message
+  workspaceId  String   // denormalized for the workspace-membership access check
+  path         String   // POSIX relative path under envDir, e.g. ".uploads/<msgId>/photo.png"
+  mime         String
+  size         Int
+  originalName String
+  createdAt    DateTime @default(now())
+
+  @@index([messageId])
+  @@index([envId])
+}
+
+model CodeFile {
+  id        String   @id @default(cuid())
+  env       Env      @relation(fields: [envId], references: [id])
+  envId     String
+  path      String
+  content   String
+  accepted  Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model AgentSession {
+  id           String    @id @default(cuid())
+  env          Env       @relation(fields: [envId], references: [id])
+  envId        String
+  user         User      @relation(fields: [userId], references: [id])
+  userId       String
+  cliSessionId String?
+  status       String    @default("running")
+  prompt       String
+  turnCount    Int       @default(0)
+  toolCalls    Json      @default("[]")
+  commitSha    String?
+  errorMsg     String?
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+}
+
+model EnvTemplate {
+  id          String    @id @default(cuid())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  slug        String
+  name        String
+  description String?
+  composeFile String    // docker-compose.yml with ${VAR} placeholders
+  variables   Json      // TemplateVariable[] — see apps/api/src/templates/template.types.ts
+  routingMode       RoutingMode @default(port)
+  routingBaseDomain String?     // used when routingMode = subdomain; e.g. "localhost" or "envs.example.com"
+  qaBrowserMode     QaBrowserMode @default(sidecar) // baked into envs created from this template; user can't override at create time
+  agentInstructions String?     // free-text guidance for the devops agent when materializing envs
+  services          Json?       // TemplateService[] — per-service descriptions/roles. See template.types.ts
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  assets      EnvTemplateAsset[]
+  repos       EnvTemplateRepo[]
+  envs        Env[]
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId])
+}
+
+model EnvTemplateRepo {
+  id         String      @id @default(cuid())
+  template   EnvTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  templateId String
+  repo       Repo        @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  repoId     String
+  baseBranch String?
+  createdAt  DateTime    @default(now())
+
+  @@unique([templateId, repoId])
+  @@index([templateId])
+}
+
+model EnvTemplateAsset {
+  id         String      @id @default(cuid())
+  template   EnvTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  templateId String
+  path       String      // relative path under envDir (e.g. "assets/props.txt", "Dockerfile.servlet")
+  content    String      @db.Text
+  isTemplate Boolean     @default(false) // if true, run ${VAR} substitution on content at materialize time
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@unique([templateId, path])
+  @@index([templateId])
+}
+
+model AllocatedPort {
+  id        String   @id @default(cuid())
+  env       Env      @relation(fields: [envId], references: [id], onDelete: Cascade)
+  envId     String
+  key       String   // variable key from the template (e.g. "SERVLET_PORT")
+  hostPort  Int
+  createdAt DateTime @default(now())
+
+  @@unique([envId, key])
+  @@unique([hostPort])
+  @@index([envId])
+}
+
+model Sandbox {
+  id         String    @id @default(cuid())
+  env        Env       @relation(fields: [envId], references: [id])
+  envId      String
+  user       User      @relation(fields: [userId], references: [id])
+  userId     String
+  branchName String
+  status     String    @default("starting")
+  ports      Json      @default("{}")
+  services   Json      @default("{}")
+  errorMsg   String?
+  createdAt  DateTime  @default(now())
+  stoppedAt  DateTime?
+}

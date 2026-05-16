@@ -1,0 +1,38 @@
+{
+  "name": "withvibe",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Elastic-2.0",
+  "packageManager": "pnpm@9.15.0",
+  "homepage": "https://withvibe.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/withvibe/withvibe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/withvibe/withvibe/issues"
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter @withvibe/web dev",
+    "dev:api": "pnpm --filter @withvibe/api start:dev",
+    "dev": "pnpm -r --parallel --stream run dev",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "pnpm -r run lint"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@nestjs/core",
+      "@prisma/engines",
+      "esbuild",
+      "node-pty",
+      "prisma",
+      "sharp",
+      "unrs-resolver"
+    ]
+  }
+}

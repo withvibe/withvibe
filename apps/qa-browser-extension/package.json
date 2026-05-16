@@ -1,0 +1,19 @@
+{
+  "name": "@withvibe/qa-browser-extension",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Elastic-2.0",
+  "description": "Chrome extension that lets the WithVibe QA agent drive your real browser instead of a Docker sidecar.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "package": "node build.mjs --package",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.270",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.3"
+  }
+}

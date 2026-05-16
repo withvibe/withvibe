@@ -1,0 +1,13 @@
+{
+  "name": "example-multi-turn",
+  "envId": "cmourzyaw0000xbtmcoy3p65t",
+  "userId": "cmop6x1if0000svtmtrirttoy",
+  "engines": ["agent_sdk", "claude_code", "claude_code_direct"],
+  "iterations": 1,
+  "ccDirectCwd": "/absolute/path/to/your/withvibe/checkout",
+  "prompts": [
+    "Read the package.json at the workspace root and tell me the project name in one sentence.",
+    "Now list the top-level directories you see, sorted alphabetically.",
+    "Pick one of those directories and summarize what's in it in two sentences."
+  ]
+}
