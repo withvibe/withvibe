@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WithVibe QA Browser</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fff;
+        --fg: #111;
+        --muted: #666;
+        --border: #e5e5e5;
+        --accent: #4f46e5;
+        --ok: #16a34a;
+        --error: #dc2626;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b0b0d;
+          --fg: #f5f5f5;
+          --muted: #888;
+          --border: #2a2a2d;
+          --accent: #6366f1;
+          --ok: #22c55e;
+          --error: #f87171;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        font-size: 12px;
+        margin: 0;
+        padding: 12px;
+        width: 320px;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      h1 {
+        font-size: 13px;
+        font-weight: 600;
+        margin: 0 0 8px;
+      }
+      label {
+        display: block;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        margin-bottom: 4px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 70px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        padding: 6px;
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        resize: vertical;
+      }
+      .row {
+        display: flex;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      button {
+        flex: 1;
+        padding: 6px 10px;
+        font-size: 12px;
+        font-weight: 500;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--fg);
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .status {
+        margin-top: 12px;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        word-break: break-all;
+      }
+      .status .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 6px;
+        background: var(--muted);
+      }
+      .status.connected .dot { background: var(--ok); }
+      .status.error .dot { background: var(--error); }
+      .status .meta {
+        font-size: 10px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .help {
+        margin-top: 10px;
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>WithVibe QA Browser</h1>
+    <label for="pairing">Pairing code</label>
+    <textarea
+      id="pairing"
+      placeholder="Paste the pairing URL from the env's QA Browser tab"
+    ></textarea>
+    <div class="row">
+      <button id="connect" class="primary">Connect</button>
+      <button id="disconnect">Disconnect</button>
+    </div>
+    <div id="status" class="status">
+      <span class="dot"></span><span id="status-label">disconnected</span>
+      <div id="status-meta" class="meta"></div>
+    </div>
+    <p class="help">
+      Generate a pairing code from the env's <em>QA Browser</em> tab in the
+      WithVibe web app, paste it above, and click Connect. The agent will
+      drive your active tab while connected.
+    </p>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

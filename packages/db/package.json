@@ -1,0 +1,46 @@
+{
+  "name": "@withvibe/db",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Elastic-2.0",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./profile-constants": {
+      "types": "./dist/src/profile-constants.d.ts",
+      "default": "./dist/src/profile-constants.js"
+    },
+    "./user-display": {
+      "types": "./dist/src/user-display.d.ts",
+      "default": "./dist/src/user-display.js"
+    }
+  },
+  "scripts": {
+    "generate": "prisma generate",
+    "build": "tsc -p tsconfig.json",
+    "prebuild": "pnpm generate",
+    "db:push": "prisma db push",
+    "db:seed": "prisma db seed",
+    "studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.7.0",
+    "@prisma/client": "^7.7.0",
+    "bcryptjs": "^3.0.3",
+    "pg": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^20",
+    "@types/pg": "^8.20.0",
+    "dotenv": "^16.4.7",
+    "prisma": "^7.7.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}

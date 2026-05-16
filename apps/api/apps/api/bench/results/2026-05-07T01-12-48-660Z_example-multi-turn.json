@@ -1,0 +1,352 @@
+{
+  "scenario": "example-multi-turn",
+  "envId": "cmourzyaw0000xbtmcoy3p65t",
+  "startedAt": "2026-05-07T01:12:48.660Z",
+  "finishedAt": "2026-05-07T01:14:09.748Z",
+  "iterations": 1,
+  "engines": [
+    "agent_sdk",
+    "claude_code",
+    "claude_code_direct"
+  ],
+  "prompts": [
+    "Read the package.json at the workspace root and tell me the project name in one sentence.",
+    "Now list the top-level directories you see, sorted alphabetically.",
+    "Pick one of those directories and summarize what's in it in two sentences."
+  ],
+  "runs": [
+    {
+      "engine": "agent_sdk",
+      "iteration": 1,
+      "sessionId": "cmouskqvs0000uktmz9qu366f",
+      "turns": [
+        {
+          "turnIdx": 0,
+          "prompt": "Read the package.json at the workspace root and tell me the project name in one sentence.",
+          "ttftMs": 6833,
+          "totalMs": 7617,
+          "harnessOverheadMs": 101,
+          "phases": {
+            "dispatchMs": 0,
+            "ctxBuildMs": 100,
+            "queryStartMs": 101
+          },
+          "systemAppendSha256": "3df4ca8a4a5e95cd",
+          "systemAppendBytes": 14681,
+          "numTurns": 2,
+          "inputTokens": 7,
+          "outputTokens": 219,
+          "cacheReadTokens": 58954,
+          "cacheCreationTokens": 262,
+          "totalCostUsd": 0.0370645,
+          "toolLatencies": [
+            {
+              "name": "Read",
+              "durationMs": 61,
+              "isError": true
+            }
+          ],
+          "toolCallsByName": {
+            "Read": 1
+          },
+          "errored": null
+        },
+        {
+          "turnIdx": 1,
+          "prompt": "Now list the top-level directories you see, sorted alphabetically.",
+          "ttftMs": 5119,
+          "totalMs": 5231,
+          "harnessOverheadMs": 81,
+          "phases": {
+            "dispatchMs": 0,
+            "ctxBuildMs": 81,
+            "queryStartMs": 81
+          },
+          "systemAppendSha256": "3df4ca8a4a5e95cd",
+          "systemAppendBytes": 14681,
+          "numTurns": 2,
+          "inputTokens": 7,
+          "outputTokens": 175,
+          "cacheReadTokens": 59572,
+          "cacheCreationTokens": 270,
+          "totalCostUsd": 0.0358835,
+          "toolLatencies": [
+            {
+              "name": "Bash",
+              "durationMs": 528,
+              "isError": false
+            }
+          ],
+          "toolCallsByName": {
+            "Bash": 1
+          },
+          "errored": null
+        },
+        {
+          "turnIdx": 2,
+          "prompt": "Pick one of those directories and summarize what's in it in two sentences.",
+          "ttftMs": 5405,
+          "totalMs": 7306,
+          "harnessOverheadMs": 66,
+          "phases": {
+            "dispatchMs": 0,
+            "ctxBuildMs": 66,
+            "queryStartMs": 66
+          },
+          "systemAppendSha256": "3df4ca8a4a5e95cd",
+          "systemAppendBytes": 14681,
+          "numTurns": 2,
+          "inputTokens": 7,
+          "outputTokens": 312,
+          "cacheReadTokens": 60095,
+          "cacheCreationTokens": 1190,
+          "totalCostUsd": 0.04532,
+          "toolLatencies": [
+            {
+              "name": "Bash",
+              "durationMs": 347,
+              "isError": false
+            }
+          ],
+          "toolCallsByName": {
+            "Bash": 1
+          },
+          "errored": null
+        }
+      ],
+      "totalMs": 20154,
+      "sumInputTokens": 21,
+      "sumOutputTokens": 706,
+      "sumCacheReadTokens": 178621,
+      "sumCacheCreationTokens": 1722,
+      "cacheHitRatio": 0.9903362089995786,
+      "totalCostUsd": 0.118268
+    },
+    {
+      "engine": "claude_code",
+      "iteration": 1,
+      "sessionId": "cmousl6ft0001uktm1y7e0zlf",
+      "turns": [
+        {
+          "turnIdx": 0,
+          "prompt": "Read the package.json at the workspace root and tell me the project name in one sentence.",
+          "ttftMs": 9296,
+          "totalMs": 10434,
+          "harnessOverheadMs": 1226,
+          "phases": {
+            "dispatchMs": 0,
+            "ctxBuildMs": 66,
+            "queryStartMs": 1226
+          },
+          "systemAppendSha256": "3df4ca8a4a5e95cd",
+          "systemAppendBytes": 14681,
+          "numTurns": 2,
+          "inputTokens": 7,
+          "outputTokens": 168,
+          "cacheReadTokens": 29600,
+          "cacheCreationTokens": 29752,
+          "totalCostUsd": 0.20542,
+          "toolLatencies": [
+            {
+              "name": "Read",
+              "durationMs": 98,
+              "isError": true
+            }
+          ],
+          "toolCallsByName": {
+            "Read": 1
+          },
+          "errored": null
+        },
+        {
+          "turnIdx": 1,
+          "prompt": "Now list the top-level directories you see, sorted alphabetically.",
+          "ttftMs": 5931,
+          "totalMs": 7263,
+          "harnessOverheadMs": 177,
+          "phases": {
+            "dispatchMs": 0,
+            "ctxBuildMs": 96,
+            "queryStartMs": 177
+          },
+          "systemAppendSha256": "3df4ca8a4a5e95cd",
+          "systemAppendBytes": 14681,
+          "numTurns": 2,
+          "inputTokens": 7,
+          "outputTokens": 205,
+          "cacheReadTokens": 59602,
+          "cacheCreationTokens": 649,
+          "totalCostUsd": 0.039017249999999996,
+          "toolLatencies": [
+            {
+              "name": "Bash",
+              "durationMs": 84,
+              "isError": false
+            }
+          ],
+          "toolCallsByName": {
+            "Bash": 1
+          },
+          "errored": null
+        },
+        {
+          "turnIdx": 2,
+          "prompt": "Pick one of those directories and summarize what's in it in two sentences.",
+          "ttftMs": 6750,
+          "totalMs": 8503,
+          "harnessOverheadMs": 178,
+          "phases": {
+            "dispatchMs": 0,
+            "ctxBuildMs": 84,
+            "queryStartMs": 178
+          },
+          "systemAppendSha256": "3df4ca8a4a5e95cd",
+          "systemAppendBytes": 14681,
+          "numTurns": 2,
+          "inputTokens": 7,
+          "outputTokens": 283,
+          "cacheReadTokens": 60913,
+          "cacheCreationTokens": 362,
+          "totalCostUsd": 0.039829,
+          "toolLatencies": [
+            {
+              "name": "Bash",
+              "durationMs": 70,
+              "isError": false
+            }
+          ],
+          "toolCallsByName": {
+            "Bash": 1
+          },
+          "errored": null
+        }
+      ],
+      "totalMs": 26200,
+      "sumInputTokens": 21,
+      "sumOutputTokens": 656,
+      "sumCacheReadTokens": 150115,
+      "sumCacheCreationTokens": 30763,
+      "cacheHitRatio": 0.8298276939065445,
+      "totalCostUsd": 0.28426625
+    },
+    {
+      "engine": "claude_code_direct",
+      "iteration": 1,
+      "sessionId": "805ad56c-9d5a-40d2-b3b5-dc6e15cb4ffa",
+      "turns": [
+        {
+          "turnIdx": 0,
+          "prompt": "Read the package.json at the workspace root and tell me the project name in one sentence.",
+          "ttftMs": 14322,
+          "totalMs": 14900,
+          "harnessOverheadMs": null,
+          "phases": {
+            "dispatchMs": null,
+            "ctxBuildMs": null,
+            "queryStartMs": null
+          },
+          "systemAppendSha256": null,
+          "systemAppendBytes": null,
+          "numTurns": 3,
+          "inputTokens": 7,
+          "outputTokens": 180,
+          "cacheReadTokens": 12797,
+          "cacheCreationTokens": 6935,
+          "totalCostUsd": 0.05427725,
+          "toolLatencies": [
+            {
+              "name": "ToolSearch",
+              "durationMs": 73,
+              "isError": false
+            },
+            {
+              "name": "Read",
+              "durationMs": 23,
+              "isError": false
+            }
+          ],
+          "toolCallsByName": {
+            "ToolSearch": 1,
+            "Read": 1
+          },
+          "errored": null
+        },
+        {
+          "turnIdx": 1,
+          "prompt": "Now list the top-level directories you see, sorted alphabetically.",
+          "ttftMs": 10007,
+          "totalMs": 11038,
+          "harnessOverheadMs": null,
+          "phases": {
+            "dispatchMs": null,
+            "ctxBuildMs": null,
+            "queryStartMs": null
+          },
+          "systemAppendSha256": null,
+          "systemAppendBytes": null,
+          "numTurns": 3,
+          "inputTokens": 7,
+          "outputTokens": 205,
+          "cacheReadTokens": 21598,
+          "cacheCreationTokens": 5958,
+          "totalCostUsd": 0.053196499999999994,
+          "toolLatencies": [
+            {
+              "name": "ToolSearch",
+              "durationMs": 51,
+              "isError": false
+            },
+            {
+              "name": "Bash",
+              "durationMs": 383,
+              "isError": false
+            }
+          ],
+          "toolCallsByName": {
+            "ToolSearch": 1,
+            "Bash": 1
+          },
+          "errored": null
+        },
+        {
+          "turnIdx": 2,
+          "prompt": "Pick one of those directories and summarize what's in it in two sentences.",
+          "ttftMs": 5284,
+          "totalMs": 7045,
+          "harnessOverheadMs": null,
+          "phases": {
+            "dispatchMs": null,
+            "ctxBuildMs": null,
+            "queryStartMs": null
+          },
+          "systemAppendSha256": null,
+          "systemAppendBytes": null,
+          "numTurns": 2,
+          "inputTokens": 4,
+          "outputTokens": 148,
+          "cacheReadTokens": 14899,
+          "cacheCreationTokens": 6121,
+          "totalCostUsd": 0.04942575,
+          "toolLatencies": [
+            {
+              "name": "Bash",
+              "durationMs": 405,
+              "isError": false
+            }
+          ],
+          "toolCallsByName": {
+            "Bash": 1
+          },
+          "errored": null
+        }
+      ],
+      "totalMs": 32983,
+      "sumInputTokens": 18,
+      "sumOutputTokens": 533,
+      "sumCacheReadTokens": 49294,
+      "sumCacheCreationTokens": 19014,
+      "cacheHitRatio": 0.7214530339841349,
+      "totalCostUsd": 0.1568995
+    }
+  ]
+}
