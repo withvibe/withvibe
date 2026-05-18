@@ -119,7 +119,7 @@ Input: \`{ "path": "<path>" }\`
 - "user-input" — collected from the end-user on the create-env form.
 - "secret" — pulled from the workspace secret store (secretName).
 - "default" — static value baked into the template.
-- "service-url" — resolves to the URL of another service. Subdomain mode → http://<service>.env-<id>.<baseDomain>. Port mode → http://host:<portKey value>.
+- "service-url" — resolves to the URL of another service. Subdomain mode → http://<service>-<id>.<baseDomain>. Port mode → http://host:<portKey value>.
 
 Variable keys are UPPER_SNAKE_CASE. Reference them in compose with \${KEY}.
 

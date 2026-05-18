@@ -106,6 +106,9 @@ type Defaults = {
   // prompts. Real-domain installs (custom mode) get full HTTPS.
   traefik: {
     baseDomain: string;
+    // Base domain for env-service subdomains (`<svc>-<short>.<envRoutingBase>`).
+    // Decoupled from baseDomain so the TLS-cert wildcard level can differ.
+    envRoutingBase: string;
     acmeEmail: string;
     httpPort: number;
     httpsPort: number;
@@ -144,6 +147,7 @@ async function buildDefaults(installDir: string): Promise<Defaults> {
     enableCodeServer: true,
     traefik: {
       baseDomain: "localhost",
+      envRoutingBase: "localhost",
       acmeEmail: "admin@localhost",
       httpPort: ports.traefikHttp,
       httpsPort: ports.traefikHttps,
@@ -155,6 +159,7 @@ type Answers = Omit<Defaults, "traefik"> & {
   // Custom mode lets the user opt out of Traefik entirely.
   traefik: {
     baseDomain: string;
+    envRoutingBase: string;
     acmeEmail: string;
     httpPort: number;
     httpsPort: number;
@@ -348,15 +353,14 @@ export async function runInit(opts: InitOptions): Promise<void> {
   }
   if (answers.traefik) {
     envValues.TRAEFIK_BASE_DOMAIN = answers.traefik.baseDomain;
-    // Demo templates + env-service subdomains route under this. It's the
-    // same domain Traefik serves, so derive it (skip the localhost preset —
-    // there the api's built-in default is fine and a localhost value is
-    // meaningless for subdomain routing).
-    if (
-      answers.traefik.baseDomain &&
-      answers.traefik.baseDomain !== "localhost"
-    ) {
-      envValues.WITHVIBE_ROUTING_BASE_DOMAIN = answers.traefik.baseDomain;
+    // Demo templates + env-service subdomains route under the (possibly
+    // decoupled) env routing base; falls back to the Traefik domain. Skip the
+    // localhost preset — there the api's built-in default is fine and a
+    // localhost value is meaningless for subdomain routing.
+    const routingBase =
+      answers.traefik.envRoutingBase || answers.traefik.baseDomain;
+    if (routingBase && routingBase !== "localhost") {
+      envValues.WITHVIBE_ROUTING_BASE_DOMAIN = routingBase;
     }
     envValues.TRAEFIK_ACME_EMAIL = answers.traefik.acmeEmail;
     envValues.TRAEFIK_HTTP_HOST_PORT = String(answers.traefik.httpPort);
@@ -619,6 +623,27 @@ async function collectAnswers(
           ? true
           : "Enter `localhost` or a real domain like withvibe.example.com",
     });
+    // Env-service subdomains route under this. Decoupled from the Traefik
+    // base domain: env services use the single-label host
+    // `<svc>-<short>.<envRoutingBase>`, so the TLS cert must cover
+    // `*.<envRoutingBase>` (which may sit at a different level than the UI
+    // host). Meaningless for localhost — skip the prompt there.
+    const envRoutingBase =
+      baseDomain.trim().toLowerCase() === "localhost"
+        ? baseDomain.trim()
+        : (
+            await ask({
+              type: "text",
+              name: "v",
+              message:
+                "Env subdomain base domain (services at <svc>-<id>.<this>; cert must cover *.<this>):",
+              initial: baseDomain.trim(),
+              validate: (v: string) =>
+                /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(v.trim())
+                  ? true
+                  : "Enter a valid domain",
+            })
+          ).trim();
     const acmeEmail = await ask({
       type: "text",
       name: "v",
@@ -638,6 +663,7 @@ async function collectAnswers(
     );
     traefik = {
       baseDomain: baseDomain.trim(),
+      envRoutingBase,
       acmeEmail: acmeEmail.trim(),
       httpPort,
       httpsPort,

@@ -37,6 +37,12 @@ export type InstallState = {
     // operator supplied (the files are copied into <installDir>/certs/).
     certPath?: string;
     keyPath?: string;
+    // Base domain for env-service subdomains + demo templates (env services
+    // are reached at `<svc>-<short>.<envRoutingBase>` — a single label, so
+    // the TLS cert must cover `*.<envRoutingBase>`). May differ from
+    // baseDomain when the cert wildcard sits at a different level than the
+    // platform UI host. Absent ⇒ falls back to baseDomain.
+    envRoutingBase?: string;
   };
 };
 

@@ -117,6 +117,14 @@ async function maybeBackup(
   // pg_dump runs INSIDE the postgres container so we don't need the client
   // installed on the host. Pull POSTGRES_USER/DB from the env file via the
   // compose service environment — easiest by exec'ing the container.
+  //
+  // --clean --if-exists: emit `DROP ... IF EXISTS` before each `CREATE` so the
+  //   dump restores idempotently OVER an existing database. Without these, a
+  //   rollback (offerRollback pipes this into psql while the schema/data are
+  //   still present) prints a flood of cosmetic `ERROR: relation "…" already
+  //   exists` lines that look alarming but are harmless — confusing users.
+  // --no-owner --no-privileges: skip ALTER OWNER / GRANT lines that otherwise
+  //   error with `role "…" does not exist` when restored into a fresh volume.
   const dump = await compose(
     installDir,
     [
@@ -125,7 +133,7 @@ async function maybeBackup(
       "postgres",
       "sh",
       "-c",
-      'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"',
+      'pg_dump --clean --if-exists --no-owner --no-privileges -U "$POSTGRES_USER" "$POSTGRES_DB"',
     ],
     { stream: false }
   );

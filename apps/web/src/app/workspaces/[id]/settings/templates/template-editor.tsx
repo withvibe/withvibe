@@ -135,7 +135,7 @@ const KIND_OPTIONS: { value: TemplateVariableKind; label: string; help: string }
   {
     value: "service-url",
     label: "Service URL",
-    help: "Resolves to the full URL of another service in this env. Subdomain mode → http://<service>.env-<id>.<base>. Port mode → http://host:<portKey's value>.",
+    help: "Resolves to the full URL of another service in this env. Subdomain mode → http://<service>-<id>.<base>. Port mode → http://host:<portKey's value>.",
   },
 ];
 

@@ -1,6 +1,6 @@
 {
   "name": "withvibe",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "withvibe CLI — install/manage the server stack and run shared environments locally.",
   "license": "Elastic-2.0",
   "type": "module",

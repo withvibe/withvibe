@@ -7,7 +7,7 @@ import { BadRequestException } from "@nestjs/common";
 //   - secret       → pulled from a vault (placeholder for now — read from env var)
 //   - default      → static value baked into the template
 //   - service-url  → resolves to the full URL where `service` can be reached.
-//                    Subdomain mode: http://<service>.env-<id>.<baseDomain>
+//                    Subdomain mode: http://<service>-<id>.<baseDomain>
 //                    Port mode:      http://${PUBLIC_HOST}:${<portKey value>}
 export type TemplateVariableKind =
   | "system-port"

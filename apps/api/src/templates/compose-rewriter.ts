@@ -144,7 +144,12 @@ export function rewriteComposeForSubdomain(input: RewriteInput): RewriteOutput {
 
     const xSubdomain = readScalarString(svc, "x-subdomain");
     const sub = xSubdomain || svcName;
-    const host = `${sub}.env-${short}.${baseDomain}`;
+    // Single-label host under the routing base domain: `<svc>-<short>.<base>`.
+    // The platform's wildcard DNS + TLS cert are single-label (`*.<base>`), so
+    // a two-label host like `<svc>.env-<short>.<base>` fails DNS *and* can't be
+    // matched by the wildcard cert. Matches the convention chat-context.service
+    // hands to ad-hoc-env agents — keep the two in sync.
+    const host = `${sub}-${short}.${baseDomain}`;
     const routerId = `env-${short}-${svcName}`;
     // Authoritative port priority: explicit existing traefik server.port label
     // (template author's intent) → ports → expose → x-port → 80.

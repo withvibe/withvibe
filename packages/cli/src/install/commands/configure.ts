@@ -132,6 +132,29 @@ async function configureTraefik(
   const domain = baseDomain.trim();
   state.features.traefik = true;
 
+  // Env-service subdomains + demo templates route under this. Decoupled from
+  // the Traefik base domain on purpose: env services are reached at the
+  // single-label host `<svc>-<short>.<routingBase>`, so the TLS cert must
+  // cover `*.<routingBase>`. When the operator's wildcard sits at a different
+  // level than the platform UI host (e.g. UI at dev.example.com but the cert
+  // is *.example.com), point env routing at the level the cert covers.
+  const routingBaseInput = await ask({
+    type: "text",
+    name: "v",
+    message: "Env subdomain base domain (services at <svc>-<id>.<this>):",
+    initial: state.traefik?.envRoutingBase ?? domain,
+    validate: (v: string) =>
+      /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(v.trim())
+        ? true
+        : "Enter a valid domain",
+  });
+  const routingBase = routingBaseInput.trim();
+  if (routingBase !== domain) {
+    log.dim(
+      `Env services will use *.${routingBase} — make sure your TLS cert covers that wildcard.`
+    );
+  }
+
   const { v: certMethod } = await prompts(
     {
       type: "select",
@@ -175,6 +198,7 @@ async function configureTraefik(
       tls: "byocert",
       certPath: certSrc,
       keyPath: keySrc,
+      envRoutingBase: routingBase,
     };
     await mergeEnv(installDir, {
       TRAEFIK_BASE_DOMAIN: domain,
@@ -203,6 +227,7 @@ async function configureTraefik(
       baseDomain: domain,
       tls: "acme",
       acmeEmail: acmeEmail.trim(),
+      envRoutingBase: routingBase,
     };
     await mergeEnv(installDir, {
       TRAEFIK_BASE_DOMAIN: domain,
@@ -214,10 +239,10 @@ async function configureTraefik(
     log.ok(`Traefik configured for ${domain} (Let's Encrypt).`);
   }
 
-  // Demo templates + env-service subdomains route under the Traefik domain
-  // (covers both the byocert and acme branches above). `domain` is always a
-  // real validated domain here, never localhost.
-  await mergeEnv(installDir, { WITHVIBE_ROUTING_BASE_DOMAIN: domain });
+  // Demo templates + env-service subdomains route under the chosen env
+  // routing base (defaults to the Traefik domain; both branches above set it).
+  // Always a real validated domain here, never localhost.
+  await mergeEnv(installDir, { WITHVIBE_ROUTING_BASE_DOMAIN: routingBase });
 
   // The localhost→domain switch is incomplete unless the public URLs move
   // too, so offer it right here instead of making the user also visit the
