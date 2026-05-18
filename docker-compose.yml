@@ -28,7 +28,9 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-withvibe}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-withvibe}
+      # Required — no weak default. `docker compose up` fails fast if unset
+      # so an install can never silently come up on a guessable password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set a strong value in .env (e.g. openssl rand -hex 24)}
       POSTGRES_DB: ${POSTGRES_DB:-withvibe}
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -49,8 +51,11 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-withvibe}:${POSTGRES_PASSWORD:-withvibe}@postgres:5432/${POSTGRES_DB:-withvibe}
-      INTERNAL_JWT_SECRET: ${INTERNAL_JWT_SECRET}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-withvibe}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-withvibe}
+      # Signs every session + bridge/MCP/WS token. Required, no default —
+      # the api ALSO refuses to boot in production on a weak/placeholder
+      # value (see common/startup-secrets.ts). Generate: openssl rand -hex 32
+      INTERNAL_JWT_SECRET: "${INTERNAL_JWT_SECRET:?INTERNAL_JWT_SECRET is required - generate with openssl rand -hex 32}"
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
@@ -58,6 +63,10 @@ services:
       WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:-http://localhost:3000}
       API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:4000}
       PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+      # Wildcard base domain for subdomain-routed env services + demo
+      # templates. Empty ⇒ the api falls back to its built-in default.
+      # The CLI sets this to the Traefik base domain at install time.
+      WITHVIBE_ROUTING_BASE_DOMAIN: ${WITHVIBE_ROUTING_BASE_DOMAIN:-}
       # Name of the external Docker network Traefik is attached to. The
       # subdomain rewriter joins each exposed env service to this network
       # and points Traefik labels at it. Must match the network's `name:`

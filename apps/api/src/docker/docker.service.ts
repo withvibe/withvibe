@@ -9,6 +9,10 @@ import { EnvCloneService } from "../env-clones/env-clone.service";
 import { StorageService } from "../storage/storage.service";
 import { detectDatabasesFromFile } from "./database-detection";
 import { composeProjectName } from "./compose-naming";
+import {
+  assertComposeFileSafe,
+  ComposeSecurityError,
+} from "./compose-security";
 import { DbViewerService } from "./db-viewer.service";
 import { BrowserSidecarService } from "./browser-sidecar.service";
 import { PlaywrightMcpService } from "./playwright-mcp.service";
@@ -50,6 +54,9 @@ type ComposeContext = {
   composeFile: string;
   source: "custom" | "workspace" | "repo";
   repoName?: string;
+  // The env's own directory — the containment root the compose-security
+  // gate uses: bind-mount sources must resolve inside it.
+  envDir: string;
 };
 
 // ---------- service --------------------------------------------------------
@@ -224,7 +231,7 @@ export class DockerService {
         await this.storage.writeCompose(env.workspaceId, envId, env.composeFile);
         await this.storage.syncToEnvClone(env.workspaceId, envId);
       }
-      return { composeFile: customPath, source: "custom" };
+      return { composeFile: customPath, source: "custom", envDir };
     }
 
     // 2) Uploaded assets folder — if the user dropped a compose under
@@ -233,13 +240,13 @@ export class DockerService {
     const assetsDir = path.join(envDir, "assets");
     const assetCompose = await this.detectComposeRecursive(assetsDir);
     if (assetCompose) {
-      return { composeFile: assetCompose, source: "workspace" };
+      return { composeFile: assetCompose, source: "workspace", envDir };
     }
 
     // 3) Env-root compose — natural spot for multi-repo setups.
     const envRootCompose = await this.detectCompose(envDir);
     if (envRootCompose) {
-      return { composeFile: envRootCompose, source: "workspace" };
+      return { composeFile: envRootCompose, source: "workspace", envDir };
     }
 
     // 3) Repo-level compose — first env clone with a compose file wins.
@@ -263,6 +270,7 @@ export class DockerService {
           composeFile: compose,
           source: "repo",
           repoName: er.repo.name,
+          envDir,
         };
       }
     }
@@ -292,6 +300,45 @@ export class DockerService {
     void this.rebuildBg(envId);
   }
 
+  /**
+   * Authoritative compose-security gate. Resolves the compose exactly as
+   * `docker compose up` will (interpolation/anchors/extends/include) and
+   * rejects host-escape directives — privileged, host namespaces, device
+   * passthrough, the Docker socket, and bind mounts that resolve outside
+   * the env's own directory. Returns true if safe; on rejection it records
+   * the env error + log line and returns false.
+   *
+   * This sits at the single run chokepoint, so it covers EVERY compose
+   * source: custom, uploaded asset, env-root (which the autonomous agent
+   * writes itself), repo-derived, and post-rewrite template.
+   */
+  private async assertComposeSafe(
+    envId: string,
+    ctx: ComposeContext,
+    tag: "start" | "rebuild"
+  ): Promise<boolean> {
+    try {
+      await assertComposeFileSafe(
+        ctx.composeFile,
+        ctx.envDir,
+        this.composeProjectName(envId),
+        // The platform's own rewriter attaches subdomain-routed env services
+        // to the operator's Traefik proxy network (declared external). Allow
+        // exactly that network; any other external network is still rejected.
+        // Default mirrors TemplateMaterializerService.proxyNetworkName().
+        { allowedExternalNetworks: [process.env.PROXY_NETWORK || "proxy"] }
+      );
+      return true;
+    } catch (err) {
+      if (err instanceof ComposeSecurityError) {
+        this.pushLog(envId, `[${tag}] ${err.message}\n`);
+        await this.setStatus(envId, "error", { error: err.message });
+        return false;
+      }
+      throw err;
+    }
+  }
+
   private async startBg(envId: string): Promise<void> {
     this.clearLogBuffer(envId);
     this.pushLog(envId, `[start] resolving compose file…\n`);
@@ -305,6 +352,7 @@ export class DockerService {
       envId,
       `[start] using compose: ${ctx.composeFile} (${ctx.source})\n`
     );
+    if (!(await this.assertComposeSafe(envId, ctx, "start"))) return;
     await this.refreshDetectedDatabases(envId, ctx.composeFile);
     const proj = this.composeProjectName(envId);
     try {
@@ -383,6 +431,9 @@ export class DockerService {
       envId,
       `[rebuild] using compose: ${ctx.composeFile} (${ctx.source})\n`
     );
+    // Gate BEFORE any teardown so a rejected compose never disrupts a
+    // currently-running env.
+    if (!(await this.assertComposeSafe(envId, ctx, "rebuild"))) return;
     await this.refreshDetectedDatabases(envId, ctx.composeFile);
     // Rebuild does compose down first — sidecar networks are about to vanish.
     await this.dbViewer.stopQuiet(envId);

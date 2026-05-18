@@ -64,6 +64,7 @@ const ENV_KEY_ORDER = [
   "REPO_BASE_DIR",
   "LOG_LEVEL",
   "WITHVIBE_VERSION",
+  "WITHVIBE_ROUTING_BASE_DOMAIN",
   "TRAEFIK_BASE_DOMAIN",
   "TRAEFIK_ACME_EMAIL",
   "TRAEFIK_HTTP_HOST_PORT",
@@ -81,6 +82,8 @@ const ENV_COMMENTS: Record<string, string> = {
   REPO_BASE_DIR:
     "Where the api stores per-env clones. Bind-mounted into the api container at the SAME path (DooD path-parity).",
   TRAEFIK_BASE_DOMAIN: "Traefik base domain (only used when Traefik is enabled).",
+  WITHVIBE_ROUTING_BASE_DOMAIN:
+    "Wildcard base domain for env-service subdomains + demo templates. Defaults to the Traefik base domain.",
   TRAEFIK_HTTP_HOST_PORT:
     "Host-side ports Traefik listens on. Default 80/443; auto-bumped on macOS where 80 is often taken by AirPlay.",
 };
@@ -345,6 +348,16 @@ export async function runInit(opts: InitOptions): Promise<void> {
   }
   if (answers.traefik) {
     envValues.TRAEFIK_BASE_DOMAIN = answers.traefik.baseDomain;
+    // Demo templates + env-service subdomains route under this. It's the
+    // same domain Traefik serves, so derive it (skip the localhost preset —
+    // there the api's built-in default is fine and a localhost value is
+    // meaningless for subdomain routing).
+    if (
+      answers.traefik.baseDomain &&
+      answers.traefik.baseDomain !== "localhost"
+    ) {
+      envValues.WITHVIBE_ROUTING_BASE_DOMAIN = answers.traefik.baseDomain;
+    }
     envValues.TRAEFIK_ACME_EMAIL = answers.traefik.acmeEmail;
     envValues.TRAEFIK_HTTP_HOST_PORT = String(answers.traefik.httpPort);
     envValues.TRAEFIK_HTTPS_HOST_PORT = String(answers.traefik.httpsPort);

@@ -20,6 +20,10 @@ import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { AgentSeedService } from "../agents/agent-seed.service";
 import { DockerService } from "../docker/docker.service";
+import {
+  assertComposeStringSafe,
+  ComposeSecurityError,
+} from "../docker/compose-security";
 import { TemplateMaterializerService } from "../templates/template-materializer.service";
 import { PortAllocatorService } from "../ports/port-allocator.service";
 import { ClaudeRunnerService } from "../runner/claude-runner.service";
@@ -171,6 +175,27 @@ export class EnvsService {
     };
   }
 
+  /**
+   * Fail-fast compose check at save time so an obviously-dangerous paste is
+   * rejected with a 400 immediately. NOT the security boundary — the
+   * authoritative gate runs at start/rebuild in DockerService (it resolves
+   * ${VAR}/extends/include and the realpath containment). This is purely UX.
+   */
+  private assertComposeOrBadRequest(yaml: string): void {
+    try {
+      // Allow the operator's Traefik proxy network (external) — the rewriter
+      // attaches subdomain envs to it. Mirrors the api-side default in
+      // TemplateMaterializerService.proxyNetworkName().
+      assertComposeStringSafe(yaml, {
+        allowedExternalNetworks: [process.env.PROXY_NETWORK || "proxy"],
+      });
+    } catch (err) {
+      if (err instanceof ComposeSecurityError)
+        throw new BadRequestException(err.message);
+      throw err;
+    }
+  }
+
   async create(
     userId: string,
     workspaceId: string,
@@ -208,6 +233,7 @@ export class EnvsService {
         "Provide either a template or a custom compose file, not both"
       );
     }
+    if (userComposeFile) this.assertComposeOrBadRequest(userComposeFile);
     const templateVars = this.parseTemplateVars(body.templateVars);
 
     let template: {
@@ -617,6 +643,8 @@ export class EnvsService {
       data.composeFile = null;
     } else if (typeof body.composeFile === "string") {
       data.composeFile = body.composeFile.trim() ? body.composeFile : null;
+      if (typeof data.composeFile === "string")
+        this.assertComposeOrBadRequest(data.composeFile);
     }
     if (
       typeof body.chatEngine === "string" &&

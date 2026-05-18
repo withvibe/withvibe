@@ -10,7 +10,8 @@
     "start:prod": "node dist/main.js",
     "build": "rm -f tsconfig.build.tsbuildinfo && nest build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "bench:chat": "ts-node -r tsconfig-paths/register src/chat/bench/run-bench.ts"
+    "bench:chat": "ts-node -r tsconfig-paths/register src/chat/bench/run-bench.ts",
+    "check:compose-security": "ts-node -r tsconfig-paths/register src/docker/compose-security.check.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",

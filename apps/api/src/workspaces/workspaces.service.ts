@@ -60,10 +60,13 @@ const DEMO_TEMPLATE_SPECS: DemoTemplateSpec[] = [
     description: "vibe-aquarium",
     composeFile: VIBE_AQUARIUM_COMPOSE,
     routingMode: "subdomain",
-    // Self-hosters point this at their own wildcard domain. Defaults to the
-    // hosted withvibe.dev install when unset.
+    // Self-hosters point this at their own wildcard domain via
+    // WITHVIBE_ROUTING_BASE_DOMAIN (the CLI sets it at install time). When
+    // unset we fall back to "localhost" — NOT a vendor domain — so local /
+    // from-source installs don't route env URLs at withvibe.dev. Mirrors the
+    // per-env fallback in EnvsService.
     routingBaseDomain:
-      process.env.WITHVIBE_ROUTING_BASE_DOMAIN || "app.withvibe.dev",
+      process.env.WITHVIBE_ROUTING_BASE_DOMAIN || "localhost",
     services: [],
   },
 ];

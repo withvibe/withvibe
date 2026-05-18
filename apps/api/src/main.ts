@@ -12,6 +12,7 @@ import { UserBrowserGateway } from "./docker/user-browser.gateway";
 import { QaViewGateway } from "./docker/qa-view.gateway";
 import { QaViewHttpProxy } from "./docker/qa-view.http-proxy";
 import { SidecarProxy } from "./docker/sidecar-proxy";
+import { assertSecretsAtBoot } from "./common/startup-secrets";
 
 // The api runs as root (needs docker.sock) but spawns the claude runner as
 // gid 1500. Default umask 022 produces 0644 files / 0755 dirs — claude
@@ -23,6 +24,10 @@ import { SidecarProxy } from "./docker/sidecar-proxy";
 process.umask(0o002);
 
 async function bootstrap() {
+  // C4: fail closed on a weak/empty/placeholder INTERNAL_JWT_SECRET before
+  // doing any work. In production this exits; outside it warns loudly.
+  assertSecretsAtBoot(process.env, new Logger("Startup"));
+
   const logLevels: LogLevel[] =
     process.env.LOG_LEVEL === "debug"
       ? ["debug", "log", "warn", "error", "fatal"]

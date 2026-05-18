@@ -65,6 +65,15 @@ const PHASES: Phase[] = [
 
 type Status = "idle" | "starting" | "running" | "done" | "error";
 
+/**
+ * How many times consumeStream re-subscribes when the SSE stream closes with
+ * a `session_idle` *before any run activity was seen*. That happens when the
+ * panel attaches before the scan's agent run is registered for the session
+ * (opening the panel from chat races the kickoff) — the server emits a
+ * synthetic `session_idle` meaning "nothing to watch yet", not "scan done".
+ */
+const SCAN_REATTACH_ATTEMPTS = 3;
+
 const SEVERITY_ORDER: Severity[] = ["critical", "high", "medium", "low"];
 
 const SEVERITY_STYLE: Record<
@@ -221,6 +230,11 @@ export function SecurityPanel({
   const abortRef = useRef<AbortController | null>(null);
   const liveTextRef = useRef("");
   const mountedRef = useRef(true);
+  // Set synchronously when this mount carries a scanRequest (panel opened
+  // from the chat "Run security scan" button). It tells the reattach effect
+  // to stand down so startScan is the single owner of the stream — otherwise
+  // both race, cross-abort each other, and wipe the live transcript.
+  const scanRequestActiveRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -259,112 +273,185 @@ export function SecurityPanel({
     [workspaceId, envId]
   );
 
+  // Poll the active-run summary until it reports `running` (or we give up /
+  // are aborted). Used to wait out the kickoff→registration window before
+  // re-subscribing, instead of mistaking "not started yet" for "finished".
+  const waitForRunningRun = useCallback(
+    async (sessionId: string, signal: AbortSignal): Promise<boolean> => {
+      for (let i = 0; i < 5; i++) {
+        if (signal.aborted || !mountedRef.current) return false;
+        try {
+          const ar = await fetch(
+            `/api/workspaces/${workspaceId}/envs/${envId}/messages/active-run?sessionId=${encodeURIComponent(
+              sessionId
+            )}`,
+            { signal }
+          );
+          if (ar.ok) {
+            const { status: runStatus } = (await ar.json()) as {
+              status: string;
+            };
+            if (runStatus === "running") return true;
+          }
+        } catch {
+          if (signal.aborted) return false;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return false;
+    },
+    [workspaceId, envId]
+  );
+
   const consumeStream = useCallback(
     async (sessionId: string) => {
       const controller = new AbortController();
       abortRef.current?.abort();
       abortRef.current = controller;
       liveTextRef.current = "";
-      let res: Response;
-      try {
-        res = await fetch(
-          `/api/workspaces/${workspaceId}/envs/${envId}/messages/active-run/stream?sessionId=${encodeURIComponent(
-            sessionId
-          )}`,
-          { signal: controller.signal }
-        );
-      } catch {
-        if (mountedRef.current) {
-          setStatus("error");
-          setError("Couldn't connect to the scan stream.");
-        }
-        return;
-      }
-      if (!res.ok || !res.body) {
-        if (mountedRef.current) {
-          setStatus("error");
-          setError("The scan stream is unavailable.");
-        }
-        return;
-      }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let ended = false;
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const frames = buffer.split("\n\n");
-          buffer = frames.pop() || "";
-          for (const raw of frames) {
-            if (!raw.startsWith("data:")) continue;
-            const json = raw.slice(5).trim();
-            if (!json) continue;
-            let ev: {
-              type: string;
-              delta?: string;
-              name?: string;
-              input?: unknown;
-              status?: string;
-            };
-            try {
-              ev = JSON.parse(json);
-            } catch {
-              continue;
-            }
-            if (ev.type === "text" && typeof ev.delta === "string") {
-              liveTextRef.current += ev.delta;
-              const idx = phaseIndexFromText(liveTextRef.current);
-              if (mountedRef.current) {
-                setPhaseIdx((prev) => (idx > prev ? idx : prev));
-              }
-            } else if (ev.type === "thinking") {
-              if (mountedRef.current)
-                setActivity((a) => trimActivity(a, "Analyzing…"));
-            } else if (ev.type === "tool_use" && ev.name) {
-              const line = describeTool(ev.name, ev.input);
-              if (mountedRef.current)
-                setActivity((a) => trimActivity(a, line));
-            } else if (ev.type === "session_idle") {
-              ended = true;
-            }
-          }
-          if (ended) break;
-        }
-      } catch (err) {
-        if (
-          !controller.signal.aborted &&
-          (err as { name?: string })?.name !== "AbortError"
-        ) {
+      for (let attempt = 0; ; attempt++) {
+        let res: Response;
+        try {
+          res = await fetch(
+            `/api/workspaces/${workspaceId}/envs/${envId}/messages/active-run/stream?sessionId=${encodeURIComponent(
+              sessionId
+            )}`,
+            { signal: controller.signal }
+          );
+        } catch {
+          if (controller.signal.aborted) return;
           if (mountedRef.current) {
             setStatus("error");
-            setError("The scan stream was interrupted.");
+            setError("Couldn't connect to the scan stream.");
           }
           return;
         }
-      }
+        if (!res.ok || !res.body) {
+          if (mountedRef.current) {
+            setStatus("error");
+            setError("The scan stream is unavailable.");
+          }
+          return;
+        }
 
-      if (!mountedRef.current) return;
-      // Stream finished — pull the persisted final message and parse it.
-      const parsed = parseScanResult(liveTextRef.current);
-      if (parsed) {
-        setResult(parsed);
-        setNarrative(cleanNarrative(liveTextRef.current));
-        setRanAt(new Date().toISOString());
-        setPhaseIdx(PHASES.length);
-        setStatus("done");
-      } else {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let ended = false;
+        // Did we observe any sign of a real agent run on this stream? The
+        // server replays `run_started` for every registered run, so its
+        // absence before `session_idle` means we attached to nothing — the
+        // run isn't registered for this session yet, not that it finished.
+        let sawRun = false;
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const frames = buffer.split("\n\n");
+            buffer = frames.pop() || "";
+            for (const raw of frames) {
+              if (!raw.startsWith("data:")) continue;
+              const json = raw.slice(5).trim();
+              if (!json) continue;
+              let ev: {
+                type: string;
+                delta?: string;
+                name?: string;
+                input?: unknown;
+                status?: string;
+              };
+              try {
+                ev = JSON.parse(json);
+              } catch {
+                continue;
+              }
+              if (ev.type === "text" && typeof ev.delta === "string") {
+                sawRun = true;
+                liveTextRef.current += ev.delta;
+                const idx = phaseIndexFromText(liveTextRef.current);
+                if (mountedRef.current) {
+                  setPhaseIdx((prev) => (idx > prev ? idx : prev));
+                }
+              } else if (ev.type === "thinking") {
+                sawRun = true;
+                if (mountedRef.current)
+                  setActivity((a) => trimActivity(a, "Analyzing…"));
+              } else if (ev.type === "tool_use" && ev.name) {
+                sawRun = true;
+                const line = describeTool(ev.name, ev.input);
+                if (mountedRef.current)
+                  setActivity((a) => trimActivity(a, line));
+              } else if (
+                ev.type === "run_started" ||
+                ev.type === "run_ended"
+              ) {
+                sawRun = true;
+              } else if (ev.type === "session_idle") {
+                ended = true;
+              }
+            }
+            if (ended) break;
+          }
+        } catch (err) {
+          if (
+            !controller.signal.aborted &&
+            (err as { name?: string })?.name !== "AbortError"
+          ) {
+            if (mountedRef.current) {
+              setStatus("error");
+              setError("The scan stream was interrupted.");
+            }
+          }
+          // Aborted streams are owned by a newer consumeStream — let it
+          // decide the outcome rather than reporting a phantom result.
+          return;
+        }
+
+        if (controller.signal.aborted || !mountedRef.current) return;
+
+        const parsed = parseScanResult(liveTextRef.current);
+        if (parsed) {
+          setResult(parsed);
+          setNarrative(cleanNarrative(liveTextRef.current));
+          setRanAt(new Date().toISOString());
+          setPhaseIdx(PHASES.length);
+          setStatus("done");
+          return;
+        }
+
+        // No parseable result. If we never saw a run, the stream closed on a
+        // synthetic `session_idle` because the run wasn't registered yet —
+        // wait for it to come up and re-subscribe instead of erroring out.
+        if (!sawRun && attempt < SCAN_REATTACH_ATTEMPTS) {
+          const running = await waitForRunningRun(
+            sessionId,
+            controller.signal
+          );
+          if (controller.signal.aborted || !mountedRef.current) return;
+          if (running) {
+            liveTextRef.current = "";
+            continue;
+          }
+        }
+
+        // Either a real run ended without a machine-readable result, or no
+        // run ever appeared. Fall back to any persisted report, then surface
+        // an accurate message.
         await loadLatestReport(sessionId);
+        if (!mountedRef.current) return;
         setStatus((s) => (s === "running" ? "error" : s));
         setError((e) =>
-          e ?? "The scan finished but produced no parseable result."
+          e ??
+          (sawRun
+            ? "The scan finished but produced no parseable result."
+            : "Couldn't attach to the security scan. Try running it again.")
         );
+        return;
       }
     },
-    [workspaceId, envId, loadLatestReport]
+    [workspaceId, envId, loadLatestReport, waitForRunningRun]
   );
 
   const startScan = useCallback(async () => {
@@ -398,13 +485,17 @@ export function SecurityPanel({
   }, [workspaceId, envId, consumeStream]);
 
   // On mount: load any prior report and reattach to a running scan.
+  // Skipped entirely when this mount carries a scanRequest — there startScan
+  // is the single owner of the stream, and racing it here would cross-abort
+  // the live connection and wipe the transcript.
   useEffect(() => {
+    if (scanRequestActiveRef.current) return;
     let cancelled = false;
     (async () => {
       const res = await fetch(
         `/api/workspaces/${workspaceId}/envs/${envId}/security-scan`
       );
-      if (!res.ok || cancelled) return;
+      if (!res.ok || cancelled || scanRequestActiveRef.current) return;
       const { sessionId } = (await res.json()) as {
         sessionId: string | null;
       };
@@ -417,9 +508,9 @@ export function SecurityPanel({
           sessionId
         )}`
       );
-      if (!ar.ok || cancelled) return;
+      if (!ar.ok || cancelled || scanRequestActiveRef.current) return;
       const { status: runStatus } = (await ar.json()) as { status: string };
-      if (runStatus === "running" && !cancelled) {
+      if (runStatus === "running" && !cancelled && !scanRequestActiveRef.current) {
         setStatus("running");
         setResult(null);
         void consumeStream(sessionId);
@@ -434,6 +525,9 @@ export function SecurityPanel({
   // the parent) so reopening the panel later doesn't replay a stale one.
   useEffect(() => {
     if (scanRequest == null) return;
+    // Claim ownership of the stream synchronously so the reattach effect —
+    // which runs first but defers its work behind an await — stands down.
+    scanRequestActiveRef.current = true;
     onScanHandled?.();
     if (status === "running" || status === "starting") return;
     void startScan();

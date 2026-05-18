@@ -214,6 +214,11 @@ async function configureTraefik(
     log.ok(`Traefik configured for ${domain} (Let's Encrypt).`);
   }
 
+  // Demo templates + env-service subdomains route under the Traefik domain
+  // (covers both the byocert and acme branches above). `domain` is always a
+  // real validated domain here, never localhost.
+  await mergeEnv(installDir, { WITHVIBE_ROUTING_BASE_DOMAIN: domain });
+
   // The localhost→domain switch is incomplete unless the public URLs move
   // too, so offer it right here instead of making the user also visit the
   // "Public URLs" menu.
