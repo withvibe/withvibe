@@ -156,6 +156,7 @@ export class EnvsService {
       chatEngine: env.chatEngine,
       qaBrowserMode: env.qaBrowserMode,
       modelChoice: env.modelChoice,
+      sandboxBypass: env.sandboxBypass,
       runnerStatus,
       createdAt: env.createdAt,
       createdBy: env.createdBy,
@@ -183,9 +184,12 @@ export class EnvsService {
    */
   private assertComposeOrBadRequest(yaml: string): void {
     try {
-      // Allow the operator's Traefik proxy network (external) — the rewriter
-      // attaches subdomain envs to it. Mirrors the api-side default in
-      // TemplateMaterializerService.proxyNetworkName().
+      // Best-effort save-time fail-fast on the RAW (pre-rewrite) compose,
+      // which normally names no proxy network at all — the rewriter injects
+      // the per-env external net later. We still allow the legacy shared
+      // PROXY_NETWORK so a hand-authored compose referencing it isn't
+      // rejected here; the authoritative runtime gate (DockerService) also
+      // allows this env's per-env `<project>-edge` net.
       assertComposeStringSafe(yaml, {
         allowedExternalNetworks: [process.env.PROXY_NETWORK || "proxy"],
       });
@@ -321,13 +325,23 @@ export class EnvsService {
       }
     }
 
-    // Template with repos fully owns the repo list — ignore whatever the
-    // client sent. Otherwise fall back to the client-provided repos.
+    // Template with repos owns the repo *list*, but the client may still
+    // override each repo's base branch at create time (the New Environment
+    // form's per-repo branch picker). Overrides are keyed by repoId; an
+    // absent or empty override falls back to the template's configured
+    // branch, and entries for repos the template doesn't attach are ignored.
+    // Without a template we use the client-provided repos wholesale.
     let repos: RepoBaseInput[];
     if (template && template.repos.length > 0) {
+      const overrides = new Map<string, string | null>(
+        (Array.isArray(body.repos) ? (body.repos as unknown[]) : [])
+          .map((r) => this.parseRepoInput(r))
+          .filter((r): r is RepoBaseInput => r !== null)
+          .map((r) => [r.id, r.baseBranch] as const)
+      );
       repos = template.repos.map((r) => ({
         id: r.repoId,
-        baseBranch: r.baseBranch,
+        baseBranch: overrides.get(r.repoId) ?? r.baseBranch,
       }));
     } else {
       repos = Array.isArray(body.repos)
@@ -608,6 +622,7 @@ export class EnvsService {
       chatEngine?: unknown;
       qaBrowserMode?: unknown;
       modelChoice?: unknown;
+      sandboxBypass?: unknown;
     }
   ) {
     await this.access.member(userId, workspaceId);
@@ -626,6 +641,7 @@ export class EnvsService {
       chatEngine?: ChatEngine;
       qaBrowserMode?: QaBrowserMode;
       modelChoice?: string | null;
+      sandboxBypass?: boolean | null;
     } = {};
     if (typeof body.title === "string" && body.title.trim()) {
       data.title = body.title.trim();
@@ -669,6 +685,11 @@ export class EnvsService {
       ).includes(body.modelChoice)
     ) {
       data.modelChoice = body.modelChoice;
+    }
+    // sandboxBypass: null = inherit workspace/deployment; true/false force
+    // Claude Bypass Permissions on/off for this env's `code tunnel`.
+    if (body.sandboxBypass === null || typeof body.sandboxBypass === "boolean") {
+      data.sandboxBypass = body.sandboxBypass;
     }
 
     const reposChanged = Array.isArray(body.repos);

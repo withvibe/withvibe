@@ -18,10 +18,13 @@ import {
 import {
   rebaseBuildPaths,
   rewriteComposeForSubdomain,
+  readTcpExposed,
+  injectPublishedPort,
 } from "./compose-rewriter";
 import { AgentVariableBinderService } from "./agent-variable-binder.service";
 import { SecretsService } from "../workspaces/secrets.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
+import { composeProjectName } from "../docker/compose-naming";
 
 // ${VAR_NAME} — uppercase letters/digits/underscore, must start with a letter.
 const INTERPOLATION_RE = /\$\{([A-Z][A-Z0-9_]*)\}/g;
@@ -100,12 +103,40 @@ export class TemplateMaterializerService {
   }
 
   /**
-   * Name of the external Docker network Traefik is attached to. The
-   * subdomain rewriter uses this to wire each exposed service to Traefik.
-   * Override per deployment via PROXY_NETWORK in the API process env.
+   * Per-env external Docker network Traefik is connected to for THIS env's
+   * subdomain routing. Phase 2 multi-tenant isolation: every subdomain env
+   * gets its OWN network (`<project>-edge`) instead of all envs sharing one
+   * flat proxy net, so one env's bare service name can never resolve to
+   * another env's container. DockerService creates/removes this network and
+   * (dis)connects Traefik around the env lifecycle; the name is deterministic
+   * from the envId so both sides agree without extra plumbing.
    */
-  private proxyNetworkName(): string {
-    return this.config.get<string>("PROXY_NETWORK") || "proxy";
+  private perEnvProxyNetwork(envId: string): string {
+    return `${composeProjectName(envId)}-edge`;
+  }
+
+  /** Phase 4 — external TCP exposure (e.g. a DB reachable from another
+   * machine). OFF by default; the operator must set WITHVIBE_TCP_EXPOSE and
+   * allowlist the env (by id) or its template (by id or slug). Optional
+   * WITHVIBE_TCP_BIND pins the publish to one host interface (e.g. a VPN IP)
+   * instead of all interfaces. Fail-closed: unauthorized → no port published. */
+  private tcpExposeAllowed(
+    envId: string,
+    templateId: string,
+    templateSlug: string
+  ): boolean {
+    if (!(this.config.get<string>("WITHVIBE_TCP_EXPOSE") || "").trim())
+      return false;
+    const csv = (name: string): Set<string> =>
+      new Set(
+        (this.config.get<string>(name) || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      );
+    if (csv("WITHVIBE_TCP_EXPOSE_ENVS").has(envId)) return true;
+    const tpls = csv("WITHVIBE_TCP_EXPOSE_TEMPLATES");
+    return tpls.has(templateId) || tpls.has(templateSlug);
   }
 
   /**
@@ -235,7 +266,7 @@ export class TemplateMaterializerService {
         composeYaml: sourceComposeYaml,
         envId: args.envId,
         baseDomain,
-        proxyNetworkName: this.proxyNetworkName(),
+        proxyNetworkName: this.perEnvProxyNetwork(args.envId),
         traefikEntrypoint: this.traefikEntrypoint(),
         traefikCertResolver: this.traefikCertResolver(),
       });
@@ -245,6 +276,46 @@ export class TemplateMaterializerService {
         `Env ${args.envId} compose rewritten for subdomain routing: ` +
           `${rewritten.exposedServices.length} service(s) exposed via ${baseDomain}`
       );
+    }
+
+    // Phase 4: publish a unique host port for services that opted into
+    // external TCP access — but ONLY for operator-authorized envs. Runs in
+    // both routing modes (works on the post-rewrite compose). The marker
+    // alone grants nothing; this is the single place the port is published.
+    const tcpServices = readTcpExposed(composeToWrite);
+    if (tcpServices.length > 0) {
+      const names = tcpServices.map((t) => t.service).join(", ");
+      if (this.tcpExposeAllowed(args.envId, tpl.id, tpl.slug)) {
+        const bindIp =
+          (this.config.get<string>("WITHVIBE_TCP_BIND") || "").trim() ||
+          undefined;
+        const host = this.config.get<string>("PUBLIC_HOST") || "localhost";
+        for (const { service, containerPort } of tcpServices) {
+          const key = `tcp_${service}`;
+          const { [key]: hostPort } = await this.ports.allocate(args.envId, [
+            key,
+          ]);
+          composeToWrite = injectPublishedPort(
+            composeToWrite,
+            service,
+            hostPort,
+            containerPort,
+            bindIp
+          );
+          allocatedPorts[key] = hostPort;
+          this.logger.log(
+            `Env ${args.envId} TCP-exposed ${service}: ` +
+              `${bindIp ? bindIp + ":" : ""}${host}:${hostPort} → :${containerPort}`
+          );
+        }
+      } else {
+        this.logger.warn(
+          `Env ${args.envId}: service(s) ${names} request x-expose-tcp but ` +
+            `the env is not authorized (set WITHVIBE_TCP_EXPOSE and allowlist ` +
+            `the env id or template via WITHVIBE_TCP_EXPOSE_ENVS / ` +
+            `WITHVIBE_TCP_EXPOSE_TEMPLATES) — NOT publishing any port`
+        );
+      }
     }
 
     const reserved = this.reservedVars();

@@ -12,6 +12,7 @@ import {
   KeyRound,
   Layers,
   Plus,
+  ShieldAlert,
   Sparkles,
   Trash2,
   X,
@@ -44,6 +45,7 @@ type Integrations = {
   allowDirectMerge: boolean;
   debugMode: boolean;
   defaultModel: ModelChoice;
+  sandboxBypass: boolean | null;
 };
 
 type Role = "admin" | "member" | null;
@@ -149,6 +151,15 @@ export default function SettingsPage(
               id={id}
               isAdmin={isAdmin}
               value={data.defaultModel}
+              onChange={load}
+            />
+
+            <Divider />
+
+            <SandboxBypassRow
+              id={id}
+              isAdmin={isAdmin}
+              value={data.sandboxBypass}
               onChange={load}
             />
           </Section>
@@ -619,6 +630,122 @@ function DefaultModelRow({
                 type="button"
                 disabled={saving}
                 onClick={() => pick(opt.id)}
+                className={[
+                  "w-full text-left rounded-md border px-3 py-2 transition-smooth",
+                  active
+                    ? "bg-primary/10 border-primary/40"
+                    : "bg-card hover:bg-muted/40 border-border/60",
+                  saving && !active ? "opacity-50" : "",
+                ].join(" ")}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs font-semibold">
+                    {opt.label}
+                  </span>
+                  {active && (
+                    <Check className="size-3 text-primary" aria-hidden />
+                  )}
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-0.5">
+                  {opt.description}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </SettingRow>
+  );
+}
+
+const SANDBOX_OPTIONS: {
+  key: string;
+  val: boolean | null;
+  label: string;
+  description: string;
+}[] = [
+  {
+    key: "inherit",
+    val: null,
+    label: "Inherit deployment default",
+    description:
+      "Use the IS_SANDBOX setting on the API server (default: on). Envs can still override this.",
+  },
+  {
+    key: "on",
+    val: true,
+    label: "On — allow Bypass Permissions",
+    description:
+      "Claude Code may run in Bypass Permissions mode in this workspace's desktop/tunnel VS Code sessions, even though the API runs as root.",
+  },
+  {
+    key: "off",
+    val: false,
+    label: "Off — permission prompts",
+    description:
+      "Claude runs with normal permission prompts in tunnel VS Code; Bypass Permissions mode is unavailable for this workspace.",
+  },
+];
+
+function SandboxBypassRow({
+  id,
+  isAdmin,
+  value,
+  onChange,
+}: {
+  id: string;
+  isAdmin: boolean;
+  value: boolean | null;
+  onChange: () => void;
+}) {
+  const [saving, setSaving] = useState(false);
+
+  async function pick(next: boolean | null) {
+    if (next === value || saving) return;
+    setSaving(true);
+    const res = await fetch(`/api/workspaces/${id}/settings/integrations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sandboxBypass: next }),
+    });
+    setSaving(false);
+    if (res.ok) {
+      toast.success("Bypass Permissions policy updated");
+      onChange();
+    } else {
+      toast.error("Failed to save");
+    }
+  }
+
+  const current =
+    SANDBOX_OPTIONS.find((o) => o.val === value) ?? SANDBOX_OPTIONS[0];
+
+  return (
+    <SettingRow
+      icon={<ShieldAlert className="size-4 text-amber-400" />}
+      title="Claude Bypass Permissions (tunnel VS Code)"
+      hint="Controls whether Claude Code may auto-approve actions (Bypass Permissions mode) in the desktop/tunnel VS Code path. The API runs as root, so this needs the IS_SANDBOX escape hatch. Envs can override this per-env."
+      badge={
+        <Badge
+          variant="outline"
+          className="font-mono text-[10px] text-muted-foreground"
+        >
+          {current.label}
+        </Badge>
+      }
+    >
+      {!isAdmin ? (
+        <p className="text-xs text-muted-foreground">Admins only.</p>
+      ) : (
+        <div className="space-y-2">
+          {SANDBOX_OPTIONS.map((opt) => {
+            const active = opt.val === value;
+            return (
+              <button
+                key={opt.key}
+                type="button"
+                disabled={saving}
+                onClick={() => pick(opt.val)}
                 className={[
                   "w-full text-left rounded-md border px-3 py-2 transition-smooth",
                   active

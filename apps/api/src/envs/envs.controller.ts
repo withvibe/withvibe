@@ -70,6 +70,7 @@ export class EnvsController {
       chatEngine?: unknown;
       qaBrowserMode?: unknown;
       modelChoice?: unknown;
+      sandboxBypass?: unknown;
     }
   ) {
     return this.envs.update(user.id, workspaceId, envId, body);

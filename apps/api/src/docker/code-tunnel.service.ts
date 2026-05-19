@@ -97,6 +97,8 @@ export class CodeTunnelService implements OnModuleDestroy {
         id: true,
         title: true,
         workspaceId: true,
+        sandboxBypass: true,
+        workspace: { select: { sandboxBypass: true } },
       },
     });
     if (!env) return { ok: false, status: "error", error: "Env not found" };
@@ -181,6 +183,18 @@ export class CodeTunnelService implements OnModuleDestroy {
           cwd: envDir,
           stdio: ["ignore", "pipe", "pipe"],
           detached: false,
+          // The tunnel server hosts the Claude Code extension, which inherits
+          // this env. The API host runs as root, so opening a session in
+          // Bypass Permissions mode spawns `claude
+          // --dangerously-skip-permissions`, which aborts as root unless
+          // IS_SANDBOX=1 (Claude Code's documented escape hatch for
+          // sandboxed/containerized hosts). Whether that's enabled is
+          // resolved per-env → per-workspace → deployment default; see
+          // resolveSandboxEnv.
+          env: this.resolveSandboxEnv(
+            env.sandboxBypass,
+            env.workspace.sandboxBypass
+          ),
         }
       );
 
@@ -356,6 +370,31 @@ export class CodeTunnelService implements OnModuleDestroy {
 
   private key(userId: string, envId: string): string {
     return `${userId}:${envId}`;
+  }
+
+  /**
+   * Build the env for the spawned `code tunnel` child, deciding whether the
+   * hosted Claude Code extension may run in Bypass Permissions mode as root.
+   *
+   * Resolution (first non-null wins): per-env override → workspace default
+   * → deployment default (the `IS_SANDBOX` env on the api container, set by
+   * docker-compose to `1` by default). When the resolved value is false we
+   * explicitly strip `IS_SANDBOX` from the inherited env so the deployment
+   * default can't leak through — Claude then runs with permission prompts
+   * (Bypass Permissions mode unavailable for that env's tunnel).
+   */
+  private resolveSandboxEnv(
+    envOverride: boolean | null,
+    workspaceDefault: boolean | null
+  ): NodeJS.ProcessEnv {
+    const deploymentDefault = /^(1|true)$/i.test(
+      process.env.IS_SANDBOX ?? ""
+    );
+    const enabled = envOverride ?? workspaceDefault ?? deploymentDefault;
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (enabled) env.IS_SANDBOX = "1";
+    else delete env.IS_SANDBOX;
+    return env;
   }
 
   private tunnelName(envId: string, userId: string): string {

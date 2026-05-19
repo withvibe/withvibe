@@ -26,6 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RoutingModeFields, type RoutingMode } from "@/components/routing-mode-fields";
+import { BranchCombobox } from "@/components/branch-combobox";
 import { Loader2 } from "lucide-react";
 
 type Repo = {
@@ -178,17 +179,38 @@ export default function NewEnvironmentPage(
           loading: false,
         },
       }));
-      if (data.defaultBranch && !chosenBranch[repoId]) {
-        setChosenBranch((prev) => ({ ...prev, [repoId]: data.defaultBranch! }));
+      if (data.defaultBranch) {
+        // Don't clobber a branch already chosen — e.g. a template's
+        // configured base branch seeded before this fetch resolves. The
+        // functional update keeps it race-safe against the seeding effect.
+        setChosenBranch((prev) =>
+          prev[repoId] ? prev : { ...prev, [repoId]: data.defaultBranch! }
+        );
       }
     },
-    [id, branchInfo, chosenBranch]
+    [id, branchInfo]
   );
 
   // Preload branches for repos selected by default.
   useEffect(() => {
     for (const repoId of selectedRepoIds) loadBranches(repoId);
   }, [selectedRepoIds, loadBranches]);
+
+  // When a template owns the repos, preload each repo's branch list and seed
+  // its picker with the template's configured base branch. If the template
+  // left it unset, loadBranches falls back to the repo's default branch.
+  useEffect(() => {
+    if (!templateOwnsRepos || !selectedTemplate) return;
+    for (const r of selectedTemplate.repos) {
+      const tb = r.baseBranch;
+      if (tb) {
+        setChosenBranch((prev) =>
+          prev[r.repoId] === undefined ? { ...prev, [r.repoId]: tb } : prev
+        );
+      }
+      void loadBranches(r.repoId);
+    }
+  }, [templateOwnsRepos, selectedTemplate, loadBranches]);
 
   function toggleRepo(repoId: string) {
     setSelectedRepoIds((prev) => {
@@ -207,10 +229,18 @@ export default function NewEnvironmentPage(
     setSubmitting(true);
     setError("");
 
-    const reposPayload = Array.from(selectedRepoIds).map((repoId) => ({
-      id: repoId,
-      baseBranch: chosenBranch[repoId] || null,
-    }));
+    // For template-owned repos, send only base-branch overrides — the server
+    // still owns the repo list and falls back to the template's configured
+    // branch for anything we leave null.
+    const reposPayload = templateOwnsRepos
+      ? selectedTemplate!.repos.map((r) => ({
+          id: r.repoId,
+          baseBranch: chosenBranch[r.repoId] || null,
+        }))
+      : Array.from(selectedRepoIds).map((repoId) => ({
+          id: repoId,
+          baseBranch: chosenBranch[repoId] || null,
+        }));
 
     // Strip values for variables that aren't user-input — the UI may carry
     // stale entries if a template was swapped, and the API would reject or
@@ -230,7 +260,7 @@ export default function NewEnvironmentPage(
       body: JSON.stringify({
         title,
         description,
-        repos: templateOwnsRepos ? [] : reposPayload,
+        repos: reposPayload,
         composeFile: templateId ? null : composeFile.trim() || null,
         templateId,
         templateVars: templateId ? scrubbedVars : undefined,
@@ -388,22 +418,48 @@ export default function NewEnvironmentPage(
               {templateOwnsRepos ? (
                 <>
                   <p className="text-xs text-muted-foreground">
-                    Repositories are set by the selected template.
+                    Repositories are set by the template. You can still pick a
+                    different base branch per repo before creating this env.
                   </p>
                   <div className="rounded-md border divide-y divide-border/60">
-                    {selectedTemplate!.repos.map((r) => (
-                      <div
-                        key={r.repoId}
-                        className="flex items-center gap-3 px-3 py-2"
-                      >
-                        <span className="text-sm font-mono">
-                          {r.repo.name}
-                        </span>
-                        <span className="ml-auto text-xs font-mono text-muted-foreground">
-                          {r.baseBranch || "default branch"}
-                        </span>
-                      </div>
-                    ))}
+                    {selectedTemplate!.repos.map((r) => {
+                      const info = branchInfo[r.repoId];
+                      const repoMeta = repos?.find((x) => x.id === r.repoId);
+                      const ready = repoMeta?.cloneStatus === "ready";
+                      return (
+                        <div
+                          key={r.repoId}
+                          className="flex items-center gap-3 px-3 py-2"
+                        >
+                          <span className="text-sm font-mono">
+                            {r.repo.name}
+                          </span>
+                          <div className="ml-auto w-48">
+                            {!ready ? (
+                              <span className="text-xs text-muted-foreground font-mono">
+                                {repoMeta
+                                  ? `branch picker disabled — clone ${repoMeta.cloneStatus}`
+                                  : "loading…"}
+                              </span>
+                            ) : info?.loading ? (
+                              <Skeleton className="h-8 rounded-md" />
+                            ) : (
+                              <BranchCombobox
+                                branches={info?.branches || []}
+                                value={chosenBranch[r.repoId] || null}
+                                defaultBranch={info?.defaultBranch}
+                                onValueChange={(v) =>
+                                  setChosenBranch((prev) => ({
+                                    ...prev,
+                                    [r.repoId]: v,
+                                  }))
+                                }
+                              />
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </>
               ) : (
@@ -464,39 +520,38 @@ export default function NewEnvironmentPage(
                             default
                           </Badge>
                         )}
-                        {checked && (
-                          <div className="ml-auto w-48">
-                            {!ready ? (
-                              <span className="text-xs text-muted-foreground font-mono">
-                                branch picker disabled — clone {r.cloneStatus}
-                              </span>
-                            ) : info?.loading ? (
-                              <Skeleton className="h-8 rounded-md" />
-                            ) : (
-                              <Select
-                                value={chosenBranch[r.id] || ""}
-                                onValueChange={(v) =>
-                                  setChosenBranch((prev) => ({
-                                    ...prev,
-                                    [r.id]: v,
-                                  }))
-                                }
-                              >
-                                <SelectTrigger size="sm" className="font-mono">
-                                  <SelectValue placeholder="Base branch" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {(info?.branches || []).map((b) => (
-                                    <SelectItem key={b} value={b}>
-                                      {b}
-                                      {b === info?.defaultBranch && " (default)"}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            )}
-                          </div>
-                        )}
+                        <div className="ml-auto w-48">
+                          {!checked ? (
+                            // Always show the picker, but branches only load
+                            // once the repo is checked (toggleRepo →
+                            // loadBranches). Disabled until then.
+                            <BranchCombobox
+                              branches={[]}
+                              value={null}
+                              disabled
+                              placeholder="Select repo first"
+                              onValueChange={() => {}}
+                            />
+                          ) : !ready ? (
+                            <span className="text-xs text-muted-foreground font-mono">
+                              branch picker disabled — clone {r.cloneStatus}
+                            </span>
+                          ) : !info || info.loading ? (
+                            <Skeleton className="h-8 rounded-md" />
+                          ) : (
+                            <BranchCombobox
+                              branches={info.branches || []}
+                              value={chosenBranch[r.id] || null}
+                              defaultBranch={info.defaultBranch}
+                              onValueChange={(v) =>
+                                setChosenBranch((prev) => ({
+                                  ...prev,
+                                  [r.id]: v,
+                                }))
+                              }
+                            />
+                          )}
+                        </div>
                       </div>
                     );
                   })}

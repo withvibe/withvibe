@@ -112,6 +112,11 @@ model Workspace {
   // router each turn; concrete ids ("claude-opus-4-7", "claude-sonnet-4-6",
   // "claude-haiku-4-5") pin every turn to that model. Envs may override per-env.
   defaultModel      String    @default("auto")
+  // Whether Claude Code may run in Bypass Permissions mode (IS_SANDBOX=1)
+  // in this workspace's `code tunnel` sessions. The api runs as root, so
+  // bypass needs IS_SANDBOX. null = inherit the deployment default (the
+  // IS_SANDBOX env on the api container). Envs override via Env.sandboxBypass.
+  sandboxBypass     Boolean?
   // Where compose files and env assets live. LOCAL writes under
   // `storageLocalPath` on the API host; S3 uploads to `storageS3Bucket`
   // (optionally under `storageS3Prefix`). Credentials stored plaintext —
@@ -288,6 +293,9 @@ model Env {
   // Per-env override of the workspace defaultModel. null = inherit workspace.
   // Same value space as Workspace.defaultModel ("auto" | model id).
   modelChoice      String?
+  // Per-env override of Workspace.sandboxBypass. null = inherit workspace
+  // (which itself falls back to the deployment IS_SANDBOX default).
+  sandboxBypass    Boolean?
 
   createdBy        User?          @relation("EnvCreatedBy", fields: [createdById], references: [id])
   createdById      String?

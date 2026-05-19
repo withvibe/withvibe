@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RoutingModeFields, type RoutingMode } from "@/components/routing-mode-fields";
+import { BranchAutocomplete } from "@/components/branch-autocomplete";
 import { toast } from "sonner";
 
 export type TemplateVariableKind =
@@ -157,6 +158,9 @@ export function TemplateEditor({
   const [availableRepos, setAvailableRepos] = useState<WorkspaceRepo[] | null>(
     null
   );
+  const [branchInfo, setBranchInfo] = useState<
+    Record<string, { branches: string[]; defaultBranch: string | null }>
+  >({});
 
   // Stable snapshot for the assistant panel — it reads the latest state on
   // every send without re-rendering when state changes.
@@ -181,6 +185,50 @@ export function TemplateEditor({
       cancelled = true;
     };
   }, [workspaceId]);
+
+  // Branch suggestions for the per-repo base-branch fields. Best-effort: if
+  // the repo's clone isn't ready (or the call fails) the field still works
+  // as plain free-text, which is the point — a template may pin a branch
+  // that doesn't exist yet.
+  const loadBranches = useCallback(
+    async (repoId: string) => {
+      if (branchInfo[repoId]) return;
+      setBranchInfo((prev) =>
+        prev[repoId]
+          ? prev
+          : { ...prev, [repoId]: { branches: [], defaultBranch: null } }
+      );
+      try {
+        const res = await fetch(
+          `/api/workspaces/${workspaceId}/repos/${repoId}/branches`
+        );
+        if (!res.ok) return;
+        const d = (await res.json()) as {
+          branches: string[];
+          defaultBranch: string | null;
+        };
+        setBranchInfo((prev) => ({
+          ...prev,
+          [repoId]: {
+            branches: Array.isArray(d.branches) ? d.branches : [],
+            defaultBranch: d.defaultBranch ?? null,
+          },
+        }));
+      } catch {
+        // keep the empty entry — field degrades to free-text
+      }
+    },
+    [workspaceId, branchInfo]
+  );
+
+  // Preload suggestions for repos already attached to the template.
+  const attachedRepoIdsKey = state.repos.map((r) => r.id).join(",");
+  useEffect(() => {
+    for (const r of state.repos) void loadBranches(r.id);
+    // attachedRepoIdsKey captures membership changes without depending on the
+    // array identity (which changes on every keystroke via setState).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachedRepoIdsKey, loadBranches]);
 
   function setField<K extends keyof TemplateEditorState>(
     key: K,
@@ -1108,13 +1156,18 @@ export function TemplateEditor({
                         <Label className="text-xs">
                           Base branch (optional)
                         </Label>
-                        <Input
-                          value={selected.baseBranch}
-                          onChange={(e) =>
-                            updateRepoBranch(selected.id, e.target.value)
+                        <BranchAutocomplete
+                          branches={
+                            branchInfo[selected.id]?.branches || []
                           }
-                          placeholder="main"
-                          className="font-mono"
+                          value={selected.baseBranch}
+                          onValueChange={(v) =>
+                            updateRepoBranch(selected.id, v)
+                          }
+                          defaultBranch={
+                            branchInfo[selected.id]?.defaultBranch
+                          }
+                          placeholder="Repo default (e.g. main)"
                         />
                       </div>
                       <Button

@@ -78,6 +78,7 @@ export class WorkspacesController {
       allowDirectMerge?: boolean;
       debugMode?: boolean;
       defaultModel?: string;
+      sandboxBypass?: boolean | null;
     }
   ) {
     return this.workspaces.updateIntegrations(user.id, id, body);

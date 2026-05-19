@@ -1,7 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { execFile, spawn, type ChildProcess } from "child_process";
 import { promisify } from "util";
-import { access, readdir } from "fs/promises";
+import { access, readdir, readFile } from "fs/promises";
 import path from "path";
 import { ensureEnvDir } from "../common/repo-base-dir";
 import { PrismaService } from "../prisma/prisma.service";
@@ -9,6 +9,7 @@ import { EnvCloneService } from "../env-clones/env-clone.service";
 import { StorageService } from "../storage/storage.service";
 import { detectDatabasesFromFile } from "./database-detection";
 import { composeProjectName } from "./compose-naming";
+import { readSharedServices } from "../templates/compose-rewriter";
 import {
   assertComposeFileSafe,
   ComposeSecurityError,
@@ -130,6 +131,203 @@ export class DockerService {
 
   composeProjectName(envId: string): string {
     return composeProjectName(envId);
+  }
+
+  // ---------- per-env Traefik network (Phase 2 multi-tenant isolation) ------
+  //
+  // Each subdomain-routed env gets its OWN external Docker network
+  // (`<project>-edge`) instead of every env sharing one flat proxy network.
+  // Envs therefore never share an L2/L3 segment, so one env's bare service
+  // name can't resolve to another env's container. Traefik is the only thing
+  // bridged across envs — the platform connects it to each env's edge net so
+  // it can still route public traffic. The network is platform-managed
+  // (declared `external: true` in the rewritten compose) so it carries no
+  // `com.docker.compose.project` label and the sidecar/runner network
+  // resolution (db-viewer.findEnvNetwork etc.) is completely unaffected.
+
+  private readonly traefikContainer =
+    process.env.WITHVIBE_TRAEFIK_CONTAINER || "withvibe-traefik";
+
+  /** This env's per-env proxy network name, or null when the env is not
+   * subdomain-routed (port-mode envs have no Traefik and publish host
+   * ports instead, so there is nothing to isolate or connect). */
+  private async perEnvProxyNet(envId: string): Promise<string | null> {
+    const env = await this.prisma.client.env.findUnique({
+      where: { id: envId },
+      select: { routingMode: true },
+    });
+    return env?.routingMode === "subdomain"
+      ? `${this.composeProjectName(envId)}-edge`
+      : null;
+  }
+
+  /** Create the env's edge network BEFORE `compose up` (the rewritten compose
+   * declares it `external: true`, so it must already exist). Gated on the
+   * materialized compose actually referencing it, so envs materialized before
+   * Phase 2 (still on the shared net) don't accumulate an orphan network.
+   * Idempotent + best-effort: "already exists" and a missing daemon are fine. */
+  private async ensureEnvProxyNet(
+    envId: string,
+    composeFile: string
+  ): Promise<void> {
+    const net = await this.perEnvProxyNet(envId);
+    if (!net) return;
+    let compose = "";
+    try {
+      compose = await readFile(composeFile, "utf8");
+    } catch {
+      return;
+    }
+    if (!compose.includes(net)) return; // legacy compose still on shared net
+    await exec(
+      "docker",
+      ["network", "create", "--label", `com.withvibe.env=${envId}`, net],
+      { timeout: 15_000 }
+    ).catch(() => undefined);
+    this.pushLog(envId, `[net] per-env proxy network ${net} ready\n`);
+  }
+
+  /** Connect Traefik to this env's edge net so it can route to the env's
+   * exposed services. Best-effort + idempotent: already-connected, no Traefik
+   * (local/port-mode installs), or net-not-yet-created all no-op safely. */
+  private async connectTraefik(envId: string): Promise<void> {
+    const net = await this.perEnvProxyNet(envId);
+    if (!net) return;
+    await exec(
+      "docker",
+      ["network", "connect", net, this.traefikContainer],
+      { timeout: 10_000 }
+    ).catch(() => undefined);
+  }
+
+  /** Detach Traefik from the edge net so the network can then be removed. */
+  private async disconnectTraefik(envId: string): Promise<void> {
+    const net = await this.perEnvProxyNet(envId);
+    if (!net) return;
+    await exec(
+      "docker",
+      ["network", "disconnect", net, this.traefikContainer],
+      { timeout: 10_000 }
+    ).catch(() => undefined);
+  }
+
+  /** Remove the env's edge net on stop. No-op for legacy envs (net was never
+   * created) and silently skipped if still busy — a stray empty network is
+   * harmless and gets swept on the next stop. */
+  private async removeEnvProxyNet(envId: string): Promise<void> {
+    const net = await this.perEnvProxyNet(envId);
+    if (!net) return;
+    await exec("docker", ["network", "rm", net], { timeout: 10_000 }).catch(
+      () => undefined
+    );
+  }
+
+  // ---------- cross-env shared infra (Phase 3) -----------------------------
+  //
+  // Phase 3 deliberately punches a CONTROLLED hole through the Phase 1–2
+  // isolation so a company can run ONE shared DB across chosen envs. Trust
+  // model: an env's compose may carry `x-use-shared` on a service, but that
+  // is INTENT ONLY — it grants nothing. The operator authorizes which envs
+  // may use shared infra (allowlist by env id, or template id/slug); only
+  // then does the platform `docker network connect` the opted-in service to
+  // the operator-owned shared network. Fail-closed: disabled unless
+  // WITHVIBE_SHARED_NET is set, and unauthorized envs are skipped + logged.
+  // The shared resource is reached by its stable name on that network — the
+  // env never gets a bare `mysql`/`db` that could collide cross-env.
+
+  private sharedNet(): string {
+    return (process.env.WITHVIBE_SHARED_NET || "").trim();
+  }
+
+  private sharedAllowlist(name: string): Set<string> {
+    return new Set(
+      (process.env[name] || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    );
+  }
+
+  /** Operator-granted authorization for shared infra. Fail-closed: false
+   * unless WITHVIBE_SHARED_NET is set AND the env (by id) or its template
+   * (by id or slug) is on the operator allowlist. */
+  private async isSharedAuthorized(envId: string): Promise<boolean> {
+    if (!this.sharedNet()) return false;
+    if (this.sharedAllowlist("WITHVIBE_SHARED_ENVS").has(envId)) return true;
+    const tpls = this.sharedAllowlist("WITHVIBE_SHARED_TEMPLATES");
+    if (tpls.size === 0) return false;
+    const env = await this.prisma.client.env.findUnique({
+      where: { id: envId },
+      select: { templateId: true, template: { select: { slug: true } } },
+    });
+    if (!env) return false;
+    return (
+      (env.templateId != null && tpls.has(env.templateId)) ||
+      (env.template?.slug != null && tpls.has(env.template.slug))
+    );
+  }
+
+  /** Connect services that opted into shared infra to the operator's shared
+   * network — only when the operator authorized this env. Best-effort. */
+  private async attachSharedInfra(
+    envId: string,
+    proj: string,
+    composeFile: string
+  ): Promise<void> {
+    let optedIn: string[] = [];
+    try {
+      optedIn = readSharedServices(await readFile(composeFile, "utf8"));
+    } catch {
+      return;
+    }
+    if (optedIn.length === 0) return;
+
+    const net = this.sharedNet();
+    if (!net) {
+      this.pushLog(
+        envId,
+        `[shared] ${optedIn.join(", ")} requested shared infra but ` +
+          `WITHVIBE_SHARED_NET is not configured here — ignored\n`
+      );
+      return;
+    }
+    if (!(await this.isSharedAuthorized(envId))) {
+      this.pushLog(
+        envId,
+        `[shared] env not authorized for shared infra — NOT attaching ` +
+          `${optedIn.join(", ")} to "${net}" (operator must allowlist this ` +
+          `env id or its template via WITHVIBE_SHARED_ENVS / ` +
+          `WITHVIBE_SHARED_TEMPLATES)\n`
+      );
+      return;
+    }
+
+    for (const svc of optedIn) {
+      let ids: string[] = [];
+      try {
+        const { stdout } = await exec(
+          "docker",
+          ["compose", "-p", proj, "ps", "-q", svc],
+          { timeout: 10_000 }
+        );
+        ids = stdout
+          .split("\n")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      } catch {
+        ids = [];
+      }
+      for (const id of ids) {
+        await exec("docker", ["network", "connect", net, id], {
+          timeout: 10_000,
+        }).catch(() => undefined); // already-connected / missing net → no-op
+      }
+      if (ids.length > 0)
+        this.pushLog(
+          envId,
+          `[shared] attached ${svc} to shared network "${net}"\n`
+        );
+    }
   }
 
   // ---------- compose file resolution --------------------------------------
@@ -322,11 +520,18 @@ export class DockerService {
         ctx.composeFile,
         ctx.envDir,
         this.composeProjectName(envId),
-        // The platform's own rewriter attaches subdomain-routed env services
-        // to the operator's Traefik proxy network (declared external). Allow
-        // exactly that network; any other external network is still rejected.
-        // Default mirrors TemplateMaterializerService.proxyNetworkName().
-        { allowedExternalNetworks: [process.env.PROXY_NETWORK || "proxy"] }
+        // The rewriter attaches this env's exposed services to its OWN
+        // per-env external proxy network (`<project>-edge`, Phase 2 isolation
+        // — see TemplateMaterializerService.perEnvProxyNetwork). Allow exactly
+        // that, plus the legacy shared PROXY_NETWORK so envs materialized
+        // before Phase 2 still pass on restart until re-materialized. Any
+        // other external network is still rejected.
+        {
+          allowedExternalNetworks: [
+            process.env.PROXY_NETWORK || "proxy",
+            `${this.composeProjectName(envId)}-edge`,
+          ],
+        }
       );
       return true;
     } catch (err) {
@@ -357,6 +562,7 @@ export class DockerService {
     const proj = this.composeProjectName(envId);
     try {
       await this.setStatus(envId, "building");
+      await this.ensureEnvProxyNet(envId, ctx.composeFile);
       await this.runCompose(
         envId,
         proj,
@@ -364,7 +570,7 @@ export class DockerService {
         ["up", "-d", "--build", "--remove-orphans"],
         15 * 60 * 1000
       );
-      await this.finalizeAfterUp(envId, proj);
+      await this.finalizeAfterUp(envId, proj, ctx.composeFile);
     } catch (err) {
       const msg = this.formatErr(err);
       await this.setStatus(envId, "error", { error: msg });
@@ -380,6 +586,9 @@ export class DockerService {
     await this.playwrightMcp.closeForEnv(envId);
     await this.qaBrowser.stopQuiet(envId);
     await this.codeServer.stopQuiet(envId);
+    // Detach Traefik so the edge net has no endpoints left and can be removed
+    // after compose down. Other envs have their own edge nets — unaffected.
+    await this.disconnectTraefik(envId);
     const proj = this.composeProjectName(envId);
     try {
       // --remove-orphans: kills renamed containers still labeled for this
@@ -410,6 +619,7 @@ export class DockerService {
         }
       }
 
+      await this.removeEnvProxyNet(envId);
       await this.setStatus(envId, "stopped", { ports: {} });
       this.pushLog(envId, `[stop] done\n`);
     } catch (err) {
@@ -449,6 +659,7 @@ export class DockerService {
         ["down", "--remove-orphans", "-t", "10"],
         2 * 60 * 1000
       ).catch(() => {});
+      await this.ensureEnvProxyNet(envId, ctx.composeFile);
       await this.runCompose(
         envId,
         proj,
@@ -456,14 +667,18 @@ export class DockerService {
         ["up", "-d", "--build", "--remove-orphans"],
         15 * 60 * 1000
       );
-      await this.finalizeAfterUp(envId, proj);
+      await this.finalizeAfterUp(envId, proj, ctx.composeFile);
     } catch (err) {
       const msg = this.formatErr(err);
       await this.setStatus(envId, "error", { error: msg });
     }
   }
 
-  private async finalizeAfterUp(envId: string, proj: string): Promise<void> {
+  private async finalizeAfterUp(
+    envId: string,
+    proj: string,
+    composeFile: string
+  ): Promise<void> {
     const records = await this.composeRecords(proj);
     if (records.length === 0) {
       const logs = await this.composeLogs(proj);
@@ -484,6 +699,12 @@ export class DockerService {
       });
       return;
     }
+
+    // Containers are up — bridge Traefik onto this env's edge net so its
+    // public hostname(s) start routing. Idempotent across rebuilds.
+    await this.connectTraefik(envId);
+    // Connect any opt-in services to operator-authorized shared infra.
+    await this.attachSharedInfra(envId, proj, composeFile);
 
     const ports = this.extractPorts(records);
     await this.setStatus(envId, "running", { ports });

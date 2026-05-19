@@ -103,7 +103,12 @@ export class ReposService {
     }));
   }
 
-  async add(userId: string, workspaceId: string, url: string) {
+  async add(
+    userId: string,
+    workspaceId: string,
+    url: string,
+    branch: string | null = null
+  ) {
     await this.access.admin(userId, workspaceId);
     const parsed = this.parseGithubUrl(url);
     if (!parsed) {
@@ -129,7 +134,16 @@ export class ReposService {
         name: parsed.name,
         url: parsed.canonicalUrl,
         clone: {
-          create: { localPath, cloneStatus: "pending" },
+          // `branch` doubles as the requested-branch record. We store the
+          // explicit branch when given, else "" (sentinel for "let git pick
+          // the remote default"). On a successful clone it's overwritten with
+          // the actually-checked-out branch; on failure it's left as-is so
+          // retry re-attempts the same branch (and "" stays a no-op).
+          create: {
+            localPath,
+            cloneStatus: "pending",
+            branch: branch ?? "",
+          },
         },
       },
     });
@@ -140,7 +154,8 @@ export class ReposService {
         repo.id,
         workspaceId,
         parsed.canonicalUrl,
-        localPath
+        localPath,
+        branch
       ).catch((err) => {
         this.logger.error(
           `cloneInBackground failed for repo ${repo.id}: ${err}`
@@ -155,7 +170,8 @@ export class ReposService {
     repoId: string,
     workspaceId: string,
     canonicalUrl: string,
-    localPath: string
+    localPath: string,
+    branch: string | null = null
   ): Promise<void> {
     await this.withRepoLock(repoId, async () => {
       await this.prisma.client.repoClone.update({
@@ -177,6 +193,7 @@ export class ReposService {
             "clone",
             "--depth",
             "50",
+            ...(branch ? ["--branch", branch] : []),
             this.authenticatedUrl(canonicalUrl, token),
             localPath,
           ],
@@ -191,13 +208,13 @@ export class ReposService {
           ["-C", localPath, "rev-parse", "--abbrev-ref", "HEAD"],
           { timeout: 10_000 }
         );
-        const branch = branchOut.trim() || "main";
+        const detectedBranch = branchOut.trim() || branch || "main";
 
         await this.prisma.client.repoClone.update({
           where: { repoId },
           data: {
             cloneStatus: "ready",
-            branch,
+            branch: detectedBranch,
             lastPulledAt: new Date(),
             errorMsg: null,
           },
@@ -239,12 +256,14 @@ export class ReposService {
       data: { cloneStatus: "pending", errorMsg: null },
     });
 
+    const retryBranch = repo.clone.branch?.trim() || null;
     setImmediate(() => {
       void this.cloneInBackground(
         repo.id,
         workspaceId,
         repo.url,
-        repo.clone!.localPath
+        repo.clone!.localPath,
+        retryBranch
       ).catch((err) => {
         this.logger.error(
           `cloneInBackground (retry) failed for repo ${repo.id}: ${err}`
@@ -336,27 +355,21 @@ export class ReposService {
     }
 
     try {
-      await exec(
-        "git",
-        ["-C", repo.clone.localPath, "fetch", "origin", "--prune"],
-        { timeout: 30_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }
-      );
+      // List branches straight from the remote. `ls-remote` only transfers
+      // the ref advertisement (no objects) and ignores the clone's shallow
+      // single-branch fetch refspec, so it surfaces every branch and is
+      // faster than fetch + for-each-ref. Auth travels in the clone's
+      // origin URL (set by `git clone <tokenized-url>`).
       const { stdout } = await exec(
         "git",
-        [
-          "-C",
-          repo.clone.localPath,
-          "for-each-ref",
-          "--format=%(refname:short)",
-          "refs/remotes/origin",
-        ],
-        { timeout: 10_000 }
+        ["-C", repo.clone.localPath, "ls-remote", "--heads", "origin"],
+        { timeout: 30_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }
       );
       const branches = stdout
         .split("\n")
         .map((l) => l.trim())
-        .filter((l) => l.startsWith("origin/") && !l.includes("HEAD"))
-        .map((l) => l.replace(/^origin\//, ""));
+        .filter((l) => l.includes("refs/heads/"))
+        .map((l) => l.replace(/^[0-9a-f]+\s+refs\/heads\//, ""));
       return {
         branches,
         defaultBranch: repo.clone.branch,

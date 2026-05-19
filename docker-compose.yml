@@ -81,9 +81,43 @@ services:
       # disables TLS labels (useful when an upstream LB terminates TLS or
       # for local plain-HTTP dev).
       TRAEFIK_CERT_RESOLVER: ${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      # Container name the platform `docker network connect`s to each env's
+      # per-env edge network so Traefik can route it (Phase 2 isolation).
+      # Defaults to the platform Traefik (`withvibe-traefik`); override if
+      # your Traefik runs under a different name.
+      WITHVIBE_TRAEFIK_CONTAINER: ${WITHVIBE_TRAEFIK_CONTAINER:-withvibe-traefik}
+      # --- Cross-env shared infra (Phase 3, OFF by default) --------------
+      # Opt-in only. WITHVIBE_SHARED_NET names a pre-existing Docker network
+      # the operator owns (with their shared DB attached under a stable
+      # name). Services that set `x-use-shared` are connected to it ONLY for
+      # envs the operator allowlists below (by env id, or template id/slug).
+      # Leave WITHVIBE_SHARED_NET empty to keep envs fully isolated.
+      WITHVIBE_SHARED_NET: ${WITHVIBE_SHARED_NET:-}
+      WITHVIBE_SHARED_ENVS: ${WITHVIBE_SHARED_ENVS:-}
+      WITHVIBE_SHARED_TEMPLATES: ${WITHVIBE_SHARED_TEMPLATES:-}
+      # --- External/remote TCP access (Phase 4, OFF by default) ---------
+      # Opt-in only. Set WITHVIBE_TCP_EXPOSE=1 to enable, then allowlist the
+      # env id or template (id/slug). For an authorized env, a service with
+      # `x-expose-tcp: <port>` gets a unique host port published so it's
+      # reachable as <PUBLIC_HOST>:<allocated-port> from another machine.
+      # WITHVIBE_TCP_BIND pins the publish to one interface (e.g. a VPN IP);
+      # empty = all interfaces. Exposing a DB off-box is sensitive — keep
+      # disabled unless you mean it, and prefer a private bind interface.
+      WITHVIBE_TCP_EXPOSE: ${WITHVIBE_TCP_EXPOSE:-}
+      WITHVIBE_TCP_EXPOSE_ENVS: ${WITHVIBE_TCP_EXPOSE_ENVS:-}
+      WITHVIBE_TCP_EXPOSE_TEMPLATES: ${WITHVIBE_TCP_EXPOSE_TEMPLATES:-}
+      WITHVIBE_TCP_BIND: ${WITHVIBE_TCP_BIND:-}
       REPO_BASE_DIR: ${REPO_BASE_DIR:-/root/.withvibe/repos}
       # Persisted per-user `code tunnel` auth dirs. Mounted volume below.
       CODE_TUNNEL_DATA_DIR: /var/lib/withvibe/code-tunnel
+      # Claude Code refuses --dangerously-skip-permissions / Bypass
+      # Permissions mode as root. The api container runs as root (needs
+      # docker.sock), and the `code tunnel` server it spawns hosts the
+      # Claude Code extension, which inherits this env. IS_SANDBOX=1 is
+      # Claude Code's documented escape hatch for sandboxed/containerized
+      # hosts so bypass mode works. Default 1; set IS_SANDBOX=0 only if
+      # you run the api as a non-root user.
+      IS_SANDBOX: ${IS_SANDBOX:-1}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       WITHVIBE_VERSION: ${WITHVIBE_VERSION:-latest}
       NODE_ENV: production

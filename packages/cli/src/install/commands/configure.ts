@@ -54,6 +54,10 @@ export async function runConfigure(args: ConfigureArgs): Promise<void> {
           { title: "Public URLs (PUBLIC_HOST / WEB_PUBLIC_URL / API_PUBLIC_URL)", value: "urls" },
           { title: "Rotate secrets (INTERNAL_JWT_SECRET / POSTGRES_PASSWORD)", value: "rotate" },
           { title: "Update Anthropic key", value: "anthropic" },
+          {
+            title: "Shared infra / external DB access (advanced)",
+            value: "advanced",
+          },
           { title: "Save & exit", value: "exit" },
         ],
         initial: 0,
@@ -70,6 +74,7 @@ export async function runConfigure(args: ConfigureArgs): Promise<void> {
     else if (choice.v === "urls") await editUrls(installDir);
     else if (choice.v === "rotate") await rotateSecrets(installDir);
     else if (choice.v === "anthropic") await updateAnthropicKey(installDir);
+    else if (choice.v === "advanced") await configureAdvanced(installDir);
 
     await writeState(installDir, state);
   }
@@ -436,6 +441,188 @@ async function updateAnthropicKey(installDir: string): Promise<void> {
   // (chat-stream.service.ts) detects the prefix and routes at spawn time.
   await mergeEnv(installDir, { ANTHROPIC_API_KEY: key });
   log.ok("ANTHROPIC_API_KEY updated.");
+}
+
+// Operator gates for the multi-tenant network-isolation model. These are
+// platform-side .env keys the first-run installer intentionally does NOT
+// prompt for: the env/template IDs they reference don't exist until the
+// system is running, and the right bind interface is deployment-specific.
+// Entering this menu IS the explicit, knowing opt-in. All OFF by default.
+async function configureAdvanced(installDir: string): Promise<void> {
+  for (;;) {
+    const env = await readEnvFile(envPath(installDir));
+    const tcpOn = !!(env.WITHVIBE_TCP_EXPOSE || "").trim();
+    const sharedOn = !!(env.WITHVIBE_SHARED_NET || "").trim();
+    const { v } = await prompts(
+      {
+        type: "select",
+        name: "v",
+        message: "Advanced — network isolation gates:",
+        choices: [
+          {
+            title: `External/remote DB (TCP) access: ${onOff(tcpOn)}`,
+            value: "tcp",
+          },
+          {
+            title: `Cross-env shared infrastructure: ${onOff(sharedOn)}`,
+            value: "shared",
+          },
+          {
+            title: `Traefik container name: ${
+              env.WITHVIBE_TRAEFIK_CONTAINER || "withvibe-traefik (default)"
+            }`,
+            value: "traefik-name",
+          },
+          { title: "Back", value: "back" },
+        ],
+        initial: 0,
+      },
+      { onCancel: () => process.exit(0) }
+    );
+    if (!v || v === "back") return;
+    if (v === "tcp") await configureTcpExpose(installDir);
+    else if (v === "shared") await configureSharedInfra(installDir);
+    else if (v === "traefik-name") await configureTraefikContainer(installDir);
+    log.dim(
+      "Applies after `withvibe restart`. Phase-gated at env materialize/up — " +
+        "existing envs pick it up only when recreated/restarted."
+    );
+  }
+}
+
+async function configureTcpExpose(installDir: string): Promise<void> {
+  const env = await readEnvFile(envPath(installDir));
+  const enabled = !!(env.WITHVIBE_TCP_EXPOSE || "").trim();
+  const { v: on } = await prompts(
+    {
+      type: "confirm",
+      name: "v",
+      message: enabled
+        ? "External TCP access is ON. Keep it enabled?"
+        : "Enable external/remote TCP access (e.g. reach a DB from another machine)?",
+      initial: enabled,
+    },
+    { onCancel: () => process.exit(0) }
+  );
+  if (!on) {
+    await mergeEnv(installDir, { WITHVIBE_TCP_EXPOSE: "" });
+    log.ok("External TCP access disabled (services stay private).");
+    return;
+  }
+  log.warn(
+    "This publishes a raw TCP port with NO platform auth — only the service's " +
+      "own credentials protect it. Strongly prefer a private/VPN bind IP " +
+      "below, and use strong DB credentials."
+  );
+  const envs = await ask({
+    type: "text",
+    name: "v",
+    message: "Authorized env IDs (comma-separated, blank = none):",
+    initial: env.WITHVIBE_TCP_EXPOSE_ENVS ?? "",
+  });
+  const tpls = await ask({
+    type: "text",
+    name: "v",
+    message:
+      "Authorized template IDs or slugs (comma-separated, blank = none):",
+    initial: env.WITHVIBE_TCP_EXPOSE_TEMPLATES ?? "",
+  });
+  const bind = await ask({
+    type: "text",
+    name: "v",
+    message:
+      "Bind interface IP (e.g. your VPN IP; blank = ALL interfaces / 0.0.0.0):",
+    initial: env.WITHVIBE_TCP_BIND ?? "",
+  });
+  const eCsv = csvNorm(envs);
+  const tCsv = csvNorm(tpls);
+  await mergeEnv(installDir, {
+    WITHVIBE_TCP_EXPOSE: "1",
+    WITHVIBE_TCP_EXPOSE_ENVS: eCsv,
+    WITHVIBE_TCP_EXPOSE_TEMPLATES: tCsv,
+    WITHVIBE_TCP_BIND: bind.trim(),
+  });
+  if (!eCsv && !tCsv)
+    log.warn(
+      "Nothing allowlisted — feature enabled but no env/template authorized, " +
+        "so no port is published yet."
+    );
+  if (!bind.trim())
+    log.warn(
+      "WITHVIBE_TCP_BIND blank → ports bind to ALL interfaces. Set a " +
+        "private/VPN IP unless you intend public exposure."
+    );
+  log.ok("External TCP access configured.");
+}
+
+async function configureSharedInfra(installDir: string): Promise<void> {
+  const env = await readEnvFile(envPath(installDir));
+  log.dim(
+    "Connects authorized envs to a Docker network YOU created (with your " +
+      "shared DB attached under a stable name). The platform never creates " +
+      "or owns that network."
+  );
+  const net = await ask({
+    type: "text",
+    name: "v",
+    message: "Shared Docker network name (blank = disable shared infra):",
+    initial: env.WITHVIBE_SHARED_NET ?? "",
+  });
+  if (!net.trim()) {
+    await mergeEnv(installDir, { WITHVIBE_SHARED_NET: "" });
+    log.ok("Cross-env shared infrastructure disabled.");
+    return;
+  }
+  const envs = await ask({
+    type: "text",
+    name: "v",
+    message: "Authorized env IDs (comma-separated, blank = none):",
+    initial: env.WITHVIBE_SHARED_ENVS ?? "",
+  });
+  const tpls = await ask({
+    type: "text",
+    name: "v",
+    message:
+      "Authorized template IDs or slugs (comma-separated, blank = none):",
+    initial: env.WITHVIBE_SHARED_TEMPLATES ?? "",
+  });
+  const eCsv = csvNorm(envs);
+  const tCsv = csvNorm(tpls);
+  await mergeEnv(installDir, {
+    WITHVIBE_SHARED_NET: net.trim(),
+    WITHVIBE_SHARED_ENVS: eCsv,
+    WITHVIBE_SHARED_TEMPLATES: tCsv,
+  });
+  if (!eCsv && !tCsv)
+    log.warn(
+      "Nothing allowlisted yet — shared infra is set but no env/template is " +
+        "authorized to use it."
+    );
+  log.ok(`Shared infrastructure network set to "${net.trim()}".`);
+}
+
+async function configureTraefikContainer(installDir: string): Promise<void> {
+  const env = await readEnvFile(envPath(installDir));
+  const name = await ask({
+    type: "text",
+    name: "v",
+    message:
+      "Traefik container name (platform connects it to each env's edge net):",
+    initial: env.WITHVIBE_TRAEFIK_CONTAINER ?? "withvibe-traefik",
+  });
+  const final = name.trim() || "withvibe-traefik";
+  await mergeEnv(installDir, { WITHVIBE_TRAEFIK_CONTAINER: final });
+  log.ok(`Traefik container name set to "${final}".`);
+}
+
+// Normalise a comma list the same way the api parses these allowlists:
+// trim each entry, drop empties. Keeps .env tidy and round-trips cleanly.
+function csvNorm(s: string): string {
+  return s
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .join(",");
 }
 
 async function mergeEnv(

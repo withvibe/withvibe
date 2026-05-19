@@ -173,17 +173,62 @@ volumes:
   );
   expectPass("empty compose string is deferred elsewhere", `   `);
   // The aquarium/demo scenario: the rewriter attaches subdomain envs to the
-  // operator's Traefik proxy network (declared external). MUST pass when
-  // that network is the configured/allowed one.
+  // operator's Traefik proxy network (declared external) and stamps the
+  // exposed service with `traefik.enable=true`. MUST pass when that network
+  // is the configured/allowed one and the service is Traefik-exposed.
   expectPass(
     "configured proxy network (subdomain routing, default 'proxy') allowed",
-    `services:\n  web:\n    image: x\n    networks: [proxy, internal]\nnetworks:\n  proxy:\n    external: true\n  internal: null\n`,
+    `services:\n  web:\n    image: x\n    networks: [proxy, internal]\n    labels: ["traefik.enable=true"]\nnetworks:\n  proxy:\n    external: true\n  internal: null\n`,
     { allowedExternalNetworks: ["proxy"] }
   );
   expectPass(
     "proxy network reached via name: override allowed",
-    `services:\n  web:\n    image: x\n    networks: [edge]\nnetworks:\n  edge:\n    external: true\n    name: proxy\n`,
+    `services:\n  web:\n    image: x\n    networks: [edge]\n    labels: ["traefik.enable=true"]\nnetworks:\n  edge:\n    external: true\n    name: proxy\n`,
     { allowedExternalNetworks: ["proxy"] }
+  );
+  expectPass(
+    "exposed (traefik) service on proxy + private db internal-only allowed",
+    `services:
+  web:
+    image: x
+    networks: [proxy, internal]
+    labels: ["traefik.enable=true"]
+  db:
+    image: postgres
+    networks: [internal]
+networks:
+  proxy:
+    external: true
+  internal: null
+`,
+    { allowedExternalNetworks: ["proxy"] }
+  );
+
+  // Phase 1 isolation: a private service (DB/cache) on the SHARED proxy net
+  // is DNS-resolvable from other envs → cross-env data leak. Reject unless it
+  // is Traefik-exposed (traefik.enable=true).
+  expectReject(
+    "private db on shared proxy network rejected (cross-env DB leak)",
+    `services:\n  db:\n    image: postgres\n    networks: [proxy]\nnetworks:\n  proxy:\n    external: true\n`,
+    { allowedExternalNetworks: ["proxy"] }
+  );
+  expectReject(
+    "private db on proxy via name: override rejected",
+    `services:\n  db:\n    image: postgres\n    networks: [edge]\nnetworks:\n  edge:\n    external: true\n    name: proxy\n`,
+    { allowedExternalNetworks: ["proxy"] }
+  );
+
+  // Phase 3: the `x-use-shared` intent marker is inert to the gate — it adds
+  // no network membership, so it neither trips the external-network rule nor
+  // grants a private service the shared net (the platform attaches at runtime
+  // only for operator-authorized envs).
+  expectPass(
+    "x-use-shared marker is inert to the security gate",
+    `services:\n  app:\n    image: x\n    x-use-shared: true\n  db:\n    image: postgres\n    x-use-shared: [maindb]\n`
+  );
+  expectPass(
+    "x-expose-tcp marker is inert to the security gate",
+    `services:\n  db:\n    image: postgres\n    x-expose-tcp: 5432\n`
   );
 
   // ---- runtime containment (synthetic resolved model) -----------------
@@ -260,12 +305,44 @@ volumes:
     root
   );
   // Resolved form `docker compose config` emits for the rewriter's proxy
-  // network: `{ name, external: true }`. Allowed when it's the proxy net.
+  // network: `{ name, external: true }`, with labels normalised to a map.
+  // Allowed when it's the proxy net AND the service is Traefik-exposed.
   await expectModelPass(
     "resolved: proxy external network allowed (aquarium scenario)",
     {
-      services: { web: { image: "x", networks: ["proxy", "internal"] } },
+      services: {
+        web: {
+          image: "x",
+          networks: { proxy: null, internal: null },
+          labels: { "traefik.enable": "true" },
+        },
+      },
       networks: { proxy: { name: "proxy", external: true }, internal: {} },
+    },
+    root,
+    ["proxy"]
+  );
+  await expectModelPass(
+    "resolved: traefik-exposed on proxy + private db internal-only allowed",
+    {
+      services: {
+        web: {
+          image: "x",
+          networks: { proxy: null, internal: null },
+          labels: { "traefik.enable": "true" },
+        },
+        db: { image: "postgres", networks: { internal: null } },
+      },
+      networks: { proxy: { name: "proxy", external: true }, internal: {} },
+    },
+    root,
+    ["proxy"]
+  );
+  await expectModelReject(
+    "resolved: private db on proxy network rejected (cross-env leak)",
+    {
+      services: { db: { image: "postgres", networks: { proxy: null } } },
+      networks: { proxy: { name: "proxy", external: true } },
     },
     root,
     ["proxy"]

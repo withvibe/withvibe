@@ -109,6 +109,7 @@ export default function WorkspaceReposPage(
   const [role, setRole] = useState<"admin" | "member" | null>(null);
   const [githubConnected, setGithubConnected] = useState(false);
   const [url, setUrl] = useState("");
+  const [branch, setBranch] = useState("");
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
   const [browseOpen, setBrowseOpen] = useState(false);
@@ -148,7 +149,7 @@ export default function WorkspaceReposPage(
     const res = await fetch(`/api/workspaces/${id}/repos`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, branch: branch.trim() || undefined }),
     });
 
     if (!res.ok) {
@@ -159,6 +160,7 @@ export default function WorkspaceReposPage(
     }
 
     setUrl("");
+    setBranch("");
     setAdding(false);
     toast.success("Repo added — cloning in background");
     await load();
@@ -268,13 +270,25 @@ export default function WorkspaceReposPage(
                     value={url}
                     onChange={(e) => setUrl(e.target.value)}
                     placeholder="https://github.com/owner/repo"
-                    className="font-mono"
+                    className="font-mono flex-1"
+                  />
+                  <Input
+                    id="branch"
+                    value={branch}
+                    onChange={(e) => setBranch(e.target.value)}
+                    placeholder="branch (optional)"
+                    className="font-mono w-44"
                   />
                   <Button type="submit" variant="outline" disabled={adding || !url.trim()}>
                     <Plus className="size-4" />
                     {adding ? "Adding…" : "Add"}
                   </Button>
                 </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Leave the branch empty to track the repo&apos;s default
+                  branch. Envs can still be created off any branch regardless of
+                  this choice.
+                </p>
               </div>
             </form>
           </CardContent>

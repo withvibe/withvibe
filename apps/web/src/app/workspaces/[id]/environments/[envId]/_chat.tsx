@@ -486,7 +486,15 @@ export function EnvironmentChat({
             [sessionId]: {
               ...cur,
               controller,
-              live: cur.live ?? {
+              // Reset `live` to empty — never preserve `cur.live` here. The
+              // backend's subscribe() replays the *entire* current-turn event
+              // buffer from the start (no since-cursor), so the stream we're
+              // about to consume reconstructs the live block in full. Keeping
+              // the old `live` would double every already-rendered text/tool
+              // segment, since the replay's text/tool_use events are appended
+              // without dedup. Safe to reset: reattach only runs when no
+              // stream is actively being consumed (guarded above).
+              live: {
                 content: "",
                 thinking: "",
                 toolCalls: [],

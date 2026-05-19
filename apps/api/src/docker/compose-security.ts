@@ -125,6 +125,30 @@ function externalNetworkName(key: string, def: unknown): string | null {
   return key;
 }
 
+/** Top-level network keys a service references, across the list
+ * (`networks: [a, b]`) and map (`networks: {a: null}`) syntaxes. `docker
+ * compose config` normalises to the map form; raw YAML may use either. */
+function serviceNetworkNames(svc: Rec): string[] {
+  const n = svc.networks;
+  if (Array.isArray(n)) return n.filter((x): x is string => typeof x === "string");
+  if (isRec(n)) return Object.keys(n);
+  return [];
+}
+
+/** True if the service carries `traefik.enable=true` — list form
+ * (`["traefik.enable=true"]`) or map form (`{traefik.enable: true}`).
+ * `docker compose config` normalises labels to a map. */
+function serviceHasTraefikEnable(svc: Rec): boolean {
+  const labels = svc.labels;
+  if (Array.isArray(labels))
+    return labels.some((l) => strOf(l).replace(/\s+/g, "") === "traefik.enable=true");
+  if (isRec(labels)) {
+    const v = labels["traefik.enable"];
+    return v === true || strOf(v).trim().toLowerCase() === "true";
+  }
+  return false;
+}
+
 /**
  * Static, synchronous checks that don't need the filesystem or Docker.
  * Returns a list of human-readable violation strings (empty = clean).
@@ -218,15 +242,44 @@ function collectStaticViolations(
   // External networks could let the env join an arbitrary/sensitive network.
   // The one legitimate case is the operator's Traefik proxy network, which
   // the platform's own rewriter attaches subdomain envs to — allow exactly
-  // that, reject any other external network.
+  // that, reject any other external network. Collect the top-level keys that
+  // resolve to the allowed proxy net so we can then enforce that ONLY
+  // Traefik-exposed services ride it.
   const networks = isRec(model.networks) ? model.networks : {};
+  const proxyNetKeys = new Set<string>();
   for (const [nname, def] of Object.entries(networks)) {
     const extName = externalNetworkName(nname, def);
-    if (extName != null && !allowedExternalNets.has(extName))
+    if (extName == null) continue;
+    if (!allowedExternalNets.has(extName)) {
       out.push(
         `network "${nname}" is an external network ("${extName}") that is ` +
           `not the configured proxy network — not allowed`
       );
+    } else {
+      proxyNetKeys.add(nname);
+    }
+  }
+
+  // The proxy network is SHARED across every env. Docker registers a service's
+  // bare name as a DNS alias on every network it joins, so a private service
+  // (a DB, cache, …) left on the proxy net is resolvable by name from other
+  // envs — letting one env silently connect to another env's database. Only
+  // Traefik-exposed services (which the rewriter marks with
+  // `traefik.enable=true`) may ride the shared net; anything else must stay on
+  // the per-env internal network. Defense-in-depth behind the rewriter: this
+  // also catches a hand-authored compose that joins a DB to the proxy net.
+  if (proxyNetKeys.size > 0) {
+    for (const [name, raw] of Object.entries(services)) {
+      if (!isRec(raw)) continue;
+      const onProxy = serviceNetworkNames(raw).some((n) => proxyNetKeys.has(n));
+      if (onProxy && !serviceHasTraefikEnable(raw))
+        out.push(
+          `service "${name}" is attached to the shared proxy network but is ` +
+            `not Traefik-exposed (no traefik.enable=true) — private services ` +
+            `must stay on the internal network (a service on the shared ` +
+            `network is reachable by name from other environments)`
+        );
+    }
   }
 
   // configs/secrets sourced from a host file must stay inside the env dir.

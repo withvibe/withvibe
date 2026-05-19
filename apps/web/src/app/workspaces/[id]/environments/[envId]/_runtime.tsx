@@ -175,6 +175,7 @@ export function EnvPanel({
   chatEngine,
   qaBrowserMode,
   modelChoice,
+  sandboxBypass,
   runnerStatus,
   serviceUrls,
   containerPorts,
@@ -189,6 +190,8 @@ export function EnvPanel({
   qaBrowserMode: QaBrowserMode;
   /** null = inherit workspace default. */
   modelChoice: ModelChoice | null;
+  /** null = inherit workspace/deployment default. */
+  sandboxBypass: boolean | null;
   runnerStatus: "running" | "stopped" | "image_missing" | null;
   serviceUrls: Record<string, string> | null;
   containerPorts: Record<string, number> | null;
@@ -198,6 +201,7 @@ export function EnvPanel({
   const [savingEngine, setSavingEngine] = useState<ChatEngine | null>(null);
   const [savingQaMode, setSavingQaMode] = useState<QaBrowserMode | null>(null);
   const [savingModel, setSavingModel] = useState(false);
+  const [savingSandbox, setSavingSandbox] = useState(false);
 
   // null sentinel = "use workspace default"; everything else is a concrete
   // ModelChoice that overrides the workspace setting for this env.
@@ -226,6 +230,38 @@ export function EnvPanel({
       await onUpdated();
     } finally {
       setSavingModel(false);
+    }
+  }
+
+  // null = inherit workspace/deployment default; true/false force Claude
+  // Bypass Permissions on/off for this env's desktop/tunnel VS Code.
+  async function setSandbox(next: boolean | null) {
+    if (next === sandboxBypass || savingSandbox) return;
+    setSavingSandbox(true);
+    try {
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/envs/${envId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sandboxBypass: next }),
+        }
+      );
+      if (!res.ok) {
+        const msg = await res.text().catch(() => "Failed to save");
+        toast.error(msg || "Failed to save");
+        return;
+      }
+      toast.success(
+        next === null
+          ? "Bypass Permissions: using workspace default"
+          : next
+            ? "Bypass Permissions enabled for this env"
+            : "Bypass Permissions disabled for this env"
+      );
+      await onUpdated();
+    } finally {
+      setSavingSandbox(false);
     }
   }
 
@@ -426,6 +462,52 @@ export function EnvPanel({
                 )}
               >
                 {savingModel && active && (
+                  <Loader2 className="size-3 animate-spin" />
+                )}
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="text-xs font-mono font-semibold uppercase tracking-wide text-muted-foreground">
+          Claude Bypass Permissions
+        </h3>
+        <p className="text-[11px] text-muted-foreground">
+          Whether Claude Code may auto-approve actions (Bypass Permissions
+          mode) in this env&apos;s desktop/tunnel VS Code.{" "}
+          <strong>Use workspace default</strong> inherits the workspace
+          setting (which itself falls back to the API server&apos;s
+          IS_SANDBOX default). <strong>Off</strong> means Claude runs with
+          normal permission prompts here; Bypass Permissions mode is
+          unavailable.
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {(
+            [
+              { key: "inherit", val: null, label: "Use workspace default" },
+              { key: "on", val: true, label: "On" },
+              { key: "off", val: false, label: "Off" },
+            ] as { key: string; val: boolean | null; label: string }[]
+          ).map((opt) => {
+            const active = opt.val === sandboxBypass;
+            return (
+              <button
+                key={opt.key}
+                type="button"
+                disabled={savingSandbox}
+                onClick={() => setSandbox(opt.val)}
+                className={cn(
+                  "px-2.5 py-1 text-[11px] font-mono rounded border transition-smooth inline-flex items-center gap-1.5",
+                  active
+                    ? "bg-primary/15 text-primary border-primary/30"
+                    : "bg-card text-muted-foreground border-border/60 hover:text-foreground",
+                  savingSandbox && !active && "opacity-50"
+                )}
+              >
+                {savingSandbox && active && (
                   <Loader2 className="size-3 animate-spin" />
                 )}
                 {opt.label}

@@ -79,6 +79,7 @@ type Environment = {
     | "claude-sonnet-4-6"
     | "claude-haiku-4-5"
     | null;
+  sandboxBypass: boolean | null;
   runnerStatus: "running" | "stopped" | "image_missing" | null;
   createdAt: string;
   createdBy: { id: string; name: string | null; email: string } | null;
@@ -484,6 +485,7 @@ export default function EnvironmentDetailPage(
                     chatEngine={env.chatEngine}
                     qaBrowserMode={env.qaBrowserMode}
                     modelChoice={env.modelChoice}
+                    sandboxBypass={env.sandboxBypass}
                     runnerStatus={env.runnerStatus}
                     serviceUrls={env.serviceUrls}
                     containerPorts={env.containerPorts}

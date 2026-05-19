@@ -4,9 +4,13 @@ export type RewriteInput = {
   composeYaml: string;
   envId: string;
   baseDomain: string;
-  // Name of the external Docker network Traefik is attached to. The exposed
-  // services are joined to this network and Traefik labels point at it.
-  // Must match the `name:` of the Traefik network on the host.
+  // Name of the env's PER-ENV external proxy network. Exposed services are
+  // joined to it and the Traefik labels point at it. Phase 2 isolation: this
+  // is unique per env (`<project>-edge`), NOT one network shared by all envs
+  // — so an exposed service in one env can't be DNS-resolved by another env.
+  // The platform (DockerService) creates this network and dynamically
+  // connects Traefik to it around the env lifecycle; declared `external: true`
+  // here because the platform — not compose — owns its lifecycle.
   proxyNetworkName: string;
   // Traefik entrypoint name to bind the env's router to (matches Traefik's
   // static config — typically "websecure" for the :443 entrypoint).
@@ -27,6 +31,116 @@ export type RewriteOutput = {
 // cuids are already lowercase alphanumeric, DNS-safe.
 export function envShortId(envId: string): string {
   return envId.slice(-6).toLowerCase();
+}
+
+// Phase 3 (cross-env shared infra): a service opts INTO the operator's
+// shared network with `x-use-shared: true` (or a non-empty list/string of
+// resource names — names are informational; the network is operator-owned).
+// This marker is INTENT ONLY: it adds no network membership to the compose
+// (so it never trips the compose-security external-network rule). The
+// platform decides — based on an operator allowlist — whether to actually
+// attach the service's container at runtime. Mode-agnostic (port & subdomain
+// envs) — parsed straight from the materialized compose, not the rewriter.
+export function readSharedServices(composeYaml: string): string[] {
+  let doc;
+  try {
+    doc = parseDocument(composeYaml);
+  } catch {
+    return [];
+  }
+  const root = doc.contents;
+  if (!isMap(root)) return [];
+  const services = root.get("services", true);
+  if (!isMap(services)) return [];
+  const out: string[] = [];
+  for (const pair of services.items) {
+    const name = keyString(pair.key);
+    const svc = pair.value;
+    if (!name || !isMap(svc)) continue;
+    // Plain .get() (no keepScalar) — like the `x-expose` handling: scalars
+    // come back as JS values, collections as nodes.
+    const v: unknown = svc.get("x-use-shared");
+    const optedIn =
+      v === true ||
+      (typeof v === "string" && v.trim() !== "") ||
+      (isSeq(v) && v.items.length > 0);
+    if (optedIn) out.push(name);
+  }
+  return out;
+}
+
+// Phase 4 (external/remote TCP access, e.g. a DB reachable from another
+// machine): a service opts in with `x-expose-tcp: <containerPort>`. Like
+// `x-use-shared`, this is INTENT ONLY — it publishes nothing by itself and
+// is inert to the security gate. The platform allocates a unique host port
+// and injects a `ports:` mapping ONLY for operator-authorized envs.
+export function readTcpExposed(
+  composeYaml: string
+): { service: string; containerPort: number }[] {
+  let doc;
+  try {
+    doc = parseDocument(composeYaml);
+  } catch {
+    return [];
+  }
+  const root = doc.contents;
+  if (!isMap(root)) return [];
+  const services = root.get("services", true);
+  if (!isMap(services)) return [];
+  const out: { service: string; containerPort: number }[] = [];
+  for (const pair of services.items) {
+    const name = keyString(pair.key);
+    const svc = pair.value;
+    if (!name || !isMap(svc)) continue;
+    const p = asPortNumber(svc.get("x-expose-tcp", true));
+    if (p && p > 0 && p < 65536) out.push({ service: name, containerPort: p });
+  }
+  return out;
+}
+
+// Inject a host:container `ports:` mapping into one service (used by the
+// materializer for operator-authorized `x-expose-tcp` services). Replaces any
+// existing mapping for the same container port so we never double-publish,
+// and binds to `bindIp` when the operator pinned an interface (e.g. VPN-only).
+export function injectPublishedPort(
+  composeYaml: string,
+  service: string,
+  hostPort: number,
+  containerPort: number,
+  bindIp?: string
+): string {
+  const doc = parseDocument(composeYaml);
+  const root = doc.contents;
+  if (!isMap(root)) return composeYaml;
+  const services = root.get("services", true);
+  if (!isMap(services)) return composeYaml;
+  let svc: unknown = null;
+  for (const pair of services.items) {
+    if (keyString(pair.key) === service) {
+      svc = pair.value;
+      break;
+    }
+  }
+  if (!isMap(svc)) return composeYaml;
+
+  const mapping =
+    (bindIp ? `${bindIp}:` : "") + `${hostPort}:${containerPort}`;
+  const sameTarget = (item: unknown): boolean => {
+    const s = item instanceof Scalar ? String(item.value) : null;
+    if (!s) return false;
+    const seg = s.split(":");
+    const last = seg[seg.length - 1];
+    const m = /^(\d+)(?:\/(tcp|udp))?$/.exec(last);
+    return m ? Number(m[1]) === containerPort : false;
+  };
+  const existing = svc.get("ports", true);
+  if (isSeq(existing)) {
+    existing.items = existing.items.filter((i) => !sameTarget(i));
+    existing.add(mapping);
+  } else {
+    svc.set("ports", [mapping]);
+  }
+  return doc.toString();
 }
 
 // When a template uses a repo's own docker-compose.yml verbatim, that compose
@@ -181,13 +295,22 @@ export function rewriteComposeForSubdomain(input: RewriteInput): RewriteOutput {
   // Ensure top-level networks block has the proxy (external) and `internal`.
   ensureTopLevelNetworks(root, proxyNetworkName);
 
-  // Non-exposed services (e.g. postgres) still need the internal network so
-  // exposed services can reach them. Do this in a second pass so we don't
-  // accidentally add the proxy network to internal-only services.
+  // Non-exposed services (e.g. postgres, mysql, redis) get ONLY the per-env
+  // internal network. Critically, we also *strip* the shared proxy network
+  // from them even if the author's compose (or an old pre-routed template, or
+  // a stray `ports:`/explicit `networks: [<proxy>]`) put it there: the proxy
+  // network is shared across every env, and Docker registers each service's
+  // bare name (`mysql`, `db`, `redis`, …) as a DNS alias on every network it
+  // joins. A private service left on the proxy net is therefore resolvable by
+  // name from *other* envs — so one env's app can silently connect to (and
+  // corrupt) another env's database. Only Traefik-exposed services belong on
+  // the shared net; everything else stays internal-only. (Deliberate
+  // cross-env sharing is a separate, explicitly-namespaced opt-in.)
   for (const pair of services.items) {
     const svc = pair.value;
     if (!isMap(svc)) continue;
     if (!exposedServices.includes(keyString(pair.key) ?? "")) {
+      detachNetwork(svc, proxyNetworkName);
       attachNetworks(svc, ["internal"]);
     }
   }
@@ -275,6 +398,24 @@ function attachNetworks(svc: YAMLMap, wanted: string[]) {
       if (!existing.has(name)) existing.set(name, null);
     }
     return;
+  }
+}
+
+// Remove a network from a service's `networks:` (list or map form). Used to
+// guarantee private services never sit on the shared proxy network, even if
+// the source compose attached them to it. A no-op when the service has no
+// `networks:` or isn't on that network.
+function detachNetwork(svc: YAMLMap, name: string) {
+  const existing = svc.get("networks", true);
+  if (existing == null) return;
+  if (isSeq(existing)) {
+    existing.items = existing.items.filter(
+      (i) => !(i instanceof Scalar && String(i.value) === name)
+    );
+    return;
+  }
+  if (isMap(existing) && existing.has(name)) {
+    existing.delete(name);
   }
 }
 

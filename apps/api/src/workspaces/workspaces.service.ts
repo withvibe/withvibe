@@ -291,6 +291,7 @@ export class WorkspacesService {
         allowDirectMerge: true,
         debugMode: true,
         defaultModel: true,
+        sandboxBypass: true,
       },
     });
     const envAnthropic = Boolean(process.env.ANTHROPIC_API_KEY);
@@ -309,6 +310,8 @@ export class WorkspacesService {
       allowDirectMerge: Boolean(workspace?.allowDirectMerge),
       debugMode: Boolean(workspace?.debugMode),
       defaultModel: workspace?.defaultModel ?? "auto",
+      // null = inherit the deployment IS_SANDBOX default (tri-state).
+      sandboxBypass: workspace?.sandboxBypass ?? null,
     };
   }
 
@@ -321,6 +324,7 @@ export class WorkspacesService {
       allowDirectMerge?: boolean;
       debugMode?: boolean;
       defaultModel?: string;
+      sandboxBypass?: boolean | null;
     }
   ) {
     await this.access.admin(userId, workspaceId);
@@ -330,6 +334,7 @@ export class WorkspacesService {
       allowDirectMerge?: boolean;
       debugMode?: boolean;
       defaultModel?: string;
+      sandboxBypass?: boolean | null;
     } = {};
 
     if (body.anthropicApiKey !== undefined) {
@@ -357,6 +362,13 @@ export class WorkspacesService {
       ).includes(body.defaultModel)
     ) {
       data.defaultModel = body.defaultModel;
+    }
+    // Tri-state: true=force on, false=force off, null=inherit deployment.
+    if (
+      body.sandboxBypass === null ||
+      typeof body.sandboxBypass === "boolean"
+    ) {
+      data.sandboxBypass = body.sandboxBypass;
     }
 
     await this.prisma.client.workspace.update({

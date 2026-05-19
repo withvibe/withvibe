@@ -33,11 +33,15 @@ export class ReposController {
   async add(
     @CurrentUser() user: AuthUser,
     @Param("workspaceId") workspaceId: string,
-    @Body() body: { url?: unknown }
+    @Body() body: { url?: unknown; branch?: unknown }
   ) {
     const url = typeof body.url === "string" ? body.url.trim() : "";
     if (!url) throw new BadRequestException("URL is required");
-    return this.repos.add(user.id, workspaceId, url);
+    const branch =
+      typeof body.branch === "string" && body.branch.trim()
+        ? body.branch.trim()
+        : null;
+    return this.repos.add(user.id, workspaceId, url, branch);
   }
 
   @Patch(":repoId")
