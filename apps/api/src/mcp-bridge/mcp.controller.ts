@@ -2,7 +2,6 @@ import {
   All,
   Controller,
   Headers,
-  Logger,
   Param,
   Req,
   Res,
@@ -13,6 +12,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { McpTokenService } from "./mcp-token.service";
 import { McpRegistryService } from "./mcp-registry.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * HTTP MCP bridge — one route per bridged server, consumed by the Claude Code
@@ -26,9 +26,9 @@ import { McpRegistryService } from "./mcp-registry.service";
  */
 @Controller("mcp")
 export class McpController {
-  private readonly logger = new Logger(McpController.name);
-
   constructor(
+    @InjectPinoLogger(McpController.name)
+    private readonly logger: PinoLogger,
     private readonly tokens: McpTokenService,
     private readonly registry: McpRegistryService
   ) {}

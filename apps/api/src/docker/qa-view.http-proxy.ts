@@ -1,10 +1,11 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import type { Request, Response, RequestHandler } from "express";
 import { PrismaService } from "../prisma/prisma.service";
 import { BrowserSidecarService } from "./browser-sidecar.service";
 import { SESSION_COOKIE_NAME } from "../auth/auth.service";
 import type { BridgeJwtPayload } from "../auth/jwt.strategy";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const PREFIX = "/api/qa-browser/view/";
 
@@ -28,9 +29,9 @@ const PREFIX = "/api/qa-browser/view/";
  */
 @Injectable()
 export class QaViewHttpProxy {
-  private readonly logger = new Logger(QaViewHttpProxy.name);
-
   constructor(
+    @InjectPinoLogger(QaViewHttpProxy.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly sidecar: BrowserSidecarService,
     private readonly jwt: JwtService

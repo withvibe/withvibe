@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
+import { Injectable, OnModuleDestroy } from "@nestjs/common";
 import { execFile, spawn, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import { mkdir } from "fs/promises";
@@ -6,6 +6,7 @@ import path from "path";
 import os from "os";
 import { PrismaService } from "../prisma/prisma.service";
 import { CodeWorkspaceService } from "../env-clones/code-workspace.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
@@ -52,7 +53,6 @@ type StartErr = {
 
 @Injectable()
 export class CodeTunnelService implements OnModuleDestroy {
-  private readonly logger = new Logger(CodeTunnelService.name);
   // Key: `<userId>:<envId>`. Cleared on Nest exit; tunnels then orphan and
   // can be re-adopted by the same `--name` on next start.
   private readonly tunnels = new Map<string, TunnelHandle>();
@@ -64,6 +64,8 @@ export class CodeTunnelService implements OnModuleDestroy {
   >();
 
   constructor(
+    @InjectPinoLogger(CodeTunnelService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly codeWorkspace: CodeWorkspaceService
   ) {}
@@ -214,7 +216,7 @@ export class CodeTunnelService implements OnModuleDestroy {
           };
           const onChunk = (b: Buffer) => {
             const text = b.toString();
-            this.logger.log(`[tunnel ${tunnelName}] ${text.trim()}`);
+            this.logger.info(`[tunnel ${tunnelName}] ${text.trim()}`);
             if (
               /Open this link in your browser/i.test(text) ||
               /vscode\.dev\/tunnel\//i.test(text) ||
@@ -226,7 +228,7 @@ export class CodeTunnelService implements OnModuleDestroy {
           child.stdout?.on("data", onChunk);
           child.stderr?.on("data", onChunk);
           child.on("exit", (code, signal) => {
-            this.logger.log(
+            this.logger.info(
               `Tunnel ${tunnelName} exited (code=${code} signal=${signal})`
             );
             this.tunnels.delete(key);
@@ -487,7 +489,7 @@ export class CodeTunnelService implements OnModuleDestroy {
     for (const candidate of candidates) {
       if (await this.tryCodeBin(candidate)) {
         this.cachedCodeBin = candidate;
-        this.logger.log(`Using \`code\` CLI at ${candidate}`);
+        this.logger.info(`Using \`code\` CLI at ${candidate}`);
         return candidate;
       }
     }
@@ -531,7 +533,7 @@ export class CodeTunnelService implements OnModuleDestroy {
           ["--install-extension", id, "--cli-data-dir", dataDir, "--force"],
           { timeout: 60_000 }
         );
-        this.logger.log(`Tunnel extension ensured: ${id}`);
+        this.logger.info(`Tunnel extension ensured: ${id}`);
       } catch (err) {
         this.logger.warn(
           `Failed to pre-install tunnel extension ${id}: ${
@@ -629,7 +631,7 @@ export class CodeTunnelService implements OnModuleDestroy {
       child.stderr?.on("data", onChunk);
 
       child.on("exit", (code) => {
-        this.logger.log(
+        this.logger.info(
           `code tunnel user login (user=${userId}) exited code=${code}`
         );
         this.pendingLogins.delete(userId);

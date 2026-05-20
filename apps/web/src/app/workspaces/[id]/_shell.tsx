@@ -319,7 +319,13 @@ export function WorkspaceShell({
                   <DropdownMenuItem
                     onClick={async () => {
                       await logout();
-                      router.push("/login");
+                      // replace (not push) so the workspace can't be reached
+                      // via the back button — its layout would still hold
+                      // server-rendered user props from before logout. refresh
+                      // forces server components to re-evaluate auth on the
+                      // next visit.
+                      router.replace("/login");
+                      router.refresh();
                     }}
                   >
                     <LogOut className="size-4" />

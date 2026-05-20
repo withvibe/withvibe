@@ -1,8 +1,9 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { mkdir, rm, writeFile } from "fs/promises";
 import path from "path";
 import { positionLabel } from "@withvibe/db";
 import { PrismaService } from "../prisma/prisma.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * Ephemeral filesystem mirror of DB-backed memory.
@@ -16,9 +17,11 @@ import { PrismaService } from "../prisma/prisma.service";
  */
 @Injectable()
 export class MemoryMirrorService {
-  private readonly logger = new Logger(MemoryMirrorService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectPinoLogger(MemoryMirrorService.name)
+    private readonly logger: PinoLogger,
+    private readonly prisma: PrismaService
+  ) {}
 
   async materialize(args: {
     envDir: string;

@@ -32,6 +32,26 @@ BUILDER="withvibe-builder"
 
 echo "==> Publishing ${REGISTRY}/* :${VERSION} (+latest=${PUSH_LATEST}) for ${PLATFORMS}"
 
+# Keep apps/api/package.json and apps/web/package.json's "version" field in
+# sync with the release tag. The api falls back to reading its own
+# package.json for the UI version label when WITHVIBE_VERSION isn't set or
+# is "latest", so an out-of-sync value would show the wrong number.
+sync_pkg_version() {
+  local pkg="$1"
+  node -e "
+    const fs = require('fs');
+    const p = '$pkg';
+    const j = JSON.parse(fs.readFileSync(p, 'utf-8'));
+    if (j.version !== '$VERSION') {
+      j.version = '$VERSION';
+      fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+      console.log('   synced ' + p + ' -> $VERSION');
+    }
+  "
+}
+sync_pkg_version apps/api/package.json
+sync_pkg_version apps/web/package.json
+
 # Fail early with a clear message if the registry push would 401.
 if ! docker buildx imagetools inspect "${REGISTRY}/api:latest" >/dev/null 2>&1; then
   echo "    (note: can't read ${REGISTRY}/api:latest — first publish, or not logged in)"

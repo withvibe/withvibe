@@ -5,6 +5,7 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 import bcrypt from "bcryptjs";
 import type { Response } from "express";
 import { PrismaService } from "../prisma/prisma.service";
@@ -25,6 +26,8 @@ export class AuthService {
   private readonly cookieSecure: boolean;
 
   constructor(
+    @InjectPinoLogger(AuthService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     config: ConfigService
@@ -35,6 +38,26 @@ export class AuthService {
     this.cookieSecure =
       explicit === "true" ||
       (explicit !== "false" && process.env.NODE_ENV === "production");
+
+    this.logger.info(
+      `Session cookie config: secure=${this.cookieSecure} domain=${
+        this.cookieDomain ?? "<request host>"
+      } sameSite=lax httpOnly=true ttl=${SESSION_TTL_SECONDS}s`
+    );
+    // Common misconfigurations that drop the cookie silently in the browser.
+    // We can't catch every case at startup (e.g. domain-mismatch needs a live
+    // request to detect), but flagging the common foot-guns here saves hours
+    // of "why am I getting bounced to /login on refresh?" debugging.
+    if (this.cookieSecure && process.env.NODE_ENV !== "production") {
+      this.logger.warn(
+        "COOKIE_SECURE=true outside production — the browser will REJECT this cookie unless served over HTTPS. Set COOKIE_SECURE=false for local dev."
+      );
+    }
+    if (this.cookieDomain && !this.cookieDomain.includes(".")) {
+      this.logger.warn(
+        `COOKIE_DOMAIN="${this.cookieDomain}" looks like a single-label host. Browsers ignore single-label cookie domains; either remove COOKIE_DOMAIN or set it to a real eTLD+1.`
+      );
+    }
   }
 
   async register(input: RegisterInput): Promise<SessionUser> {
@@ -73,14 +96,21 @@ export class AuthService {
     // Same error on missing user vs wrong password — don't leak account
     // existence via timing or response shape.
     if (!user || !user.passwordHash) {
+      // Email is logged so a real account-takeover attempt can be correlated
+      // across many tries; PII tradeoff is acceptable for an auth log.
+      this.logger.warn(
+        `Login failed (no user / no password): email="${input.email}"`
+      );
       throw new UnauthorizedException("Invalid credentials");
     }
 
     const ok = await bcrypt.compare(input.password, user.passwordHash);
     if (!ok) {
+      this.logger.warn(`Login failed (wrong password): email="${input.email}"`);
       throw new UnauthorizedException("Invalid credentials");
     }
 
+    this.logger.info(`Login OK: userId=${user.id} email="${user.email}"`);
     return { id: user.id, email: user.email };
   }
 

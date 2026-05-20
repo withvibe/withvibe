@@ -12,6 +12,15 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+// Render markdown anchors as new-tab links. Without this, react-markdown emits
+// bare <a href> which navigates away from the env page when users click links
+// posted in chat.
+const MARKDOWN_COMPONENTS = {
+  a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a {...props} target="_blank" rel="noopener noreferrer" />
+  ),
+} as const;
 import {
   Bot,
   FileText,
@@ -320,6 +329,30 @@ export function EnvironmentChat({
       })
       .catch(() => {});
   }, [workspaceId]);
+
+  // Onboarding banner dismissed-state — persisted per env so a returning user
+  // doesn't see it again. Initial state read in an effect (not at render) to
+  // stay SSR-safe.
+  const onboardingKey = `withvibe.onboarding.dismissed:${envId}`;
+  const [onboardingDismissed, setOnboardingDismissed] = useState(true);
+  useEffect(() => {
+    try {
+      setOnboardingDismissed(
+        window.localStorage.getItem(onboardingKey) === "1"
+      );
+    } catch {
+      // localStorage unavailable (private mode) — leave dismissed=true so the
+      // banner stays out of the way rather than nagging on every reload.
+    }
+  }, [onboardingKey]);
+  function dismissOnboarding() {
+    setOnboardingDismissed(true);
+    try {
+      window.localStorage.setItem(onboardingKey, "1");
+    } catch {
+      /* ignore */
+    }
+  }
 
   // Prefill handler (from Ask-AI-to-generate button upstream).
   useEffect(() => {
@@ -1365,6 +1398,37 @@ export function EnvironmentChat({
           )}
         </div>
 
+        {/* First-env onboarding banner. Shown when the active session has
+            exactly one message (the pre-persisted DevOps greeting) and no
+            user reply yet, OR when there are no messages at all on a fresh
+            session. Auto-disappears after the user sends their first
+            message; can also be dismissed manually. */}
+        {!onboardingDismissed &&
+          !messages.some((m) => m.role === "user") &&
+          !live && (
+            <div className="mx-4 mt-2 mb-1 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 flex items-start gap-2 text-sm">
+              <Sparkles className="size-4 text-primary mt-0.5 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="font-medium">
+                  Talk to DevOps below to start your environment
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Try “Start the env” or “Set up the database”. DevOps will
+                  walk you through what this env needs.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={dismissOnboarding}
+                className="text-muted-foreground hover:text-foreground transition-smooth shrink-0"
+                title="Dismiss"
+                aria-label="Dismiss onboarding hint"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+          )}
+
         {messages.length === 0 && !live ? (
           <div className="flex-1 min-h-0 overflow-y-auto">
             <div className="p-6 text-center py-12 space-y-3">
@@ -1876,7 +1940,10 @@ const MessageBubble = memo(function MessageBubble({
                 dir="auto"
                 className="prose prose-sm prose-invert max-w-none"
               >
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={MARKDOWN_COMPONENTS}
+                >
                   {message.content}
                 </ReactMarkdown>
               </div>
@@ -2546,7 +2613,10 @@ const SegmentsRenderer = memo(function SegmentsRenderer({
             dir="auto"
             className="prose prose-sm prose-invert max-w-none"
           >
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={MARKDOWN_COMPONENTS}
+            >
               {seg.text}
             </ReactMarkdown>
           </div>

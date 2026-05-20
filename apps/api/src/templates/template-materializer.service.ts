@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { readFile } from "fs/promises";
@@ -25,6 +24,7 @@ import { AgentVariableBinderService } from "./agent-variable-binder.service";
 import { SecretsService } from "../workspaces/secrets.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { composeProjectName } from "../docker/compose-naming";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 // ${VAR_NAME} — uppercase letters/digits/underscore, must start with a letter.
 const INTERPOLATION_RE = /\$\{([A-Z][A-Z0-9_]*)\}/g;
@@ -76,9 +76,9 @@ export type LocalBundleFromCustom = {
  */
 @Injectable()
 export class TemplateMaterializerService {
-  private readonly logger = new Logger(TemplateMaterializerService.name);
-
   constructor(
+    @InjectPinoLogger(TemplateMaterializerService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly ports: PortAllocatorService,
     private readonly config: ConfigService,
@@ -209,7 +209,7 @@ export class TemplateMaterializerService {
       // point at the env dir which has no Dockerfile. Rebase them so they
       // keep resolving inside the repo subdirectory.
       sourceComposeYaml = rebaseBuildPaths(sourceComposeYaml, repoName);
-      this.logger.log(
+      this.logger.info(
         `Env ${args.envId} using repo "${repoName}" docker-compose.yml as ` +
           `source (template "${tpl.slug}" has empty composeFile)`
       );
@@ -272,7 +272,7 @@ export class TemplateMaterializerService {
       });
       composeToWrite = rewritten.composeYaml;
       serviceUrls = rewritten.serviceUrls;
-      this.logger.log(
+      this.logger.info(
         `Env ${args.envId} compose rewritten for subdomain routing: ` +
           `${rewritten.exposedServices.length} service(s) exposed via ${baseDomain}`
       );
@@ -303,7 +303,7 @@ export class TemplateMaterializerService {
             bindIp
           );
           allocatedPorts[key] = hostPort;
-          this.logger.log(
+          this.logger.info(
             `Env ${args.envId} TCP-exposed ${service}: ` +
               `${bindIp ? bindIp + ":" : ""}${host}:${hostPort} → :${containerPort}`
           );
@@ -343,7 +343,7 @@ export class TemplateMaterializerService {
     const emptyVars = varsToResolve.filter(
       (v) => !(v.key in reserved) && (resolvedVars[v.key] ?? "") === ""
     );
-    this.logger.log(
+    this.logger.info(
       `Env ${args.envId} deterministic resolution: ${varsToResolve.length} vars, ` +
         `${emptyVars.length} empty → [${emptyVars.map((v) => v.key).join(", ")}]`
     );
@@ -414,7 +414,7 @@ export class TemplateMaterializerService {
     // Docker can see them immediately (no-op when storage IS the env clone dir).
     await this.storage.syncToEnvClone(args.workspaceId, args.envId);
 
-    this.logger.log(
+    this.logger.info(
       `Materialized template ${tpl.slug} into env ${args.envId}: ` +
         `${tpl.assets.length} asset(s), ${portKeys.length} port(s) allocated`
     );

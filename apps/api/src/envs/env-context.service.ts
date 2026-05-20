@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import * as fs from "fs/promises";
@@ -13,11 +12,13 @@ import { StorageService } from "../storage/storage.service";
 import { CodeWorkspaceService } from "../env-clones/code-workspace.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import {
+  MAX_ENV_CONTEXT_EDITABLE_BYTES,
   MAX_ENV_CONTEXT_FILES,
   MAX_ENV_CONTEXT_FILE_BYTES,
   MAX_ENV_CONTEXT_TOTAL_BYTES,
   normalizeContextRelPath,
 } from "./env-context-types";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 export type EnvContextTreeEntry = {
   name: string;
@@ -50,9 +51,9 @@ export type UploadedFile = {
  */
 @Injectable()
 export class EnvContextService {
-  private readonly logger = new Logger(EnvContextService.name);
-
   constructor(
+    @InjectPinoLogger(EnvContextService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
     private readonly storage: StorageService,
@@ -171,7 +172,7 @@ export class EnvContextService {
 
     await this.codeWorkspace.writeWorkspaceFiles(envId);
 
-    this.logger.log(
+    this.logger.info(
       `Env ${envId} extra-context: uploaded ${normalized.length} file(s)`
     );
     return this.tree(userId, workspaceId, envId);
@@ -204,8 +205,230 @@ export class EnvContextService {
         )
       );
     await this.codeWorkspace.writeWorkspaceFiles(envId);
-    this.logger.log(`Env ${envId} extra-context deleted: ${relPath}`);
+    this.logger.info(`Env ${envId} extra-context deleted: ${relPath}`);
     return this.tree(userId, workspaceId, envId);
+  }
+
+  /**
+   * Create an empty folder at the given relative path. Intermediate folders
+   * are created automatically (mkdir -p). Idempotent: existing folder is a
+   * no-op, existing FILE at the same path is an error.
+   */
+  async createFolder(
+    userId: string,
+    workspaceId: string,
+    envId: string,
+    relPath: string
+  ): Promise<{ root: EnvContextTreeEntry }> {
+    await this.assertEnv(userId, workspaceId, envId);
+    const root = await this.rootDir(workspaceId, envId);
+    await fs.mkdir(root, { recursive: true });
+    const abs = this.resolveSafe(root, relPath);
+    if (!abs || abs === path.resolve(root)) {
+      throw new BadRequestException("Invalid path");
+    }
+    try {
+      const st = await fs.stat(abs);
+      if (st.isDirectory()) {
+        // Already there — return current tree (idempotent).
+        return this.tree(userId, workspaceId, envId);
+      }
+      throw new BadRequestException("A file exists at that path");
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      // Not present — proceed to create.
+    }
+    await fs.mkdir(abs, { recursive: true });
+    await this.codeWorkspace.writeWorkspaceFiles(envId);
+    this.logger.info(`Env ${envId} extra-context folder created: ${relPath}`);
+    return this.tree(userId, workspaceId, envId);
+  }
+
+  /**
+   * Create an empty file (or with a small text body) at the given relative
+   * path. Errors if a folder or file already exists at that path so we don't
+   * silently overwrite the user's data.
+   */
+  async createFile(
+    userId: string,
+    workspaceId: string,
+    envId: string,
+    relPath: string,
+    content: string
+  ): Promise<{ root: EnvContextTreeEntry }> {
+    await this.assertEnv(userId, workspaceId, envId);
+    const root = await this.rootDir(workspaceId, envId);
+    await fs.mkdir(root, { recursive: true });
+    const abs = this.resolveSafe(root, relPath);
+    if (!abs || abs === path.resolve(root)) {
+      throw new BadRequestException("Invalid path");
+    }
+    try {
+      await fs.stat(abs);
+      throw new BadRequestException("An entry already exists at that path");
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      // Not present — proceed.
+    }
+    const buffer = Buffer.from(content ?? "", "utf-8");
+    if (buffer.byteLength > MAX_ENV_CONTEXT_FILE_BYTES) {
+      throw new BadRequestException(
+        `Content exceeds ${MAX_ENV_CONTEXT_FILE_BYTES / 1024 / 1024}MB per-file limit`
+      );
+    }
+    // Quota check before writing.
+    const { fileCount, totalBytes } = await this.measure(root);
+    if (fileCount + 1 > MAX_ENV_CONTEXT_FILES) {
+      throw new BadRequestException(
+        `Too many extra-context files — limit ${MAX_ENV_CONTEXT_FILES}`
+      );
+    }
+    if (totalBytes + buffer.byteLength > MAX_ENV_CONTEXT_TOTAL_BYTES) {
+      throw new BadRequestException(
+        `Total extra-context size would exceed ${MAX_ENV_CONTEXT_TOTAL_BYTES / 1024 / 1024}MB`
+      );
+    }
+    await this.storage.writeExtraContextFile(
+      workspaceId,
+      envId,
+      this.normalizeRel(relPath),
+      buffer
+    );
+    await this.storage
+      .syncToEnvClone(workspaceId, envId)
+      .catch((err) =>
+        this.logger.error(
+          `syncToEnvClone after extra-context file create failed (env=${envId}): ${err}`
+        )
+      );
+    await this.codeWorkspace.writeWorkspaceFiles(envId);
+    this.logger.info(`Env ${envId} extra-context file created: ${relPath}`);
+    return this.tree(userId, workspaceId, envId);
+  }
+
+  /**
+   * Write (create-or-overwrite) a text file. Used by the in-app editor for
+   * both "save existing" and "save new". Counts quota against the *delta*
+   * — replacing a 1MB file with a 1.1MB file only consumes 100KB of budget.
+   * Refuses to overwrite a folder (you'd lose the children silently).
+   */
+  async writeFile(
+    userId: string,
+    workspaceId: string,
+    envId: string,
+    relPath: string,
+    content: string
+  ): Promise<{ root: EnvContextTreeEntry }> {
+    await this.assertEnv(userId, workspaceId, envId);
+    const root = await this.rootDir(workspaceId, envId);
+    await fs.mkdir(root, { recursive: true });
+    const abs = this.resolveSafe(root, relPath);
+    if (!abs || abs === path.resolve(root)) {
+      throw new BadRequestException("Invalid path");
+    }
+    let existing: { size: number } | null = null;
+    try {
+      const st = await fs.stat(abs);
+      if (st.isDirectory()) {
+        throw new BadRequestException(
+          "A folder exists at that path — refusing to replace it with a file"
+        );
+      }
+      existing = { size: st.size };
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      // Not present — fine; treat as create.
+    }
+    const buffer = Buffer.from(content ?? "", "utf-8");
+    if (buffer.byteLength > MAX_ENV_CONTEXT_FILE_BYTES) {
+      throw new BadRequestException(
+        `Content exceeds ${MAX_ENV_CONTEXT_FILE_BYTES / 1024 / 1024}MB per-file limit`
+      );
+    }
+    const { fileCount, totalBytes } = await this.measure(root);
+    const willAddFile = existing === null;
+    if (willAddFile && fileCount + 1 > MAX_ENV_CONTEXT_FILES) {
+      throw new BadRequestException(
+        `Too many extra-context files — limit ${MAX_ENV_CONTEXT_FILES}`
+      );
+    }
+    const projectedTotal =
+      totalBytes - (existing?.size ?? 0) + buffer.byteLength;
+    if (projectedTotal > MAX_ENV_CONTEXT_TOTAL_BYTES) {
+      throw new BadRequestException(
+        `Total extra-context size would exceed ${MAX_ENV_CONTEXT_TOTAL_BYTES / 1024 / 1024}MB`
+      );
+    }
+    await this.storage.writeExtraContextFile(
+      workspaceId,
+      envId,
+      this.normalizeRel(relPath),
+      buffer
+    );
+    await this.storage
+      .syncToEnvClone(workspaceId, envId)
+      .catch((err) =>
+        this.logger.error(
+          `syncToEnvClone after extra-context file write failed (env=${envId}): ${err}`
+        )
+      );
+    await this.codeWorkspace.writeWorkspaceFiles(envId);
+    this.logger.info(
+      `Env ${envId} extra-context file ${existing ? "updated" : "created"}: ${relPath} (${buffer.byteLength}B)`
+    );
+    return this.tree(userId, workspaceId, envId);
+  }
+
+  /**
+   * Read a file's content as UTF-8 text for in-app editing. Refuses to read
+   * binaries (cheap null-byte sniff on the first 8KB) and anything over
+   * MAX_ENV_CONTEXT_EDITABLE_BYTES — Monaco gets sluggish past a few MB.
+   */
+  async readFileText(
+    userId: string,
+    workspaceId: string,
+    envId: string,
+    relPath: string
+  ): Promise<{ content: string; size: number }> {
+    await this.assertEnv(userId, workspaceId, envId);
+    const root = await this.rootDir(workspaceId, envId);
+    const abs = this.resolveSafe(root, relPath);
+    if (!abs) throw new BadRequestException("Invalid path");
+    let st;
+    try {
+      st = await fs.stat(abs);
+    } catch {
+      throw new NotFoundException("File not found");
+    }
+    if (!st.isFile()) {
+      throw new BadRequestException("Not a file");
+    }
+    if (st.size > MAX_ENV_CONTEXT_EDITABLE_BYTES) {
+      throw new BadRequestException(
+        `File too large to edit in-app (${(st.size / 1024 / 1024).toFixed(1)}MB > ${MAX_ENV_CONTEXT_EDITABLE_BYTES / 1024 / 1024}MB). Open it in the VS Code tunnel instead.`
+      );
+    }
+    // Binary sniff: read the first 8KB and reject if it contains NULs.
+    const fd = await fs.open(abs, "r");
+    try {
+      const sniffLen = Math.min(8 * 1024, st.size);
+      const sniff = Buffer.alloc(sniffLen);
+      await fd.read(sniff, 0, sniffLen, 0);
+      if (sniff.includes(0)) {
+        throw new BadRequestException(
+          "File looks binary — refusing to load as text. Use Download instead."
+        );
+      }
+    } finally {
+      await fd.close();
+    }
+    const content = await fs.readFile(abs, "utf-8");
+    return { content, size: st.size };
+  }
+
+  /** Strip leading/trailing slashes and normalize separators. */
+  private normalizeRel(relPath: string): string {
+    return relPath.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
   }
 
   async renameEntry(
@@ -252,7 +475,7 @@ export class EnvContextService {
     );
 
     await this.codeWorkspace.writeWorkspaceFiles(envId);
-    this.logger.log(
+    this.logger.info(
       `Env ${envId} extra-context renamed: ${fromRel} -> ${toRel}`
     );
     return this.tree(userId, workspaceId, envId);

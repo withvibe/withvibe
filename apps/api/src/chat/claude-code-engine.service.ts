@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { spawn } from "child_process";
 import { mkdir, rm, writeFile } from "fs/promises";
 import path from "path";
@@ -11,6 +11,7 @@ import type { ChatEvent } from "./chat-stream.service";
 import { friendlyAuthError } from "./chat-stream.service";
 import type { ConcreteModelId } from "./models";
 import { DEFAULT_MODEL } from "./models";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /** Resolved at runtime from process.env so dev/prod can point the runner at a different host. */
 function mcpBridgeBaseUrl(): string {
@@ -96,9 +97,9 @@ type ClaudeCliEvent =
  */
 @Injectable()
 export class ClaudeCodeEngineService {
-  private readonly logger = new Logger(ClaudeCodeEngineService.name);
-
   constructor(
+    @InjectPinoLogger(ClaudeCodeEngineService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly runner: ClaudeRunnerService,
     private readonly envClones: EnvCloneService
@@ -115,7 +116,7 @@ export class ClaudeCodeEngineService {
         context.envId,
         context.workspaceId
       );
-      this.logger.log(`[claude-code] runner ready: ${name}`);
+      this.logger.info(`[claude-code] runner ready: ${name}`);
       return null;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -260,7 +261,7 @@ export class ClaudeCodeEngineService {
       claudeArgs.push("--resume", resumeSessionId);
     }
 
-    this.logger.log(
+    this.logger.info(
       `[claude-code] spawning docker exec (container=${containerName}, resume=${resumeSessionId ?? "-"}, tools-denied=${context.disallowedTools.length}, addl-dirs=${context.additionalDirectories.length})`
     );
 
@@ -504,7 +505,7 @@ export class ClaudeCodeEngineService {
             capturedSessionId = event.session_id;
           }
           if (event.subtype === "success" && !event.is_error) {
-            this.logger.log(
+            this.logger.info(
               `[claude-code] run done cost=$${event.total_cost_usd?.toFixed(4) ?? "?"} duration=${event.duration_ms ?? "?"}ms session=${capturedSessionId ?? "-"}`
             );
             await this.persistSessionId(context.sessionId, capturedSessionId);

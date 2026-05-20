@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { access, chmod, mkdir, rm, writeFile } from "fs/promises";
@@ -6,6 +6,7 @@ import path from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { ensureEnvDir, resolveRepoBaseDir } from "../common/repo-base-dir";
 import { CodeWorkspaceService } from "./code-workspace.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
@@ -27,13 +28,13 @@ const exec = promisify(execFile);
  */
 @Injectable()
 export class EnvCloneService {
-  private readonly logger = new Logger(EnvCloneService.name);
-
   private get baseDir(): string {
     return resolveRepoBaseDir();
   }
 
   constructor(
+    @InjectPinoLogger(EnvCloneService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly codeWorkspace: CodeWorkspaceService
   ) {}
@@ -414,7 +415,10 @@ exit 0
     }
   }
 
-  async removeEnvClone(envRepoId: string): Promise<void> {
+  async removeEnvClone(
+    envRepoId: string,
+    options: { deleteRemoteBranch?: boolean } = {}
+  ): Promise<void> {
     const envRepo = await this.prisma.client.envRepo.findUnique({
       where: { id: envRepoId },
       include: { repo: { include: { clone: true } } },
@@ -435,6 +439,39 @@ exit 0
       }).catch(() => {});
     }
 
+    // Opt-in: remove the branch on origin too. Default off because branches
+    // are sometimes useful as a record after the env itself is gone (open
+    // PRs, partial work the user wants to revisit). Failures here are
+    // logged and swallowed — local cleanup already succeeded, and "remote
+    // ref does not exist" is the expected outcome if the branch was never
+    // pushed or was already deleted elsewhere.
+    if (options.deleteRemoteBranch && branch && mainClone) {
+      try {
+        await exec(
+          "git",
+          ["-C", mainClone, "push", "origin", "--delete", branch],
+          { timeout: 20_000 }
+        );
+        this.logger.info(
+          `Deleted remote branch "${branch}" on origin (envRepo ${envRepoId}).`
+        );
+      } catch (err) {
+        // execFile rejects with an Error carrying `stderr` on non-zero exit.
+        const stderr =
+          (err as { stderr?: string } | null)?.stderr ??
+          (err instanceof Error ? err.message : String(err));
+        if (/remote ref does not exist/i.test(stderr)) {
+          this.logger.info(
+            `Remote branch "${branch}" was already gone — nothing to delete on origin.`
+          );
+        } else {
+          this.logger.warn(
+            `Failed to delete remote branch "${branch}" for envRepo ${envRepoId}: ${stderr.trim() || "unknown error"}`
+          );
+        }
+      }
+    }
+
     // Drop the removed repo from the .code-workspace so VS Code stops
     // showing a missing folder. Best-effort.
     void this.codeWorkspace
@@ -442,12 +479,15 @@ exit 0
       .catch(() => {});
   }
 
-  async removeEnvClones(envId: string): Promise<void> {
+  async removeEnvClones(
+    envId: string,
+    options: { deleteRemoteBranch?: boolean } = {}
+  ): Promise<void> {
     const envRepos = await this.prisma.client.envRepo.findMany({
       where: { envId },
     });
     for (const er of envRepos) {
-      await this.removeEnvClone(er.id);
+      await this.removeEnvClone(er.id, options);
     }
   }
 }

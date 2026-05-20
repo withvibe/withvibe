@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@withvibe/db";
@@ -16,6 +15,7 @@ import {
   normalizeAssetPath,
   type EnvAssetMeta,
 } from "./envs.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 type UploadedFile = {
   /** Relative path (from webkitdirectory-style uploads) — validated. */
@@ -25,9 +25,9 @@ type UploadedFile = {
 
 @Injectable()
 export class EnvAssetsService {
-  private readonly logger = new Logger(EnvAssetsService.name);
-
   constructor(
+    @InjectPinoLogger(EnvAssetsService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
     private readonly agentSeed: AgentSeedService,
@@ -67,7 +67,7 @@ export class EnvAssetsService {
     envId: string,
     files: UploadedFile[]
   ): Promise<EnvAssetMeta[]> {
-    this.logger.log(
+    this.logger.info(
       `Asset upload: env ${envId}, ${files.length} file(s): ${files.map((f) => f.relativePath).join(", ")}`
     );
     const { assetFiles } = await this.loadEnv(userId, workspaceId, envId);
@@ -138,7 +138,7 @@ export class EnvAssetsService {
       data: { assetFiles: merged.length > 0 ? merged : Prisma.DbNull },
     });
 
-    this.logger.log(
+    this.logger.info(
       `Env ${envId} assets: uploaded ${incoming.length} file(s), total ${merged.length}`
     );
     await this.agentSeed

@@ -13,12 +13,33 @@ set -e
 #
 # We use `prisma db push` to match the project's dev workflow (no migrations/
 # folder is checked in — see packages/db/package.json scripts). It's
-# idempotent and creates missing tables on a fresh DB. For destructive
-# schema changes you'll be prompted; this entrypoint refuses them by default
-# (--accept-data-loss is NOT passed). Set SKIP_MIGRATE=1 to bypass.
+# idempotent for clean fresh DBs and for already-in-sync DBs, but some legacy
+# installs hit "table already exists" errors when the DB was previously
+# populated by a different tool (manual SQL, an older Prisma, etc.). Treat
+# those specific failures as success-with-warning so the container can boot
+# and serve traffic; truly broken schemas will fail at first query and the
+# user will see the real error there.
+#
+# Set SKIP_MIGRATE=1 to bypass the push entirely.
 if [ "${SKIP_MIGRATE:-}" != "1" ]; then
   echo "[entrypoint] running prisma db push…"
-  npx --yes prisma db push --schema /app/prisma/schema.prisma
+  push_log=$(mktemp)
+  rc=0
+  npx --yes prisma db push --schema /app/prisma/schema.prisma >"$push_log" 2>&1 || rc=$?
+  cat "$push_log"
+  if [ "$rc" != "0" ]; then
+    # Known-benign patterns: schema is effectively in sync, or tables existed
+    # before we got here from a previous bootstrap. Anything else is a real
+    # failure and we abort.
+    if grep -qE "already in sync|already exists|relation .* already exists|P3005" "$push_log"; then
+      echo "[entrypoint] schema appears to already exist — continuing despite non-zero exit."
+    else
+      echo "[entrypoint] prisma db push failed with rc=$rc — aborting." >&2
+      rm -f "$push_log"
+      exit "$rc"
+    fi
+  fi
+  rm -f "$push_log"
 fi
 
 exec "$@"

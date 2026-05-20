@@ -2,7 +2,6 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
-  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { execFile } from "child_process";
@@ -12,6 +11,7 @@ import path from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { resolveRepoBaseDir } from "../common/repo-base-dir";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
@@ -20,10 +20,11 @@ const GITHUB_URL_RE =
 
 @Injectable()
 export class ReposService {
-  private readonly logger = new Logger(ReposService.name);
   private readonly repoLocks = new Map<string, Promise<void>>();
 
   constructor(
+    @InjectPinoLogger(ReposService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService
   ) {}

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { randomUUID } from "crypto";
 import type { WebSocket } from "ws";
 import type {
@@ -6,6 +6,7 @@ import type {
   WaitState,
   WaitUntil,
 } from "./qa-browser-ops";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 type Pairing = {
   envId: string;
@@ -39,7 +40,10 @@ const RPC_TIMEOUT_MS = 30_000;
  */
 @Injectable()
 export class UserBrowserBridgeService {
-  private readonly logger = new Logger(UserBrowserBridgeService.name);
+  constructor(
+    @InjectPinoLogger(UserBrowserBridgeService.name)
+    private readonly logger: PinoLogger
+  ) {}
   // Keyed by `${envId}::${userId}`. The QA agent dispatches per env; if
   // multiple users in the same workspace pair their browsers to the same env,
   // each owns their own pairing — the agent uses the speaker's pairing.
@@ -74,7 +78,7 @@ export class UserBrowserBridgeService {
       lastSeenAt: new Date(),
       pendingByRequestId: new Map(),
     });
-    this.logger.log(
+    this.logger.info(
       `QA-browser extension paired: env=${args.envId} user=${args.userId}`
     );
     return { ok: true };
@@ -88,7 +92,7 @@ export class UserBrowserBridgeService {
       pending.reject(new Error("Extension disconnected"));
     }
     this.pairings.delete(key);
-    this.logger.log(
+    this.logger.info(
       `QA-browser extension unpaired: env=${args.envId} user=${args.userId}`
     );
   }

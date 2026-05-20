@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { createServer, type IncomingMessage, type Server } from "http";
 import type { Duplex } from "stream";
@@ -10,6 +10,7 @@ import * as pty from "node-pty";
 import { PrismaService } from "../prisma/prisma.service";
 import { DockerService } from "../docker/docker.service";
 import type { BridgeJwtPayload } from "../auth/jwt.strategy";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
@@ -24,10 +25,11 @@ const exec = promisify(execFile);
  */
 @Injectable()
 export class TerminalService {
-  private readonly logger = new Logger(TerminalService.name);
   private readonly wss = new WebSocketServer({ noServer: true });
 
   constructor(
+    @InjectPinoLogger(TerminalService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly docker: DockerService,
     private readonly config: ConfigService
@@ -120,7 +122,7 @@ export class TerminalService {
       return;
     }
 
-    this.logger.log(
+    this.logger.info(
       `${tag} — opening shell in ${targetId.slice(0, 12)} for user ${userId}`
     );
     this.wss.handleUpgrade(req, socket, head, (ws) => {

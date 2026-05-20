@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { execFile, spawn, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import { access, readdir, readFile } from "fs/promises";
@@ -18,6 +18,7 @@ import { DbViewerService } from "./db-viewer.service";
 import { BrowserSidecarService } from "./browser-sidecar.service";
 import { PlaywrightMcpService } from "./playwright-mcp.service";
 import { CodeServerService } from "./code-server.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
@@ -72,11 +73,12 @@ type ComposeContext = {
  */
 @Injectable()
 export class DockerService {
-  private readonly logger = new Logger(DockerService.name);
   private readonly logBuffers = new Map<string, string[]>();
   private readonly logSubs = new Map<string, Set<LogSubscriber>>();
 
   constructor(
+    @InjectPinoLogger(DockerService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly envClones: EnvCloneService,
     private readonly storage: StorageService,

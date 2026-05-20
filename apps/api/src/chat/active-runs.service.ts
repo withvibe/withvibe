@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { randomUUID } from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { ChatContextService, type ChatContext } from "./chat-context.service";
@@ -7,6 +7,7 @@ import {
   type ChatEvent,
   type DebugEvent,
 } from "./chat-stream.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 type DebugSdkEvent = Extract<DebugEvent, { type: "debug_sdk_event" }>;
 type DebugMeta = Extract<DebugEvent, { type: "debug_meta" }>;
@@ -141,7 +142,6 @@ type WorkspaceSubscriber = (ev: WorkspaceRunEvent) => void;
 
 @Injectable()
 export class ActiveRunsService {
-  private readonly logger = new Logger(ActiveRunsService.name);
   // Keyed by sessionId — different sessions in the same env can run in parallel.
   private readonly runs = new Map<string, ActiveRun>();
   // Pending turns queued behind an in-flight run, FIFO per session.
@@ -156,6 +156,8 @@ export class ActiveRunsService {
   private readonly workspaceSubs = new Map<string, Set<WorkspaceSubscriber>>();
 
   constructor(
+    @InjectPinoLogger(ActiveRunsService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly context: ChatContextService,
     private readonly chat: ChatStreamService
@@ -273,7 +275,7 @@ export class ActiveRunsService {
         type: "queued",
         queuedCount: queue.length,
       });
-      this.logger.log(
+      this.logger.info(
         `Message queued: session=${params.sessionId} pending=${queue.length}`
       );
       return { run: existing, queued: true };
@@ -371,6 +373,33 @@ export class ActiveRunsService {
   }
 
   /**
+   * Abort every running turn belonging to an env and drop any queued messages
+   * for those sessions. Called by env delete so a mid-build agent doesn't
+   * keep writing into a clone directory that's about to be torn down. Returns
+   * the number of runs that were aborted (informational; used for logging).
+   */
+  abortAllForEnv(envId: string): number {
+    let aborted = 0;
+    for (const run of this.runs.values()) {
+      if (run.envId !== envId) continue;
+      if (run.status !== "running") continue;
+      this.pending.delete(run.sessionId);
+      try {
+        run.abortController.abort();
+        aborted++;
+      } catch {
+        // already aborted — ignore
+      }
+    }
+    if (aborted > 0) {
+      this.logger.info(
+        `Aborted ${aborted} in-flight run(s) for env ${envId} (env delete)`
+      );
+    }
+    return aborted;
+  }
+
+  /**
    * Interrupt the current turn for this session. Aborts the SDK / runner and
    * **discards the queue** — if the user pressed stop they probably don't
    * want their queued messages to fire next either. Returns true if there
@@ -385,7 +414,7 @@ export class ActiveRunsService {
     } catch {
       // already aborted — ignore
     }
-    this.logger.log(`Run interrupt requested: session=${sessionId}`);
+    this.logger.info(`Run interrupt requested: session=${sessionId}`);
     return true;
   }
 
@@ -432,8 +461,8 @@ export class ActiveRunsService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(
-        `Context build failed for env=${run.envId} session=${run.sessionId}: ${msg}`,
-        err instanceof Error ? err.stack : undefined
+        { err: err instanceof Error ? err : new Error(String(err)) },
+        `Context build failed for env=${run.envId} session=${run.sessionId}: ${msg}`
       );
       this.pushEvent(run, { type: "error", message: msg });
       this.finish(run, "error", msg);
@@ -441,7 +470,7 @@ export class ActiveRunsService {
     }
     const ctxBuildDoneAt = Date.now();
 
-    this.logger.log(
+    this.logger.info(
       `Agent run starting: run=${run.runId} env=${run.envId} session=${run.sessionId}`
     );
 
@@ -511,8 +540,8 @@ export class ActiveRunsService {
       } else {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(
-          `Agent run exception: run=${run.runId} env=${run.envId} — ${msg}`,
-          err instanceof Error ? err.stack : undefined
+          { err: err instanceof Error ? err : new Error(String(err)) },
+          `Agent run exception: run=${run.runId} env=${run.envId} — ${msg}`
         );
         this.pushEvent(run, { type: "error", message: msg });
         errored = true;
@@ -671,7 +700,7 @@ export class ActiveRunsService {
       status,
       error,
     });
-    this.logger.log(
+    this.logger.info(
       `Agent run finished: run=${run.runId} env=${run.envId} session=${run.sessionId} status=${status}`
     );
     // Keep it in the map briefly so reconnecting clients can replay the tail.

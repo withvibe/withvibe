@@ -1,8 +1,9 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { PrismaService } from "../prisma/prisma.service";
 import { composeProjectName } from "./compose-naming";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
@@ -22,9 +23,11 @@ type StartResult =
 
 @Injectable()
 export class BrowserSidecarService {
-  private readonly logger = new Logger(BrowserSidecarService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectPinoLogger(BrowserSidecarService.name)
+    private readonly logger: PinoLogger,
+    private readonly prisma: PrismaService
+  ) {}
 
   private image(): string {
     return process.env.QA_BROWSER_IMAGE?.trim() || DEFAULT_IMAGE;
@@ -278,7 +281,7 @@ export class BrowserSidecarService {
         },
       });
 
-      this.logger.log(
+      this.logger.info(
         `Env ${envId}: started QA browser ${containerId.slice(0, 12)} — VNC 127.0.0.1:${vncPort}, CDP 127.0.0.1:${cdpPort}`
       );
       return { ok: true, containerId, cdpPort, vncPort };

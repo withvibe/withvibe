@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 import {
   S3Client,
   PutObjectCommand,
@@ -13,6 +14,7 @@ import { AgentSeedService } from "../agents/agent-seed.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { StorageService } from "../storage/storage.service";
 import { ReposService } from "../repos/repos.service";
+import { getAppVersion } from "../common/version";
 
 export type CreateWorkspaceInput = {
   name: string;
@@ -78,9 +80,9 @@ function canonicalizeRepoUrl(url: string): string {
 
 @Injectable()
 export class WorkspacesService {
-  private readonly logger = new Logger(WorkspacesService.name);
-
   constructor(
+    @InjectPinoLogger(WorkspacesService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
     private readonly agentSeed: AgentSeedService,
@@ -158,7 +160,7 @@ export class WorkspacesService {
         },
       },
     });
-    this.logger.log(
+    this.logger.info(
       `Demo template seeded: ${spec.slug} (workspace=${workspaceId})`
     );
   }
@@ -229,7 +231,7 @@ export class WorkspacesService {
     ]);
 
     return {
-      version: process.env.WITHVIBE_VERSION || "dev",
+      version: await getAppVersion(),
       workspace: { id: workspace.id, name: workspace.name },
       role: member.role,
       user: {

@@ -22,5 +22,12 @@ export async function DELETE(
   ctx: RouteContext<"/api/workspaces/[id]/envs/[envId]">
 ) {
   const { id, envId } = await ctx.params;
-  return proxyToApi(request, `/workspaces/${id}/envs/${envId}`);
+  // Forward the optional `?deleteRemoteBranch=1` flag so the API can decide
+  // whether to push --delete the env branch on origin.
+  const deleteRemoteBranch =
+    request.nextUrl.searchParams.get("deleteRemoteBranch");
+  const qs = deleteRemoteBranch
+    ? `?deleteRemoteBranch=${encodeURIComponent(deleteRemoteBranch)}`
+    : "";
+  return proxyToApi(request, `/workspaces/${id}/envs/${envId}${qs}`);
 }

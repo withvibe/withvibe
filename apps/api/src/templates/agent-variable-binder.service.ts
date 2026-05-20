@@ -1,7 +1,8 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { PrismaService } from "../prisma/prisma.service";
 import type { TemplateService, TemplateVariable } from "./template.types";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 export type BindContext = {
   workspaceId: string;
@@ -33,14 +34,16 @@ export type BindResult = {
  */
 @Injectable()
 export class AgentVariableBinderService {
-  private readonly logger = new Logger(AgentVariableBinderService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectPinoLogger(AgentVariableBinderService.name)
+    private readonly logger: PinoLogger,
+    private readonly prisma: PrismaService
+  ) {}
 
   async bindEmpty(ctx: BindContext): Promise<BindResult> {
     if (ctx.emptyVars.length === 0) return { proposals: {} };
 
-    this.logger.log(
+    this.logger.info(
       `Agent binding: ${ctx.emptyVars.length} empty var(s) → ` +
         `[${ctx.emptyVars.map((v) => v.key).join(", ")}]`
     );
@@ -121,7 +124,7 @@ export class AgentVariableBinderService {
         proposals[k] = v;
       }
 
-      this.logger.log(
+      this.logger.info(
         `Agent returned ${Object.keys(proposals).length} proposal(s)` +
           (Object.keys(proposals).length > 0
             ? `: ${Object.entries(proposals)

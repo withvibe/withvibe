@@ -47,6 +47,14 @@ services:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
+    # Cap log file size so the api's per-request JSON access log can't fill
+    # the disk on a long-running deploy. With max-size 50m × 5 rotated files
+    # each container is bounded to ~250M of logs on disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     depends_on:
       postgres:
         condition: service_healthy
@@ -151,6 +159,11 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     depends_on:
       - api
     environment:

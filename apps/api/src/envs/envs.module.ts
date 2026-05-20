@@ -8,9 +8,10 @@ import { EnvContextService } from "./env-context.service";
 import { LocalEnvBundleController } from "./local-bundle.controller";
 import { TemplatesModule } from "../templates/templates.module";
 import { RunnerModule } from "../runner/runner.module";
+import { ChatModule } from "../chat/chat.module";
 
 @Module({
-  imports: [TemplatesModule, RunnerModule],
+  imports: [TemplatesModule, RunnerModule, ChatModule],
   controllers: [
     EnvsController,
     EnvAssetsController,

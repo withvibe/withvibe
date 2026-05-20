@@ -1,7 +1,8 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import net from "net";
 import { PrismaService } from "../prisma/prisma.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const DEFAULT_RANGE_START = 30000;
 const DEFAULT_RANGE_END = 39999;
@@ -23,11 +24,12 @@ const MAX_ATTEMPTS_PER_KEY = 40;
  */
 @Injectable()
 export class PortAllocatorService {
-  private readonly logger = new Logger(PortAllocatorService.name);
   private readonly rangeStart: number;
   private readonly rangeEnd: number;
 
   constructor(
+    @InjectPinoLogger(PortAllocatorService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     config: ConfigService
   ) {
@@ -65,7 +67,7 @@ export class PortAllocatorService {
       where: { envId },
     });
     if (count > 0) {
-      this.logger.log(`Released ${count} port(s) for env ${envId}`);
+      this.logger.info(`Released ${count} port(s) for env ${envId}`);
     }
   }
 

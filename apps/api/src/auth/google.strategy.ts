@@ -1,6 +1,7 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PassportStrategy } from "@nestjs/passport";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 import { Strategy, type Profile, type VerifyCallback } from "passport-google-oauth20";
 
 export type GoogleUser = {
@@ -15,20 +16,14 @@ export type GoogleUser = {
  */
 @Injectable()
 export class GoogleStrategy extends PassportStrategy(Strategy, "google") {
-  private static readonly logger = new Logger("GoogleStrategy");
-
-  constructor(config: ConfigService) {
+  constructor(
+    config: ConfigService,
+    @InjectPinoLogger(GoogleStrategy.name)
+    private readonly logger: PinoLogger
+  ) {
     const clientID = config.get<string>("GOOGLE_CLIENT_ID");
     const clientSecret = config.get<string>("GOOGLE_CLIENT_SECRET");
     const apiBase = config.get<string>("API_PUBLIC_URL") || "http://localhost:4000";
-
-    if (!clientID || !clientSecret) {
-      // Don't throw — this lets the API boot in dev environments without
-      // Google configured. The /auth/google route will 503 instead.
-      GoogleStrategy.logger.warn(
-        "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set — Google login disabled"
-      );
-    }
 
     super({
       clientID: clientID || "missing",
@@ -36,6 +31,15 @@ export class GoogleStrategy extends PassportStrategy(Strategy, "google") {
       callbackURL: `${apiBase.replace(/\/$/, "")}/api/auth/google/callback`,
       scope: ["email", "profile"],
     });
+
+    // Warn AFTER super() so we have access to `this`. Don't throw — this
+    // lets the API boot in dev environments without Google configured. The
+    // /auth/google route will 503 instead.
+    if (!clientID || !clientSecret) {
+      this.logger.warn(
+        "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set — Google login disabled"
+      );
+    }
   }
 
   validate(

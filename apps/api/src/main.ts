@@ -3,7 +3,8 @@ import "reflect-metadata";
 // can read process.env.DATABASE_URL at import time.
 import "dotenv/config";
 import { NestFactory } from "@nestjs/core";
-import { Logger, type LogLevel } from "@nestjs/common";
+import { Logger } from "@nestjs/common";
+import { Logger as PinoLogger } from "nestjs-pino";
 import { json, urlencoded } from "express";
 import cookieParser from "cookie-parser";
 import { AppModule } from "./app.module";
@@ -28,12 +29,11 @@ async function bootstrap() {
   // doing any work. In production this exits; outside it warns loudly.
   assertSecretsAtBoot(process.env, new Logger("Startup"));
 
-  const logLevels: LogLevel[] =
-    process.env.LOG_LEVEL === "debug"
-      ? ["debug", "log", "warn", "error", "fatal"]
-      : ["log", "warn", "error", "fatal"];
-
-  const app = await NestFactory.create(AppModule, { logger: logLevels });
+  // Use a buffered Nest logger until pino is wired up — defers any boot-time
+  // log calls until useLogger() flushes them through pino, so even startup
+  // messages are structured.
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  app.useLogger(app.get(PinoLogger));
   app.setGlobalPrefix("api");
   // Default body-parser cap is 100KB — too small for template saves that
   // bundle whole folders of assets as JSON. Large binary uploads go through

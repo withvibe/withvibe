@@ -1,6 +1,10 @@
 "use client";
 
-import { login as loginApi } from "@/lib/auth-client";
+import {
+  LoginTimeoutError,
+  ServerStartingError,
+  login as loginApi,
+} from "@/lib/auth-client";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import Link from "next/link";
@@ -38,8 +42,22 @@ function LoginForm() {
           ? next
           : "/";
       router.push(dest);
-    } catch {
-      setError("Invalid email or password");
+    } catch (err) {
+      if (err instanceof ServerStartingError) {
+        // Fresh-install bringup case — the API container is up but Prisma is
+        // still establishing its connection (retry budget ~30s). Tell the
+        // user explicitly instead of letting them think their password is
+        // wrong.
+        setError(
+          "Server is still starting. Please wait a few seconds and try again."
+        );
+      } else if (err instanceof LoginTimeoutError) {
+        setError(
+          "Login request timed out. Check that the server is reachable, then try again."
+        );
+      } else {
+        setError("Invalid email or password");
+      }
       setLoading(false);
     }
   }

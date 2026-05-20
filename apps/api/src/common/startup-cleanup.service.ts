@@ -1,5 +1,6 @@
-import { Injectable, Logger, OnApplicationBootstrap } from "@nestjs/common";
+import { Injectable, OnApplicationBootstrap } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * Reset "in-flight" statuses that survived a process restart.
@@ -15,9 +16,11 @@ import { PrismaService } from "../prisma/prisma.service";
  */
 @Injectable()
 export class StartupCleanupService implements OnApplicationBootstrap {
-  private readonly logger = new Logger(StartupCleanupService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectPinoLogger(StartupCleanupService.name)
+    private readonly logger: PinoLogger,
+    private readonly prisma: PrismaService
+  ) {}
 
   async onApplicationBootstrap(): Promise<void> {
     const c = this.prisma.client;
@@ -46,7 +49,7 @@ export class StartupCleanupService implements OnApplicationBootstrap {
         `Startup cleanup: reset ${clones.count} repo clones, ${envClones.count} env clones, ${envs.count} envs stuck mid-job`
       );
     } else {
-      this.logger.log("Startup cleanup: nothing to reset");
+      this.logger.info("Startup cleanup: nothing to reset");
     }
   }
 }

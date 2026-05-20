@@ -1,9 +1,10 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { mkdir, readdir, writeFile } from "fs/promises";
 import { type Dirent } from "fs";
 import path from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { ensureEnvDir, resolveRepoBaseDir } from "../common/repo-base-dir";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * Maintains the per-env VS Code workspace + extension recommendations on
@@ -23,9 +24,11 @@ import { ensureEnvDir, resolveRepoBaseDir } from "../common/repo-base-dir";
  */
 @Injectable()
 export class CodeWorkspaceService {
-  private readonly logger = new Logger(CodeWorkspaceService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectPinoLogger(CodeWorkspaceService.name)
+    private readonly logger: PinoLogger,
+    private readonly prisma: PrismaService
+  ) {}
 
   private get baseDir(): string {
     return resolveRepoBaseDir();
@@ -93,20 +96,33 @@ export class CodeWorkspaceService {
           path: path.relative(envDir, er.envClonePath as string),
         }));
 
-      // Surface every top-level directory under `extracontext/` (user
-      // uploads + the AI's `ai/` folder) as VS Code workspace folders.
+      // Surface extracontext under VS Code's workspace folders. Each
+      // sub-directory gets a friendly named folder, AND the extracontext root
+      // itself is added as a folder whenever any loose files live there —
+      // otherwise files at the root of extracontext/ would be unreachable from
+      // VS Code (workspaces only show folders, not loose files).
       try {
         const extraDir = path.join(envDir, "extracontext");
         const entries = (await readdir(extraDir, {
           withFileTypes: true,
           encoding: "utf8",
         })) as Dirent[];
+        let hasLooseFiles = false;
         for (const e of entries) {
-          if (e.name.startsWith(".") || !e.isDirectory()) continue;
-          folders.push({
-            name: `extracontext: ${e.name}`,
-            path: path.join("extracontext", e.name),
-          });
+          if (e.name.startsWith(".")) continue;
+          if (e.isDirectory()) {
+            folders.push({
+              name: `extracontext: ${e.name}`,
+              path: path.join("extracontext", e.name),
+            });
+          } else if (e.isFile()) {
+            hasLooseFiles = true;
+          }
+        }
+        if (hasLooseFiles) {
+          // Put the root at the END so it doesn't shadow named subfolders in
+          // VS Code's folder picker.
+          folders.push({ name: "extracontext", path: "extracontext" });
         }
       } catch {
         // extracontext/ may not exist yet on a fresh env — fine.

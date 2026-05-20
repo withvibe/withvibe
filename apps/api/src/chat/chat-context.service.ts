@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { mkdir } from "fs/promises";
 import * as path from "node:path";
 import { ensureEnvDir } from "../common/repo-base-dir";
@@ -30,6 +30,7 @@ import {
   parseTemplateVariables,
   type TemplateVariable,
 } from "../templates/template.types";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 function positionsLabels(positions: string[]): string[] {
   return positions.map(positionLabel);
@@ -428,9 +429,9 @@ export type ChatContext = {
 
 @Injectable()
 export class ChatContextService {
-  private readonly logger = new Logger(ChatContextService.name);
-
   constructor(
+    @InjectPinoLogger(ChatContextService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly envClones: EnvCloneService,
     private readonly agentChat: AgentChatService,
@@ -457,7 +458,7 @@ export class ChatContextService {
       try {
         return await fn();
       } finally {
-        this.logger.log(
+        this.logger.info(
           `[ctx-build] ${label} took ${Date.now() - t0}ms (env=${envId})`
         );
       }
@@ -1194,7 +1195,7 @@ A read-only markdown mirror of everything above (workspace + env knowledge, memb
       })
     );
 
-    this.logger.log(
+    this.logger.info(
       `[ctx-build] TOTAL took ${Date.now() - buildStart}ms (env=${envId})`
     );
 

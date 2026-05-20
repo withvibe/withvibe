@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { z } from "zod";
 import {
   createSdkMcpServer,
@@ -19,6 +19,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { BrowserSidecarService } from "./browser-sidecar.service";
 import { UserBrowserBridgeService } from "./user-browser.service";
 import type { BrowserOps } from "./qa-browser-ops";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 type Connection = {
   cdpEndpoint: string;
@@ -116,10 +117,11 @@ const TEXT_SHAPE = {
  */
 @Injectable()
 export class PlaywrightMcpService {
-  private readonly logger = new Logger(PlaywrightMcpService.name);
   private readonly connections = new Map<string, Connection>();
 
   constructor(
+    @InjectPinoLogger(PlaywrightMcpService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly sidecar: BrowserSidecarService,
     private readonly userBrowser: UserBrowserBridgeService

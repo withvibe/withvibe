@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { type IncomingMessage, type Server } from "http";
 import type { Duplex } from "stream";
@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { PrismaService } from "../prisma/prisma.service";
 import { BrowserSidecarService } from "./browser-sidecar.service";
 import type { BridgeJwtPayload } from "../auth/jwt.strategy";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * WebSocket relay for the QA-browser noVNC viewer.
@@ -26,10 +27,11 @@ import type { BridgeJwtPayload } from "../auth/jwt.strategy";
  */
 @Injectable()
 export class QaViewGateway {
-  private readonly logger = new Logger(QaViewGateway.name);
   private readonly wss = new WebSocketServer({ noServer: true });
 
   constructor(
+    @InjectPinoLogger(QaViewGateway.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly sidecar: BrowserSidecarService,
     private readonly config: ConfigService

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { z } from "zod";
 import {
   createSdkMcpServer,
@@ -13,6 +13,7 @@ import type {
   McpServerSpec,
   McpToolDescriptor,
 } from "../mcp-bridge/mcp-tool-types";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const RENDER_PDF_SHAPE = {
   sourcePath: z
@@ -45,9 +46,9 @@ The user-facing Extra Context tab will show the PDF for download. Keep the sourc
  */
 @Injectable()
 export class ExternalContextMcpService {
-  private readonly logger = new Logger(ExternalContextMcpService.name);
-
   constructor(
+    @InjectPinoLogger(ExternalContextMcpService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly envClones: EnvCloneService
   ) {}
@@ -132,7 +133,7 @@ export class ExternalContextMcpService {
           } catch {
             await writeFile(outputAbs, result.content);
           }
-          self.logger.log(
+          self.logger.info(
             `[external-context-mcp] render_pdf env=${envId} ${input.sourcePath} -> ${input.outputPath}`
           );
           return {

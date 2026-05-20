@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createHash } from "node:crypto";
 import {
@@ -7,6 +7,7 @@ import {
   ModelChoice,
   isModelChoice,
 } from "./models";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 // Maps the per-turn classification tier to a concrete Claude model id.
 const TIER_TO_MODEL: Record<"simple" | "medium" | "hard", ConcreteModelId> = {
@@ -29,8 +30,10 @@ const CLASSIFIER_RULES_VERSION = "v2-survey-medium";
 
 @Injectable()
 export class ModelRouterService {
-  private readonly logger = new Logger(ModelRouterService.name);
-
+  constructor(
+    @InjectPinoLogger(ModelRouterService.name)
+    private readonly logger: PinoLogger
+  ) {}
   /**
    * Resolve the model to use for one chat turn. Precedence:
    *   1. Env override (`env.modelChoice`) — null/undefined falls through.

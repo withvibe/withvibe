@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { mkdir } from "fs/promises";
 import { createHash } from "crypto";
 import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -6,6 +6,7 @@ import type { ChatContext } from "./chat-context.service";
 import { ClaudeCodeEngineService } from "./claude-code-engine.service";
 import { ModelRouterService } from "./model-router.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * Maps an Anthropic SDK failure (assistant `error` code or an HTTP
@@ -148,9 +149,9 @@ function summarizeSdkMessage(msg: unknown): string | undefined {
 
 @Injectable()
 export class ChatStreamService {
-  private readonly logger = new Logger(ChatStreamService.name);
-
   constructor(
+    @InjectPinoLogger(ChatStreamService.name)
+    private readonly logger: PinoLogger,
     private readonly claudeCode: ClaudeCodeEngineService,
     private readonly prisma: PrismaService,
     private readonly modelRouter: ModelRouterService
@@ -176,7 +177,7 @@ export class ChatStreamService {
     await mkdir(opts.context.cwd, { recursive: true }).catch(() => {});
 
     const agent = opts.context.agent;
-    this.logger.log(
+    this.logger.info(
       `Querying agent${agent ? ` "${agent.agentId}"` : ""} cwd=${opts.context.cwd} engine=${opts.context.chatEngine}`
     );
 
@@ -196,7 +197,7 @@ export class ChatStreamService {
       apiKey: opts.context.anthropicApiKey,
       prompt: opts.prompt,
     });
-    this.logger.log(
+    this.logger.info(
       `[router] env=${opts.context.envId} model=${routed.model}` +
         (routed.auto ? ` (auto${routed.tier ? `→${routed.tier}` : ""})` : "")
     );
@@ -390,7 +391,7 @@ export class ChatStreamService {
         const now = Date.now();
         if (firstEventAt === null) {
           firstEventAt = now;
-          this.logger.log(
+          this.logger.info(
             `[chat-stream] first SDK event after ${firstEventAt - queryStart}ms (type=${msg.type})`
           );
         }
@@ -421,7 +422,7 @@ export class ChatStreamService {
             if (inner.delta.type === "text_delta" && inner.delta.text) {
               if (firstTextAt === null) {
                 firstTextAt = Date.now();
-                this.logger.log(
+                this.logger.info(
                   `[chat-stream] first text token after ${firstTextAt - queryStart}ms`
                 );
               }
@@ -451,7 +452,7 @@ export class ChatStreamService {
               if (sawTextDelta) continue;
               if (firstTextAt === null) {
                 firstTextAt = Date.now();
-                this.logger.log(
+                this.logger.info(
                   `[chat-stream] first text token after ${firstTextAt - queryStart}ms`
                 );
               }
@@ -514,7 +515,7 @@ export class ChatStreamService {
           }
         } else if (msg.type === "result") {
           if (msg.subtype === "success" && !msg.is_error) {
-            this.logger.log(
+            this.logger.info(
               `Agent query done${agent ? ` agent="${agent.agentId}"` : ""} cost=$${msg.total_cost_usd?.toFixed(4) ?? "?"} duration=${msg.duration_ms ?? "?"}ms turns=${(msg as { num_turns?: number }).num_turns ?? "?"} session=${capturedSessionId ?? "-"}`
             );
             await this.persistSdkSessionId(opts.context.sessionId, capturedSessionId);
@@ -600,8 +601,8 @@ export class ChatStreamService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(
-        `Agent stream exception${agent ? ` agent="${agent.agentId}"` : ""}: ${msg}`,
-        err instanceof Error ? err.stack : undefined
+        { err: err instanceof Error ? err : new Error(String(err)) },
+        `Agent stream exception${agent ? ` agent="${agent.agentId}"` : ""}: ${msg}`
       );
       yield { type: "error", message: msg };
     }

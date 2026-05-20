@@ -1,6 +1,7 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import Anthropic from "@anthropic-ai/sdk";
 import { PrismaService } from "../prisma/prisma.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * Haiku-generated short titles for chat sessions. Fire-and-forget — silent
@@ -9,9 +10,11 @@ import { PrismaService } from "../prisma/prisma.service";
  */
 @Injectable()
 export class TitleGeneratorService {
-  private readonly logger = new Logger(TitleGeneratorService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectPinoLogger(TitleGeneratorService.name)
+    private readonly logger: PinoLogger,
+    private readonly prisma: PrismaService
+  ) {}
 
   async generate(opts: {
     sessionId: string;

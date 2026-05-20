@@ -46,6 +46,7 @@ import { QaBrowserPanel } from "./_qa-browser";
 import { ContextPanel } from "./_context-panel";
 import { ExportDialog } from "./_export-dialog";
 import { VsCodeMenu } from "./_vscode-menu";
+import { useActiveRuns } from "../../_active-runs";
 import { toast } from "sonner";
 
 type ContainerStatus =
@@ -157,8 +158,17 @@ export default function EnvironmentDetailPage(
   const [resizing, setResizing] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [deleteRemoteBranch, setDeleteRemoteBranch] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  // Live workspace-level SSE from ActiveRunsProvider tells us whether any
+  // agent turn is in flight for this env. When the devops agent runs
+  // `docker compose up` via its docker-mcp tool, containerStatus flips on
+  // the server but the env detail GET isn't auto-refetched. Polling while
+  // an agent is running covers that window — the SSE flag goes false when
+  // the run ends, so polling stops itself.
+  const { isRunning: isAgentRunningInEnv } = useActiveRuns();
+  const agentRunning = isAgentRunningInEnv(envId);
 
   function togglePanel(
     p:
@@ -226,10 +236,32 @@ export default function EnvironmentDetailPage(
     const reposCreating = env.repos.some(
       (r) => r.envCloneStatus === "pending" || r.envCloneStatus === "creating"
     );
-    if (!containerTransitioning && !reposCreating) return;
+    // Agent activity is a third trigger: while a turn is running, the agent
+    // can mutate container state (docker-mcp's start_env/stop_env/rebuild)
+    // and we won't otherwise know until the user navigates away and back.
+    if (!containerTransitioning && !reposCreating && !agentRunning) return;
     const t = setInterval(load, 2000);
     return () => clearInterval(t);
-  }, [env, load]);
+  }, [env, load, agentRunning]);
+
+  // Boot-time refresh window: poll for ~20s after the page first mounts so a
+  // freshly-created env converges to its real state (status fields, clone
+  // progress, ports) without needing the user to navigate away and back.
+  // This sits alongside the transition-driven polling above; together they
+  // cover the "everything looks idle but the server is still settling" gap
+  // that was causing the Start button to look disabled after env creation.
+  useEffect(() => {
+    let ticks = 0;
+    const t = setInterval(() => {
+      ticks++;
+      load();
+      if (ticks >= 10) clearInterval(t);
+    }, 2000);
+    return () => clearInterval(t);
+    // Intentionally only on mount — restarting on every `load` change would
+    // re-arm the window after each fetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function containerAction(action: "start" | "stop" | "rebuild") {
     setActing(true);
@@ -261,13 +293,15 @@ export default function EnvironmentDetailPage(
 
   function openDeleteDialog() {
     setDeleteConfirm("");
+    setDeleteRemoteBranch(false);
     setDeleteOpen(true);
   }
 
   async function confirmDeleteEnv() {
     setDeleting(true);
     try {
-      const res = await fetch(`/api/workspaces/${id}/envs/${envId}`, {
+      const qs = deleteRemoteBranch ? "?deleteRemoteBranch=1" : "";
+      const res = await fetch(`/api/workspaces/${id}/envs/${envId}${qs}`, {
         method: "DELETE",
       });
       if (res.ok) {
@@ -360,12 +394,25 @@ export default function EnvironmentDetailPage(
             <Button
               size="sm"
               variant="outline"
-              disabled={acting || isStopped || isTransitioning}
+              // `building` is intentionally allowed: cold builds can run for
+              // several minutes (mvn package, large image layers) and the
+              // user should be able to abort. `docker compose down` kills
+              // an in-flight build gracefully.
+              disabled={
+                acting ||
+                isStopped ||
+                env.containerStatus === "starting" ||
+                env.containerStatus === "stopping"
+              }
               onClick={() => containerAction("stop")}
-              title="Stop container"
+              title={
+                env.containerStatus === "building"
+                  ? "Cancel build"
+                  : "Stop container"
+              }
             >
               <Square className="size-4" />
-              Stop
+              {env.containerStatus === "building" ? "Cancel" : "Stop"}
             </Button>
             <Button
               size="sm"
@@ -674,6 +721,26 @@ export default function EnvironmentDetailPage(
               placeholder="delete"
               disabled={deleting}
             />
+            {/* Opt-in remote branch deletion. Default off because a deleted
+                remote branch can't be un-deleted, and the env's branch is
+                sometimes useful to keep around (open PRs, work the user
+                wants to revisit). */}
+            <label className="flex items-start gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={deleteRemoteBranch}
+                onChange={(e) => setDeleteRemoteBranch(e.target.checked)}
+                disabled={deleting}
+              />
+              <span>
+                Also delete the env branch on origin (
+                <code className="px-1 py-0.5 rounded bg-muted text-foreground">
+                  git push origin --delete
+                </code>
+                ). Can&apos;t be undone.
+              </span>
+            </label>
           </div>
           <DialogFooter>
             <Button

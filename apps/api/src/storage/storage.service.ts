@@ -1,4 +1,5 @@
-import { Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { Injectable, NotFoundException } from "@nestjs/common";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import {
@@ -41,10 +42,11 @@ type WorkspaceStorage = {
  */
 @Injectable()
 export class StorageService {
-  private readonly logger = new Logger(StorageService.name);
   private readonly s3Clients = new Map<string, S3Client>();
 
   constructor(
+    @InjectPinoLogger(StorageService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly envClones: EnvCloneService
   ) {}

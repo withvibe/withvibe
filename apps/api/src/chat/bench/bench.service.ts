@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { mkdir, writeFile } from "fs/promises";
 import path from "path";
 import { PrismaService } from "../../prisma/prisma.service";
@@ -12,6 +12,7 @@ import type {
   BenchScenario,
   BenchTurnMetrics,
 } from "./bench.types";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * Drives a `BenchScenario` through one or both engines and emits a structured
@@ -25,9 +26,9 @@ import type {
  */
 @Injectable()
 export class BenchService {
-  private readonly logger = new Logger(BenchService.name);
-
   constructor(
+    @InjectPinoLogger(BenchService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly context: ChatContextService,
     private readonly chat: ChatStreamService
@@ -51,7 +52,7 @@ export class BenchService {
     for (let i = 0; i < iterations; i++) {
       const order = i % 2 === 0 ? engines : [...engines].reverse();
       for (const engine of order) {
-        this.logger.log(
+        this.logger.info(
           `[bench] iteration ${i + 1}/${iterations} engine=${engine} scenario="${scenario.name}"`
         );
         const run = await this.runOne(scenario, engine, i + 1);
@@ -84,7 +85,7 @@ export class BenchService {
     await mkdir(absDir, { recursive: true });
     const absPath = path.join(absDir, fileName);
     await writeFile(absPath, JSON.stringify(report, null, 2), "utf-8");
-    this.logger.log(`[bench] report written: ${absPath}`);
+    this.logger.info(`[bench] report written: ${absPath}`);
     return absPath;
   }
 

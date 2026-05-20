@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import * as http from "node:http";
 import type { Server, IncomingMessage } from "node:http";
@@ -10,6 +10,7 @@ import { CodeServerService } from "./code-server.service";
 import { DbViewerService } from "./db-viewer.service";
 import { SESSION_COOKIE_NAME } from "../auth/auth.service";
 import type { BridgeJwtPayload } from "../auth/jwt.strategy";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 type Route = {
   prefix: string; // e.g. "/api/code-server/view/"
@@ -50,11 +51,12 @@ const HOP_BY_HOP = new Set([
  */
 @Injectable()
 export class SidecarProxy {
-  private readonly logger = new Logger(SidecarProxy.name);
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly routes: Route[];
 
   constructor(
+    @InjectPinoLogger(SidecarProxy.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly codeServer: CodeServerService,

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { type IncomingMessage, type Server } from "http";
 import type { Duplex } from "stream";
@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { PrismaService } from "../prisma/prisma.service";
 import { UserBrowserBridgeService } from "./user-browser.service";
 import type { BridgeJwtPayload } from "../auth/jwt.strategy";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * WebSocket gateway for the WithVibe QA browser Chrome extension.
@@ -23,10 +24,11 @@ import type { BridgeJwtPayload } from "../auth/jwt.strategy";
  */
 @Injectable()
 export class UserBrowserGateway {
-  private readonly logger = new Logger(UserBrowserGateway.name);
   private readonly wss = new WebSocketServer({ noServer: true });
 
   constructor(
+    @InjectPinoLogger(UserBrowserGateway.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly bridge: UserBrowserBridgeService,
     private readonly config: ConfigService

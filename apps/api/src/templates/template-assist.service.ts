@@ -1,7 +1,8 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * AI assistant for the template editor. Uses the Claude Agent SDK so that
@@ -135,9 +136,9 @@ Variable keys are UPPER_SNAKE_CASE. Reference them in compose with \${KEY}.
 
 @Injectable()
 export class TemplateAssistService {
-  private readonly logger = new Logger(TemplateAssistService.name);
-
   constructor(
+    @InjectPinoLogger(TemplateAssistService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService
   ) {}
@@ -161,7 +162,7 @@ export class TemplateAssistService {
     }
     const isOAuth = credential.startsWith("sk-ant-oat");
     const masked = credential.slice(0, 12) + "…" + credential.slice(-4);
-    this.logger.log(
+    this.logger.info(
       `Template assist using credential from workspace (${masked}, kind=${isOAuth ? "oauth" : "api-key"})`
     );
 

@@ -7,6 +7,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Res,
   UploadedFiles,
@@ -172,6 +173,87 @@ export class EnvContextController {
       fromPath,
       toPath
     );
+  }
+
+  /**
+   * Create an empty folder. `path` is relative to extracontext/. Parent dirs
+   * are created automatically (mkdir -p semantics). Idempotent: an already-
+   * existing folder at the same path is a no-op.
+   */
+  @Post("folder")
+  async createFolder(
+    @CurrentUser() user: AuthUser,
+    @Param("workspaceId") workspaceId: string,
+    @Param("envId") envId: string,
+    @Body() body: { path?: string }
+  ) {
+    const relPath = body?.path?.trim();
+    if (!relPath) throw new BadRequestException("path is required");
+    return this.context.createFolder(user.id, workspaceId, envId, relPath);
+  }
+
+  /**
+   * Create a new (possibly empty) file. Errors if anything already exists at
+   * `path` — the user must call DELETE first or pick a different name. The
+   * optional `content` lets the FE seed the file with text (e.g. a template).
+   */
+  @Post("file")
+  async createFile(
+    @CurrentUser() user: AuthUser,
+    @Param("workspaceId") workspaceId: string,
+    @Param("envId") envId: string,
+    @Body() body: { path?: string; content?: string }
+  ) {
+    const relPath = body?.path?.trim();
+    if (!relPath) throw new BadRequestException("path is required");
+    const content = typeof body?.content === "string" ? body.content : "";
+    return this.context.createFile(
+      user.id,
+      workspaceId,
+      envId,
+      relPath,
+      content
+    );
+  }
+
+  /**
+   * Save (create-or-overwrite) a text file. Used by the in-app Monaco
+   * editor; idempotent unlike POST /file which refuses to overwrite. Refuses
+   * to clobber a folder.
+   */
+  @Put("file")
+  async writeFile(
+    @CurrentUser() user: AuthUser,
+    @Param("workspaceId") workspaceId: string,
+    @Param("envId") envId: string,
+    @Body() body: { path?: string; content?: string }
+  ) {
+    const relPath = body?.path?.trim();
+    if (!relPath) throw new BadRequestException("path is required");
+    const content = typeof body?.content === "string" ? body.content : "";
+    return this.context.writeFile(
+      user.id,
+      workspaceId,
+      envId,
+      relPath,
+      content
+    );
+  }
+
+  /**
+   * Read a text file's contents for the in-app editor. Refuses binaries and
+   * files past MAX_ENV_CONTEXT_EDITABLE_BYTES. For raw download / binaries,
+   * use GET /file (alongside the existing endpoint above).
+   */
+  @Get("file/text")
+  async readText(
+    @CurrentUser() user: AuthUser,
+    @Param("workspaceId") workspaceId: string,
+    @Param("envId") envId: string,
+    @Query("path") relPath: string
+  ) {
+    if (!relPath) throw new BadRequestException("Missing path query param");
+    return this.context.readFileText(user.id, workspaceId, envId, relPath);
   }
 }
 

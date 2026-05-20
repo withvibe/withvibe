@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
@@ -15,6 +14,7 @@ import {
   parseTemplateServices,
   parseTemplateVariables,
 } from "./template.types";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 type AssetInput = { path: string; content: string; isTemplate?: boolean };
 type RepoInput = { id: string; baseBranch: string | null };
@@ -36,9 +36,9 @@ type UpsertBody = {
 
 @Injectable()
 export class TemplatesService {
-  private readonly logger = new Logger(TemplatesService.name);
-
   constructor(
+    @InjectPinoLogger(TemplatesService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
     private readonly storage: StorageService
@@ -202,7 +202,7 @@ export class TemplatesService {
       },
       select: { id: true },
     });
-    this.logger.log(
+    this.logger.info(
       `Template created: ${tpl.id} (slug=${slug}, workspace=${workspaceId})`
     );
     await this.mirrorTemplateToStorage(workspaceId, tpl.id, {

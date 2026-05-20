@@ -1,6 +1,7 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import Anthropic from "@anthropic-ai/sdk";
 import { PrismaService } from "../prisma/prisma.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * Haiku-generated first-message greetings for agents. Fire-and-forget via
@@ -9,9 +10,11 @@ import { PrismaService } from "../prisma/prisma.service";
  */
 @Injectable()
 export class AgentGreetingService {
-  private readonly logger = new Logger(AgentGreetingService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectPinoLogger(AgentGreetingService.name)
+    private readonly logger: PinoLogger,
+    private readonly prisma: PrismaService
+  ) {}
 
   fallbackGreeting(name: string): string {
     return `Hi, I'm ${name}. How can I help?`;

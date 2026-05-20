@@ -18,12 +18,49 @@ export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
  * session cookie is sent automatically.
  */
 
+/** Thrown when the server replies 503 — the API is up but its DB isn't. */
+export class ServerStartingError extends Error {
+  constructor() {
+    super("server_starting");
+    this.name = "ServerStartingError";
+  }
+}
+
+/** Thrown when the network/server doesn't respond within the time budget. */
+export class LoginTimeoutError extends Error {
+  constructor() {
+    super("login_timeout");
+    this.name = "LoginTimeoutError";
+  }
+}
+
 export async function login(email: string, password: string): Promise<void> {
-  const res = await fetch("/api/auth/login", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
+  // 15s budget — long enough for slow networks, short enough that the user
+  // sees a clear error instead of an indefinite spinner if the API is wedged.
+  // On a fresh-install bringup the Prisma retry takes up to ~30s; if the
+  // user submits the form during that window they'll hit 503 and see the
+  // "server is starting" message below.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  let res: Response;
+  try {
+    res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new LoginTimeoutError();
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (res.status === 503) {
+    throw new ServerStartingError();
+  }
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { message?: string };
     throw new Error(body.message || "Invalid credentials");

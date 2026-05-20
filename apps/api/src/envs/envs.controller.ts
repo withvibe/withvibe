@@ -7,6 +7,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
@@ -80,8 +81,13 @@ export class EnvsController {
   delete(
     @CurrentUser() user: AuthUser,
     @Param("workspaceId") workspaceId: string,
-    @Param("envId") envId: string
+    @Param("envId") envId: string,
+    // Opt-in: also push --delete the env branch on origin. Default off so we
+    // don't accidentally nuke a branch the user wanted to keep around.
+    @Query("deleteRemoteBranch") deleteRemoteBranch?: string
   ) {
-    return this.envs.delete(user.id, workspaceId, envId);
+    return this.envs.delete(user.id, workspaceId, envId, {
+      deleteRemoteBranch: deleteRemoteBranch === "1" || deleteRemoteBranch === "true",
+    });
   }
 }

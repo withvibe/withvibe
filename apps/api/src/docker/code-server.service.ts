@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import path from "path";
@@ -12,6 +12,7 @@ import {
   attachToWithvibe,
   resolveSidecarTarget,
 } from "./sidecar-net";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
@@ -43,9 +44,9 @@ type StartResult =
  */
 @Injectable()
 export class CodeServerService {
-  private readonly logger = new Logger(CodeServerService.name);
-
   constructor(
+    @InjectPinoLogger(CodeServerService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly codeWorkspace: CodeWorkspaceService
   ) {}
@@ -196,7 +197,7 @@ export class CodeServerService {
         },
       });
 
-      this.logger.log(
+      this.logger.info(
         `Env ${envId}: started code-server ${containerId.slice(0, 12)} on 127.0.0.1:${port} (image=${image})`
       );
       return { ok: true, containerId, port };
@@ -349,7 +350,7 @@ export class CodeServerService {
   }
 
   private buildImage(tag: string, context: string): Promise<string> {
-    this.logger.log(
+    this.logger.info(
       `Auto-building ${tag} from ${context} — this happens once and may take a couple minutes.`
     );
     return new Promise((resolve, reject) => {
@@ -383,7 +384,7 @@ export class CodeServerService {
       child.on("exit", (code) => {
         clearTimeout(timer);
         if (code === 0) {
-          this.logger.log(`Built ${tag} successfully.`);
+          this.logger.info(`Built ${tag} successfully.`);
           resolve(tag);
         } else {
           reject(new Error(`docker build exited with code ${code}`));

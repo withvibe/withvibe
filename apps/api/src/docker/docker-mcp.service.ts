@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { z } from "zod";
 import {
   createSdkMcpServer,
@@ -11,6 +11,7 @@ import type {
   McpServerSpec,
   McpToolDescriptor,
 } from "../mcp-bridge/mcp-tool-types";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 type EnvStatusRow = {
   containerStatus: string;
@@ -79,9 +80,9 @@ const DESCRIPTIONS = {
  */
 @Injectable()
 export class DockerMcpService {
-  private readonly logger = new Logger(DockerMcpService.name);
-
   constructor(
+    @InjectPinoLogger(DockerMcpService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly docker: DockerService
   ) {}
@@ -93,7 +94,7 @@ export class DockerMcpService {
       description: DESCRIPTIONS.start_env,
       inputShape: {} as Record<string, never>,
       async handler() {
-        self.logger.log(`[docker-mcp] start_env(${envId})`);
+        self.logger.info(`[docker-mcp] start_env(${envId})`);
         await self.docker.startEnvironment(envId);
         return {
           content: [
@@ -111,7 +112,7 @@ export class DockerMcpService {
       description: DESCRIPTIONS.stop_env,
       inputShape: {} as Record<string, never>,
       async handler() {
-        self.logger.log(`[docker-mcp] stop_env(${envId})`);
+        self.logger.info(`[docker-mcp] stop_env(${envId})`);
         await self.docker.stopEnvironment(envId);
         return {
           content: [
@@ -129,7 +130,7 @@ export class DockerMcpService {
       description: DESCRIPTIONS.rebuild_env,
       inputShape: {} as Record<string, never>,
       async handler() {
-        self.logger.log(`[docker-mcp] rebuild_env(${envId})`);
+        self.logger.info(`[docker-mcp] rebuild_env(${envId})`);
         await self.docker.rebuildEnvironment(envId);
         return {
           content: [

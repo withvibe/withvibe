@@ -1,7 +1,8 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import Anthropic from "@anthropic-ai/sdk";
 import { PrismaService } from "../prisma/prisma.service";
 import { positionLabel } from "@withvibe/db";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 export type CloneSeed = {
   name: string;
@@ -16,9 +17,11 @@ export type CloneSeed = {
  */
 @Injectable()
 export class CloneSeedService {
-  private readonly logger = new Logger(CloneSeedService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectPinoLogger(CloneSeedService.name)
+    private readonly logger: PinoLogger,
+    private readonly prisma: PrismaService
+  ) {}
 
   async generate(opts: {
     userId: string;

@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@withvibe/db";
@@ -9,6 +8,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { AgentGreetingService } from "./agent-greeting.service";
 import { CloneSeedService } from "./clone-seed.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 export const TOOL_TOGGLE_KEYS = [
   "bash",
@@ -55,9 +55,9 @@ function slugifyName(name: string): string {
 
 @Injectable()
 export class AgentsService {
-  private readonly logger = new Logger(AgentsService.name);
-
   constructor(
+    @InjectPinoLogger(AgentsService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
     private readonly greetings: AgentGreetingService,
@@ -264,7 +264,7 @@ export class AgentsService {
       },
     });
 
-    this.logger.log(
+    this.logger.info(
       `Agent created: id=${agent.id} slug=${slug} workspace=${workspaceId} by user=${userId}`
     );
     return { id: agent.id, slug: agent.slug };
@@ -333,7 +333,7 @@ export class AgentsService {
       where: { id: agentId },
       data,
     });
-    this.logger.log(
+    this.logger.info(
       `Agent updated: id=${agentId} workspace=${workspaceId} by user=${userId} fields=${Object.keys(data).join(",")}`
     );
     return { ok: true };
@@ -367,7 +367,7 @@ export class AgentsService {
     }
 
     await this.prisma.client.agent.delete({ where: { id: agentId } });
-    this.logger.log(
+    this.logger.info(
       `Agent deleted: id=${agentId} workspace=${workspaceId} by user=${userId}`
     );
     return { ok: true };
@@ -404,7 +404,7 @@ export class AgentsService {
         cloneForUserId: userId,
       },
     });
-    this.logger.log(
+    this.logger.info(
       `Clone created: id=${agent.id} slug=${slug} workspace=${workspaceId} owner=${userId}`
     );
     return { id: agent.id, slug: agent.slug };

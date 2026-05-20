@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { mkdir, writeFile } from "fs/promises";
 import * as path from "path";
 import { PrismaService } from "../prisma/prisma.service";
@@ -15,6 +15,7 @@ import {
   safeFilename,
   MAX_ATTACHMENT_FILES,
 } from "./attachments.constants";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 export type { StreamedEvent } from "./active-runs.service";
 
@@ -35,9 +36,9 @@ function titleFromMessage(text: string): string {
 
 @Injectable()
 export class MessagesService {
-  private readonly logger = new Logger(MessagesService.name);
-
   constructor(
+    @InjectPinoLogger(MessagesService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
     private readonly envClones: EnvCloneService,
@@ -188,7 +189,7 @@ export class MessagesService {
     }
 
     const preview = content.length > 80 ? content.slice(0, 77) + "…" : content;
-    this.logger.log(
+    this.logger.info(
       `Message posted: env=${envId} session=${sessionId} user=${userId} files=${files.length} "${preview}"`
     );
 

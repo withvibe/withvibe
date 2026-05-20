@@ -1,10 +1,11 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { PrismaService } from "../prisma/prisma.service";
 import { composeProjectName } from "./compose-naming";
 import type { DetectedDatabase } from "./database-detection";
 import { attachToWithvibe, resolveSidecarTarget } from "./sidecar-net";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
@@ -20,9 +21,11 @@ type StartResult =
 
 @Injectable()
 export class DbViewerService {
-  private readonly logger = new Logger(DbViewerService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectPinoLogger(DbViewerService.name)
+    private readonly logger: PinoLogger,
+    private readonly prisma: PrismaService
+  ) {}
 
   async start(envId: string): Promise<StartResult> {
     const env = await this.prisma.client.env.findUnique({
@@ -130,7 +133,7 @@ export class DbViewerService {
         },
       });
 
-      this.logger.log(
+      this.logger.info(
         `Env ${envId}: started Adminer viewer container ${containerId.slice(0, 12)} on 127.0.0.1:${port}`
       );
       return { ok: true, containerId, port };

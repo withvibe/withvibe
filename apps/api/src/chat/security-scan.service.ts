@@ -1,8 +1,9 @@
-import { Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { AgentSeedService } from "../agents/agent-seed.service";
 import { MessagesService } from "./messages.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
  * Phase ids the agent emits as it works through a scan. Kept in sync with
@@ -80,9 +81,9 @@ Verdict rule: \`fail\` if any critical/high finding, \`warn\` if only medium/low
 
 @Injectable()
 export class SecurityScanService {
-  private readonly logger = new Logger(SecurityScanService.name);
-
   constructor(
+    @InjectPinoLogger(SecurityScanService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
     private readonly agentSeed: AgentSeedService,
@@ -177,7 +178,7 @@ export class SecurityScanService {
       sessionId,
       buildKickoffPrompt()
     );
-    this.logger.log(
+    this.logger.info(
       `Security scan started: env=${envId} session=${sessionId} user=${userId}`
     );
     return { sessionId };

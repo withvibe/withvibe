@@ -8,6 +8,10 @@ export const MAX_ENV_CONTEXT_PATH_LENGTH = 600;
 export const MAX_ENV_CONTEXT_NAME_LENGTH = 80;
 export const MAX_ENV_CONTEXT_FILE_BYTES = 100 * 1024 * 1024; // 100 MB / file
 export const MAX_ENV_CONTEXT_TOTAL_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB / env
+// Cap on what the in-app Monaco editor will load. Past this, the editor
+// gets sluggish and the JSON payload over the wire starts to hurt. Users
+// can still open the file in the VS Code tunnel for bigger files.
+export const MAX_ENV_CONTEXT_EDITABLE_BYTES = 5 * 1024 * 1024; // 5 MB
 
 export type EnvContextFileMeta = {
   path: string;

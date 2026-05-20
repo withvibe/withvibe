@@ -1,18 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import {
   ChevronDown,
   ChevronRight,
+  Code2,
   Download,
   FilePlus2,
   FileText,
   Folder,
   FolderPlus,
+  Loader2,
   Pencil,
+  Plus,
   RefreshCw,
   Sparkles,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,6 +30,72 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
+
+// Monaco bundles its own web worker — never render it server-side.
+const MonacoEditor = dynamic(
+  () => import("@monaco-editor/react").then((m) => m.default),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center justify-center h-full text-xs text-muted-foreground">
+        <Loader2 className="size-4 animate-spin mr-2" />
+        Loading editor…
+      </div>
+    ),
+  }
+);
+
+// Files we'll preview in Monaco. Anything outside this set keeps the
+// download-only flow (binaries, PDFs, images, archives). The server also
+// guards with a null-byte sniff so a misnamed binary won't bypass this.
+const EDITABLE_EXTENSIONS = new Set([
+  "md", "txt", "json", "yaml", "yml", "toml", "ini", "conf", "cfg",
+  "csv", "tsv", "log", "env", "sh", "bash", "zsh", "fish",
+  "js", "jsx", "ts", "tsx", "mjs", "cjs",
+  "py", "rb", "go", "rs", "java", "kt", "scala", "swift",
+  "c", "cc", "cpp", "h", "hpp", "cs", "php", "lua", "r",
+  "html", "htm", "css", "scss", "sass", "less",
+  "sql", "graphql", "gql", "proto",
+  "xml", "svg", "dockerfile", "gitignore", "dockerignore", "editorconfig",
+  "prettierrc", "eslintrc", "babelrc",
+]);
+
+function isEditablePath(p: string): boolean {
+  const base = p.split("/").pop() ?? "";
+  const lower = base.toLowerCase();
+  if (lower === "dockerfile" || lower.startsWith("dockerfile.")) return true;
+  if (lower.startsWith(".env")) return true;
+  if (lower.startsWith(".") && !lower.includes(".", 1)) return true; // .gitignore, .prettierrc
+  const dot = lower.lastIndexOf(".");
+  if (dot < 0) return false;
+  return EDITABLE_EXTENSIONS.has(lower.slice(dot + 1));
+}
+
+function monacoLanguageForPath(p: string): string {
+  const lower = p.toLowerCase();
+  const base = lower.split("/").pop() ?? "";
+  if (base === "dockerfile" || base.startsWith("dockerfile.")) return "dockerfile";
+  if (base === ".env" || base.startsWith(".env.")) return "ini";
+  if (lower.endsWith(".yml") || lower.endsWith(".yaml")) return "yaml";
+  if (lower.endsWith(".json")) return "json";
+  if (lower.endsWith(".sh") || lower.endsWith(".bash") || lower.endsWith(".zsh")) return "shell";
+  if (lower.endsWith(".toml") || lower.endsWith(".ini") || lower.endsWith(".conf")) return "ini";
+  if (lower.endsWith(".md")) return "markdown";
+  if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
+  if (lower.endsWith(".js") || lower.endsWith(".jsx") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "javascript";
+  if (lower.endsWith(".py")) return "python";
+  if (lower.endsWith(".rb")) return "ruby";
+  if (lower.endsWith(".go")) return "go";
+  if (lower.endsWith(".rs")) return "rust";
+  if (lower.endsWith(".java")) return "java";
+  if (lower.endsWith(".sql")) return "sql";
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "html";
+  if (lower.endsWith(".css")) return "css";
+  if (lower.endsWith(".scss") || lower.endsWith(".sass")) return "scss";
+  if (lower.endsWith(".xml") || lower.endsWith(".svg")) return "xml";
+  if (lower.endsWith(".csv") || lower.endsWith(".tsv")) return "plaintext";
+  return "plaintext";
+}
 
 type TreeEntry = {
   name: string;
@@ -94,6 +165,34 @@ export function ContextPanel({
   const [renameValue, setRenameValue] = useState("");
   const [deleting, setDeleting] = useState<TreeEntry | null>(null);
   const [busy, setBusy] = useState(false);
+  // Folder-create dialog (kept simple — just a name field). `parentPath` is
+  // "" for the root.
+  const [creatingFolder, setCreatingFolder] = useState<
+    null | { parentPath: string }
+  >(null);
+  const [createName, setCreateName] = useState("");
+  // File create-or-edit editor state. `mode: "new"` opens a blank Monaco
+  // panel with a name input; the file is POSTed at save time. `mode: "edit"`
+  // loads existing content over HTTP and PUTs the result on save. Either way
+  // it's the same Dialog so users don't have to learn two UIs.
+  type EditorState =
+    | {
+        mode: "new";
+        parentPath: string;
+        name: string;
+        content: string;
+        saving: boolean;
+      }
+    | {
+        mode: "edit";
+        path: string;
+        content: string;
+        originalContent: string;
+        loading: boolean;
+        saving: boolean;
+        loadError: string | null;
+      };
+  const [editor, setEditor] = useState<EditorState | null>(null);
   const filesInput = useRef<HTMLInputElement | null>(null);
   const folderInput = useRef<HTMLInputElement | null>(null);
 
@@ -170,10 +269,195 @@ export function ContextPanel({
     a.remove();
   }
 
-  function startUpload(kind: "files" | "folder") {
+  function startUpload(kind: "files" | "folder", destPath = "") {
     setUploadKind(kind);
-    setUploadDest("");
+    setUploadDest(destPath);
     setPendingFiles([]);
+  }
+
+  function startCreate(kind: "folder" | "file", parentPath: string) {
+    if (kind === "folder") {
+      setCreatingFolder({ parentPath });
+      setCreateName("");
+      return;
+    }
+    setEditor({
+      mode: "new",
+      parentPath,
+      name: "",
+      content: "",
+      saving: false,
+    });
+  }
+
+  async function startEdit(entry: TreeEntry) {
+    if (entry.kind !== "file") return;
+    if (!isEditablePath(entry.path)) {
+      toast.error(
+        "This file isn't editable in the browser — try Download, or open it in the VS Code tunnel."
+      );
+      return;
+    }
+    // Open the editor immediately with a loading state, fetch content in
+    // parallel. Good UX even on slow networks — Monaco mounts while we wait.
+    setEditor({
+      mode: "edit",
+      path: entry.path,
+      content: "",
+      originalContent: "",
+      loading: true,
+      saving: false,
+      loadError: null,
+    });
+    try {
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/envs/${envId}/context/file/text?` +
+          new URLSearchParams({ path: entry.path }).toString()
+      );
+      if (!res.ok) {
+        const msg = await res.text().catch(() => "");
+        let parsed: string | null = null;
+        try {
+          parsed = (JSON.parse(msg) as { message?: string }).message ?? null;
+        } catch {
+          // not JSON, fall through
+        }
+        setEditor((prev) =>
+          prev && prev.mode === "edit"
+            ? { ...prev, loading: false, loadError: parsed || msg || "Failed to load file" }
+            : prev
+        );
+        return;
+      }
+      const data = (await res.json()) as { content: string; size: number };
+      setEditor((prev) =>
+        prev && prev.mode === "edit"
+          ? {
+              ...prev,
+              content: data.content,
+              originalContent: data.content,
+              loading: false,
+            }
+          : prev
+      );
+    } catch (err) {
+      setEditor((prev) =>
+        prev && prev.mode === "edit"
+          ? { ...prev, loading: false, loadError: String(err) }
+          : prev
+      );
+    }
+  }
+
+  async function submitCreateFolder() {
+    if (!creatingFolder) return;
+    const name = createName.trim().replace(/^\/+|\/+$/g, "");
+    if (!name) {
+      toast.error("Name is required");
+      return;
+    }
+    if (name.includes("/") || name === "." || name === "..") {
+      toast.error("Use the parent folder's button — names can't contain '/'");
+      return;
+    }
+    const fullPath = creatingFolder.parentPath
+      ? `${creatingFolder.parentPath}/${name}`
+      : name;
+    setBusy(true);
+    try {
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/envs/${envId}/context/folder`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: fullPath }),
+        }
+      );
+      if (!res.ok) {
+        const msg = await res.text().catch(() => "");
+        toast.error(msg || "Failed to create folder");
+        return;
+      }
+      const json = (await res.json()) as TreeResponse;
+      setTree(json.root);
+      if (creatingFolder.parentPath) {
+        setExpanded((prev) => ({ ...prev, [creatingFolder.parentPath]: true }));
+      }
+      toast.success(`Created folder ${fullPath}`);
+      setCreatingFolder(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitEditor() {
+    if (!editor) return;
+    if (editor.mode === "new") {
+      const name = editor.name.trim().replace(/^\/+|\/+$/g, "");
+      if (!name) {
+        toast.error("Name is required");
+        return;
+      }
+      if (name.includes("/") || name === "." || name === "..") {
+        toast.error("Names can't contain '/'");
+        return;
+      }
+      const fullPath = editor.parentPath ? `${editor.parentPath}/${name}` : name;
+      setEditor({ ...editor, saving: true });
+      try {
+        const res = await fetch(
+          `/api/workspaces/${workspaceId}/envs/${envId}/context/file`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: fullPath, content: editor.content }),
+          }
+        );
+        if (!res.ok) {
+          const msg = await res.text().catch(() => "");
+          toast.error(msg || "Failed to create file");
+          setEditor((prev) => (prev ? { ...prev, saving: false } : prev));
+          return;
+        }
+        const json = (await res.json()) as TreeResponse;
+        setTree(json.root);
+        if (editor.parentPath) {
+          setExpanded((prev) => ({ ...prev, [editor.parentPath]: true }));
+        }
+        toast.success(`Created ${fullPath}`);
+        setEditor(null);
+      } catch (err) {
+        toast.error(String(err));
+        setEditor((prev) => (prev ? { ...prev, saving: false } : prev));
+      }
+      return;
+    }
+    // mode === "edit"
+    if (editor.loading) return;
+    setEditor({ ...editor, saving: true });
+    try {
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/envs/${envId}/context/file`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: editor.path, content: editor.content }),
+        }
+      );
+      if (!res.ok) {
+        const msg = await res.text().catch(() => "");
+        toast.error(msg || "Failed to save");
+        setEditor((prev) => (prev ? { ...prev, saving: false } : prev));
+        return;
+      }
+      const json = (await res.json()) as TreeResponse;
+      setTree(json.root);
+      toast.success(`Saved ${editor.path}`);
+      setEditor(null);
+    } catch (err) {
+      toast.error(String(err));
+      setEditor((prev) => (prev ? { ...prev, saving: false } : prev));
+    }
   }
 
   function pickFiles() {
@@ -338,6 +622,48 @@ export function ContextPanel({
           {formatTime(entry.modifiedAt)}
         </span>
         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+          {entry.kind === "folder" && (
+            <>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-7"
+                onClick={() => startCreate("folder", entry.path)}
+                title="New folder inside"
+              >
+                <FolderPlus className="size-3.5" />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-7"
+                onClick={() => startCreate("file", entry.path)}
+                title="New file inside"
+              >
+                <FilePlus2 className="size-3.5" />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-7"
+                onClick={() => startUpload("files", entry.path)}
+                title="Upload into this folder"
+              >
+                <Upload className="size-3.5" />
+              </Button>
+            </>
+          )}
+          {entry.kind === "file" && isEditablePath(entry.path) && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7"
+              onClick={() => void startEdit(entry)}
+              title="Edit"
+            >
+              <Code2 className="size-3.5" />
+            </Button>
+          )}
           {entry.kind === "file" && (
             <Button
               size="icon"
@@ -381,13 +707,31 @@ export function ContextPanel({
           the AI to read, or browse AI-produced deliverables under{" "}
           <code className="font-mono">ai/</code>.
         </p>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 flex-wrap">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => startCreate("folder", "")}
+            title="Create an empty folder at the extracontext/ root"
+          >
+            <FolderPlus className="size-4" />
+            New folder
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => startCreate("file", "")}
+            title="Create a new file at the extracontext/ root"
+          >
+            <Plus className="size-4" />
+            New file
+          </Button>
           <Button
             size="sm"
             variant="outline"
             onClick={() => startUpload("folder")}
           >
-            <FolderPlus className="size-4" />
+            <Upload className="size-4" />
             Upload folder
           </Button>
           <Button
@@ -615,6 +959,202 @@ export function ContextPanel({
               disabled={busy}
             >
               {busy ? "Deleting…" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Folder-create dialog — stays a simple name field. */}
+      <Dialog
+        open={!!creatingFolder}
+        onOpenChange={(v) => !v && setCreatingFolder(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>New folder</DialogTitle>
+            <DialogDescription>
+              {creatingFolder?.parentPath ? (
+                <>
+                  Will be created inside <code>{creatingFolder.parentPath}</code>.
+                </>
+              ) : (
+                <>
+                  Will be created at the root of <code>extracontext/</code>.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 mt-2">
+            <Input
+              autoFocus
+              placeholder="folder-name"
+              value={createName}
+              onChange={(e) => setCreateName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void submitCreateFolder();
+              }}
+              disabled={busy}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setCreatingFolder(null)}
+              disabled={busy}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void submitCreateFolder()}
+              disabled={busy || !createName.trim()}
+            >
+              {busy ? "Creating…" : "Create"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* File create-or-edit dialog — full Monaco editor. */}
+      <Dialog
+        open={!!editor}
+        onOpenChange={(v) => {
+          if (v) return;
+          // Guard unsaved edits: confirm before tossing a dirty buffer.
+          if (
+            editor &&
+            editor.mode === "edit" &&
+            !editor.saving &&
+            editor.content !== editor.originalContent
+          ) {
+            if (
+              !window.confirm("Discard unsaved changes?")
+            ) {
+              return;
+            }
+          }
+          setEditor(null);
+        }}
+      >
+        <DialogContent className="max-w-4xl w-[min(96vw,1100px)] p-0 gap-0 flex flex-col h-[min(85vh,800px)]">
+          <DialogHeader className="px-5 pt-4 pb-3 border-b border-border/60 shrink-0">
+            <DialogTitle className="font-mono text-sm">
+              {editor?.mode === "new"
+                ? `New file${editor.parentPath ? ` in ${editor.parentPath}` : ""}`
+                : `Edit ${editor?.path ?? ""}`}
+            </DialogTitle>
+            <DialogDescription className="text-[11px] text-muted-foreground">
+              {editor?.mode === "new" ? (
+                <>
+                  Saved under <code>extracontext/</code>. Cmd/Ctrl-S to save.
+                </>
+              ) : (
+                <>
+                  Cmd/Ctrl-S to save. Changes mirror to the env clone so the
+                  agent sees them immediately.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          {editor?.mode === "new" && (
+            <div className="px-5 py-3 border-b border-border/60 shrink-0">
+              <Input
+                autoFocus
+                placeholder="file.md"
+                value={editor.name}
+                onChange={(e) =>
+                  setEditor((prev) =>
+                    prev && prev.mode === "new"
+                      ? { ...prev, name: e.target.value }
+                      : prev
+                  )
+                }
+                disabled={editor.saving}
+                className="font-mono"
+              />
+            </div>
+          )}
+
+          <div
+            className="flex-1 min-h-0"
+            onKeyDown={(e) => {
+              // Cmd/Ctrl-S → save without leaving the editor.
+              if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+                e.preventDefault();
+                void submitEditor();
+              }
+            }}
+          >
+            {editor && editor.mode === "edit" && editor.loadError ? (
+              <div className="h-full flex items-center justify-center text-xs text-destructive p-6 text-center">
+                {editor.loadError}
+              </div>
+            ) : editor && editor.mode === "edit" && editor.loading ? (
+              <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
+                <Loader2 className="size-4 animate-spin mr-2" />
+                Loading file…
+              </div>
+            ) : editor ? (
+              <MonacoEditor
+                height="100%"
+                language={monacoLanguageForPath(
+                  editor.mode === "new"
+                    ? editor.name || "untitled.txt"
+                    : editor.path
+                )}
+                value={editor.content}
+                onChange={(v) =>
+                  setEditor((prev) =>
+                    prev
+                      ? prev.mode === "new"
+                        ? { ...prev, content: v ?? "" }
+                        : { ...prev, content: v ?? "" }
+                      : prev
+                  )
+                }
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: 12,
+                  scrollBeyondLastLine: false,
+                  wordWrap: "on",
+                  tabSize: 2,
+                  readOnly: editor.mode === "edit" && editor.loading,
+                }}
+                theme="vs-dark"
+              />
+            ) : null}
+          </div>
+
+          <DialogFooter className="px-5 py-3 border-t border-border/60 shrink-0">
+            <div className="flex-1 text-[11px] text-muted-foreground">
+              {editor?.mode === "edit" &&
+              editor.content !== editor.originalContent
+                ? "● Unsaved changes"
+                : null}
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => setEditor(null)}
+              disabled={editor?.saving}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void submitEditor()}
+              disabled={
+                !editor ||
+                editor.saving ||
+                (editor.mode === "new" && !editor.name.trim()) ||
+                (editor.mode === "edit" &&
+                  (editor.loading ||
+                    editor.content === editor.originalContent))
+              }
+            >
+              {editor?.saving
+                ? "Saving…"
+                : editor?.mode === "new"
+                  ? "Create"
+                  : "Save"}
             </Button>
           </DialogFooter>
         </DialogContent>

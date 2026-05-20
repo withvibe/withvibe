@@ -1,9 +1,10 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { ensureEnvDir } from "../common/repo-base-dir";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { composeProjectName } from "../docker/compose-naming";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
@@ -31,9 +32,11 @@ export type RunnerStatus =
  */
 @Injectable()
 export class ClaudeRunnerService {
-  private readonly logger = new Logger(ClaudeRunnerService.name);
-
-  constructor(private readonly envClones: EnvCloneService) {}
+  constructor(
+    @InjectPinoLogger(ClaudeRunnerService.name)
+    private readonly logger: PinoLogger,
+    private readonly envClones: EnvCloneService
+  ) {}
 
   /** `claude-runner-<envId>` — stable, one per env, collision-free. */
   containerName(envId: string): string {
@@ -156,7 +159,7 @@ export class ClaudeRunnerService {
     }
     args.push(RUNNER_IMAGE);
 
-    this.logger.log(
+    this.logger.info(
       `[runner] starting container ${name} (network=${network ?? "none"}, mount=${envDir})`
     );
     try {

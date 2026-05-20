@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { access } from "fs/promises";
 import path from "path";
 import { PrismaService } from "../prisma/prisma.service";
@@ -14,6 +14,7 @@ import {
   renderSecurityGreeting,
   type ComposeDetection,
 } from "./_seed-data";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const COMPOSE_FILENAMES = [
   "docker-compose.yml",
@@ -37,9 +38,11 @@ type RepoScanInput = {
  */
 @Injectable()
 export class AgentSeedService {
-  private readonly logger = new Logger(AgentSeedService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectPinoLogger(AgentSeedService.name)
+    private readonly logger: PinoLogger,
+    private readonly prisma: PrismaService
+  ) {}
 
   async ensureDevOpsAgent(
     workspaceId: string
@@ -129,7 +132,7 @@ export class AgentSeedService {
         source: "seed",
       })),
     });
-    this.logger.log(
+    this.logger.info(
       `${spec.slug} agent ${agentId}: added ${missing.length} missing seed skill(s): ${missing.map((s) => s.slug).join(", ")}`
     );
   }
@@ -162,7 +165,7 @@ export class AgentSeedService {
    * touching an in-progress conversation.
    */
   async refreshDevOpsGreetingIfUnused(envId: string): Promise<void> {
-    this.logger.log(`refreshGreeting: called for env ${envId}`);
+    this.logger.info(`refreshGreeting: called for env ${envId}`);
     const env = await this.prisma.client.env.findUnique({
       where: { id: envId },
       select: {
@@ -184,7 +187,7 @@ export class AgentSeedService {
       },
     });
     if (!env) {
-      this.logger.log(`refreshGreeting: env ${envId} not found`);
+      this.logger.info(`refreshGreeting: env ${envId} not found`);
       return;
     }
 
@@ -198,7 +201,7 @@ export class AgentSeedService {
       select: { id: true },
     });
     if (!devops) {
-      this.logger.log(`refreshGreeting: no DevOps agent in ws ${env.workspaceId}`);
+      this.logger.info(`refreshGreeting: no DevOps agent in ws ${env.workspaceId}`);
       return;
     }
 
@@ -212,21 +215,21 @@ export class AgentSeedService {
       },
     });
     if (!session) {
-      this.logger.log(`refreshGreeting: no DevOps session for env ${envId}`);
+      this.logger.info(`refreshGreeting: no DevOps session for env ${envId}`);
       return;
     }
     // Refresh only if the user hasn't replied yet — rewriting the greeting
     // after the conversation started would desync the agent's context.
     const hasUserMessage = session.messages.some((m) => m.role === "user");
     if (hasUserMessage) {
-      this.logger.log(
+      this.logger.info(
         `refreshGreeting: env ${envId} already has user messages — skip`
       );
       return;
     }
     const greeting = session.messages.find((m) => m.role === "assistant");
     if (!greeting) {
-      this.logger.log(
+      this.logger.info(
         `refreshGreeting: env ${envId} has no assistant greeting to update`
       );
       return;
@@ -254,7 +257,7 @@ export class AgentSeedService {
       where: { id: greeting.id },
       data: { content, metadata: { suggestions } },
     });
-    this.logger.log(
+    this.logger.info(
       `Refreshed DevOps greeting for env ${envId} with ${assetPaths.length} asset(s)`
     );
   }

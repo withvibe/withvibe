@@ -1987,9 +1987,18 @@ function FileDiffView({ file }: { file: FileDiff }) {
       </button>
       {open && (
         <div className="overflow-x-auto">
-          {file.hunks.map((hunk, i) => (
-            <SplitHunk key={i} hunk={hunk} />
-          ))}
+          {file.hunks.length === 0 ? (
+            // Backend emits placeholder diff blocks for files that appear in
+            // git status but produce no content diff (binary, deleted,
+            // renamed, mode-only). See synthesizeMissingDiffEntries in
+            // git.service.ts.
+            <div className="px-3 py-4 text-[11px] text-muted-foreground italic">
+              No preview available — see the file list for the change type
+              (binary, deleted, renamed, or mode-only).
+            </div>
+          ) : (
+            file.hunks.map((hunk, i) => <SplitHunk key={i} hunk={hunk} />)
+          )}
         </div>
       )}
     </div>

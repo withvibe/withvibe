@@ -2,7 +2,6 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { execFile } from "child_process";
@@ -28,6 +27,8 @@ import { TemplateMaterializerService } from "../templates/template-materializer.
 import { PortAllocatorService } from "../ports/port-allocator.service";
 import { ClaudeRunnerService } from "../runner/claude-runner.service";
 import { StorageService } from "../storage/storage.service";
+import { ActiveRunsService } from "../chat/active-runs.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const VALID_STATUSES: EnvStatus[] = ["todo", "in_progress", "done"];
 const VALID_CHAT_ENGINES: ChatEngine[] = ["agent_sdk", "claude_code"];
@@ -64,9 +65,9 @@ export function normalizeAssetPath(p: string): string {
 
 @Injectable()
 export class EnvsService {
-  private readonly logger = new Logger(EnvsService.name);
-
   constructor(
+    @InjectPinoLogger(EnvsService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
     private readonly envClones: EnvCloneService,
@@ -75,7 +76,8 @@ export class EnvsService {
     private readonly templateMaterializer: TemplateMaterializerService,
     private readonly portAllocator: PortAllocatorService,
     private readonly runner: ClaudeRunnerService,
-    private readonly storage: StorageService
+    private readonly storage: StorageService,
+    private readonly activeRuns: ActiveRunsService
   ) {}
 
   async list(userId: string, workspaceId: string) {
@@ -361,7 +363,7 @@ export class EnvsService {
       }
     }
 
-    this.logger.log(
+    this.logger.info(
       `Creating env "${title}" in workspace ${workspaceId} by user ${userId}` +
         (repos.length > 0 ? ` with ${repos.length} repo(s)` : "")
     );
@@ -571,7 +573,7 @@ export class EnvsService {
           templateId,
           userVars: templateVars,
         });
-        this.logger.log(
+        this.logger.info(
           `Env ${env.id} materialized from template ${template?.slug ?? templateId}`
         );
       } catch (err) {
@@ -589,12 +591,12 @@ export class EnvsService {
       }
     }
 
-    this.logger.log(`Env created: ${env.id} ("${title}")`);
+    this.logger.info(`Env created: ${env.id} ("${title}")`);
 
     // Background env-clone creation — detached so it can't delay the 201.
     const envRepoIds = env.envRepos.map((er) => er.id);
     if (envRepoIds.length > 0) {
-      this.logger.log(
+      this.logger.info(
         `Scheduling env-clone setup for ${envRepoIds.length} repo(s) in env ${env.id}`
       );
     }
@@ -729,7 +731,7 @@ export class EnvsService {
 
     const addedEnvRepoIds: string[] = [];
     const changedFields = Object.keys(data);
-    this.logger.log(
+    this.logger.info(
       `Updating env ${envId}: fields=[${changedFields.join(", ") || "none"}]` +
         (reposChanged ? ` repos: +${toAdd.length} -${toRemove.length}` : "")
     );
@@ -780,7 +782,12 @@ export class EnvsService {
     return { ok: true };
   }
 
-  async delete(userId: string, workspaceId: string, envId: string) {
+  async delete(
+    userId: string,
+    workspaceId: string,
+    envId: string,
+    options: { deleteRemoteBranch?: boolean } = {}
+  ) {
     const member = await this.access.member(userId, workspaceId);
     const env = await this.prisma.client.env.findUnique({
       where: { id: envId },
@@ -796,14 +803,32 @@ export class EnvsService {
       );
     }
 
-    this.logger.log(`Deleting env ${envId} ("${env.title}") by user ${userId}`);
+    this.logger.info(
+      `Deleting env ${envId} ("${env.title}") by user ${userId}` +
+        (options.deleteRemoteBranch ? " [+remote branch delete]" : "")
+    );
+
+    // Step 1 (synchronous): abort any in-flight agent turn for this env so a
+    // mid-build orchestrator stops writing into the clone path before we
+    // start tearing it down. The abort signal propagates to the SDK / runner
+    // child process within a few hundred ms; we don't block on the run
+    // settling here — the soft delete below is authoritative regardless.
+    const aborted = this.activeRuns.abortAllForEnv(envId);
+    if (aborted > 0) {
+      // Give the AbortControllers a moment to propagate to file writes so
+      // they don't race the clone removal below. 250ms is plenty for the
+      // SDK to break out of its async iterator on the next tick.
+      await new Promise((r) => setTimeout(r, 250));
+    }
 
     await this.prisma.client.env.update({
       where: { id: envId },
       data: { deletedAt: new Date() },
     });
 
-    this.logger.log(`Env ${envId} soft-deleted; stopping container + tearing down env clones`);
+    this.logger.info(
+      `Env ${envId} soft-deleted; stopping container + tearing down env clones`
+    );
 
     // Stop running container, then tear down env clones. Fire-and-forget —
     // the soft delete is the authoritative signal to the UI. Port rows are
@@ -823,7 +848,13 @@ export class EnvsService {
         );
       }
     })();
-    void this.envClones.removeEnvClones(envId).catch(() => {});
+    void this.envClones
+      .removeEnvClones(envId, {
+        deleteRemoteBranch: options.deleteRemoteBranch === true,
+      })
+      .catch((err) =>
+        this.logger.error(`Failed to tear down env clones for ${envId}: ${err}`)
+      );
     void this.storage
       .deleteEnv(env.workspaceId, envId)
       .catch((err) =>

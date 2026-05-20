@@ -2,7 +2,6 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { execFile } from "child_process";
@@ -10,6 +9,7 @@ import { promisify } from "util";
 import Anthropic from "@anthropic-ai/sdk";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
+import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
@@ -74,9 +74,9 @@ type PullResult = {
 
 @Injectable()
 export class GitService {
-  private readonly logger = new Logger(GitService.name);
-
   constructor(
+    @InjectPinoLogger(GitService.name)
+    private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService
   ) {}
@@ -326,8 +326,68 @@ export class GitService {
     const working =
       (await this.tryRun(cwd, ["diff", "HEAD", "--no-color"])) ?? "";
     const untracked = await this.untrackedAsDiff(cwd);
-    const text = [working, untracked].filter(Boolean).join("\n");
+    const combined = [working, untracked].filter(Boolean).join("\n");
+    // git diff drops content for some file kinds (binaries, mode-only changes,
+    // some symlink swaps) — they appear in `git status` but produce no
+    // `diff --git` block, so the FE diff list silently misses them. Reconcile
+    // status against the produced diff and synthesize placeholder blocks for
+    // anything missing, so the file shows up in the diff list (with an
+    // empty-hunks "No preview" body on the FE).
+    const placeholders = await this.synthesizeMissingDiffEntries(cwd, combined);
+    const text = placeholders ? `${combined}\n${placeholders}` : combined;
     return { text, baseRef };
+  }
+
+  /**
+   * Returns synthetic `diff --git` blocks for any path in `git status` that's
+   * not already represented in `existingDiff`. The blocks contain no hunks —
+   * the FE's diff parser yields a FileDiff entry with `hunks: []`, and the FE
+   * renders an explanatory empty-state instead of silently hiding the file.
+   */
+  private async synthesizeMissingDiffEntries(
+    cwd: string,
+    existingDiff: string
+  ): Promise<string> {
+    const porcelain = await this.tryRun(cwd, ["status", "--porcelain=v1"]);
+    if (!porcelain) return "";
+
+    // Paths that already appear in the diff text (extracted from
+    // `diff --git a/<old> b/<new>` lines).
+    const presentPaths = new Set<string>();
+    for (const line of existingDiff.split("\n")) {
+      if (!line.startsWith("diff --git ")) continue;
+      const m = line.match(/ b\/(.+)$/);
+      if (m) presentPaths.add(m[1]);
+    }
+
+    // Parse the porcelain. Format: `XY <path>` or `XY <old> -> <new>` for
+    // renames. Untracked files have XY = "??".
+    const missing: Array<{ path: string; reason: string }> = [];
+    for (const line of porcelain.split("\n")) {
+      if (!line) continue;
+      const xy = line.slice(0, 2);
+      const rest = line.slice(3);
+      const renameIdx = rest.indexOf(" -> ");
+      const path = renameIdx >= 0 ? rest.slice(renameIdx + 4) : rest;
+      if (presentPaths.has(path)) continue;
+      let reason = "no preview";
+      if (xy.includes("D")) reason = "deleted (no preview)";
+      else if (xy.includes("R")) reason = "renamed (no content diff)";
+      else if (xy === "??") reason = "untracked binary or empty (no preview)";
+      else reason = "binary or mode-only change (no preview)";
+      missing.push({ path, reason });
+    }
+    if (missing.length === 0) return "";
+
+    // Synthesize parseable `diff --git` blocks. The FE parser only needs the
+    // `diff --git` line to create a FileDiff entry; the comment line is
+    // ignored because it doesn't match any other parser branch.
+    return missing
+      .map(
+        (m) =>
+          `diff --git a/${m.path} b/${m.path}\n# withvibe-placeholder: ${m.reason}`
+      )
+      .join("\n");
   }
 
   private async untrackedAsDiff(cwd: string): Promise<string> {

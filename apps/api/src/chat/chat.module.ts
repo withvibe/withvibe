@@ -60,6 +60,10 @@ import { BenchController } from "./bench/bench.controller";
     WorkspaceKnowledgeService,
     MemberMemoryService,
     HumanQuestionService,
+    // Exposed so EnvsService can abort in-flight agent runs on env delete —
+    // otherwise a mid-build orchestrator keeps writing into a clone path
+    // that's about to be removed, leaving orphan files/containers.
+    ActiveRunsService,
   ],
 })
 export class ChatModule {}
