@@ -5,7 +5,6 @@ import dynamic from "next/dynamic";
 import {
   ChevronDown,
   ChevronRight,
-  Code2,
   Download,
   FilePlus2,
   FileText,
@@ -45,32 +44,10 @@ const MonacoEditor = dynamic(
   }
 );
 
-// Files we'll preview in Monaco. Anything outside this set keeps the
-// download-only flow (binaries, PDFs, images, archives). The server also
-// guards with a null-byte sniff so a misnamed binary won't bypass this.
-const EDITABLE_EXTENSIONS = new Set([
-  "md", "txt", "json", "yaml", "yml", "toml", "ini", "conf", "cfg",
-  "csv", "tsv", "log", "env", "sh", "bash", "zsh", "fish",
-  "js", "jsx", "ts", "tsx", "mjs", "cjs",
-  "py", "rb", "go", "rs", "java", "kt", "scala", "swift",
-  "c", "cc", "cpp", "h", "hpp", "cs", "php", "lua", "r",
-  "html", "htm", "css", "scss", "sass", "less",
-  "sql", "graphql", "gql", "proto",
-  "xml", "svg", "dockerfile", "gitignore", "dockerignore", "editorconfig",
-  "prettierrc", "eslintrc", "babelrc",
-]);
-
-function isEditablePath(p: string): boolean {
-  const base = p.split("/").pop() ?? "";
-  const lower = base.toLowerCase();
-  if (lower === "dockerfile" || lower.startsWith("dockerfile.")) return true;
-  if (lower.startsWith(".env")) return true;
-  if (lower.startsWith(".") && !lower.includes(".", 1)) return true; // .gitignore, .prettierrc
-  const dot = lower.lastIndexOf(".");
-  if (dot < 0) return false;
-  return EDITABLE_EXTENSIONS.has(lower.slice(dot + 1));
-}
-
+// Pino-style language detection for Monaco's syntax highlighting. Falls back
+// to plaintext for anything we don't recognize — Monaco still handles edits
+// fine, you just don't get colors. The decision of whether a file is *text
+// at all* lives on the server (null-byte sniff in EnvContextService).
 function monacoLanguageForPath(p: string): string {
   const lower = p.toLowerCase();
   const base = lower.split("/").pop() ?? "";
@@ -292,12 +269,10 @@ export function ContextPanel({
 
   async function startEdit(entry: TreeEntry) {
     if (entry.kind !== "file") return;
-    if (!isEditablePath(entry.path)) {
-      toast.error(
-        "This file isn't editable in the browser — try Download, or open it in the VS Code tunnel."
-      );
-      return;
-    }
+    // The server decides if a file is text-editable (null-byte sniff + size
+    // cap). The FE used to maintain its own allowlist but it was always
+    // incomplete; trying the server is one round-trip and we get back a
+    // clear human-readable error for genuine binaries.
     // Open the editor immediately with a loading state, fetch content in
     // parallel. Good UX even on slow networks — Monaco mounts while we wait.
     setEditor({
@@ -604,17 +579,36 @@ export function ContextPanel({
             className={`size-4 shrink-0 ${insideAi ? "text-primary/80" : "text-muted-foreground"}`}
           />
         )}
-        <button
-          type="button"
-          onClick={() => {
-            if (entry.kind === "folder") toggle(entry.path);
-            else openInNewTab(entry.path);
-          }}
-          className="flex-1 min-w-0 text-left text-sm font-mono truncate hover:underline"
-          title={entry.path}
-        >
-          {entry.name}
-        </button>
+        {/* Name + inline rename pencil share a local hover scope (`group/name`)
+            so the pencil only appears when the cursor is over the name
+            itself — not anywhere on the row. The row-level `group` is left
+            untouched so right-side action icons still reveal on row hover. */}
+        <div className="group/name min-w-0 flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => {
+              if (entry.kind === "folder") toggle(entry.path);
+              else openInNewTab(entry.path);
+            }}
+            className="min-w-0 text-left text-sm font-mono truncate hover:underline"
+            title={entry.path}
+          >
+            {entry.name}
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              startRename(entry);
+            }}
+            className="opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0 p-1 rounded text-muted-foreground/60 hover:text-foreground hover:bg-muted/60"
+            title="Rename"
+            aria-label={`Rename ${entry.name}`}
+          >
+            <Pencil className="size-3" />
+          </button>
+        </div>
+        <div className="flex-1" />
         <span className="text-[11px] text-muted-foreground shrink-0 tabular-nums">
           {entry.kind === "file" ? formatSize(entry.size) : ""}
         </span>
@@ -653,15 +647,15 @@ export function ContextPanel({
               </Button>
             </>
           )}
-          {entry.kind === "file" && isEditablePath(entry.path) && (
+          {entry.kind === "file" && (
             <Button
               size="icon"
               variant="ghost"
               className="size-7"
               onClick={() => void startEdit(entry)}
-              title="Edit"
+              title="Edit content"
             >
-              <Code2 className="size-3.5" />
+              <Pencil className="size-3.5" />
             </Button>
           )}
           {entry.kind === "file" && (
@@ -675,15 +669,6 @@ export function ContextPanel({
               <Download className="size-3.5" />
             </Button>
           )}
-          <Button
-            size="icon"
-            variant="ghost"
-            className="size-7"
-            onClick={() => startRename(entry)}
-            title="Rename / move"
-          >
-            <Pencil className="size-3.5" />
-          </Button>
           <Button
             size="icon"
             variant="ghost"
@@ -1035,7 +1020,7 @@ export function ContextPanel({
           setEditor(null);
         }}
       >
-        <DialogContent className="max-w-4xl w-[min(96vw,1100px)] p-0 gap-0 flex flex-col h-[min(85vh,800px)]">
+        <DialogContent className="!max-w-none w-[min(98vw,1400px)] p-0 gap-0 flex flex-col h-[min(90vh,900px)]">
           <DialogHeader className="px-5 pt-4 pb-3 border-b border-border/60 shrink-0">
             <DialogTitle className="font-mono text-sm">
               {editor?.mode === "new"
