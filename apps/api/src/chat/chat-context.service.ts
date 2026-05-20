@@ -25,6 +25,7 @@ import { ExternalContextMcpService } from "./external-context-mcp.service";
 import { PlaywrightMcpService } from "../docker/playwright-mcp.service";
 import { BrowserSidecarService } from "../docker/browser-sidecar.service";
 import { McpTokenService } from "../mcp-bridge/mcp-token.service";
+import { SlackMcpService } from "../slack/slack-mcp.service";
 import type { DetectedDatabase } from "../docker/database-detection";
 import {
   parseTemplateVariables,
@@ -444,7 +445,8 @@ export class ChatContextService {
     private readonly externalContextMcp: ExternalContextMcpService,
     private readonly playwrightMcp: PlaywrightMcpService,
     private readonly browserSidecar: BrowserSidecarService,
-    private readonly mcpTokens: McpTokenService
+    private readonly mcpTokens: McpTokenService,
+    private readonly slackMcp: SlackMcpService
   ) {}
 
   async build(
@@ -554,6 +556,34 @@ export class ChatContextService {
       "mcp__withvibe-docker__get_env_logs",
       "mcp__withvibe-external-context__render_pdf",
     ];
+
+    // Slack: attach only when the workspace has a bot token connected. Keeping
+    // the tool absent (vs. surfacing a "not connected" error) means the agent
+    // doesn't waste a turn calling a tool that will always fail.
+    //
+    // The two-way `slack_ask` tool is exposed only when the app-level token is
+    // ALSO connected (Phase 3 needs Socket Mode to receive replies) AND
+    // there's a bound chat session the reply can route back to. Without both,
+    // the agent would post a question with no path back to deliver the
+    // answer.
+    if (env.workspace.slackBotToken) {
+      const slackAsksEnabled =
+        !!env.workspace.slackAppToken && !!sessionId;
+      mcpServers["withvibe-slack"] = this.slackMcp.createMcpServer({
+        workspaceId: env.workspaceId,
+        envId,
+        sessionId,
+        asksEnabled: slackAsksEnabled,
+      });
+      extraAllowedTools.push("mcp__withvibe-slack__slack_notify");
+      if (slackAsksEnabled) {
+        extraAllowedTools.push(
+          "mcp__withvibe-slack__slack_ask",
+          "mcp__withvibe-slack__slack_continue_thread",
+          "mcp__withvibe-slack__slack_conclude"
+        );
+      }
+    }
 
     // Agent persona + skill materialization + MCP server for save_skill.
     let agentBlock = "";

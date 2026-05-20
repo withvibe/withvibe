@@ -238,7 +238,12 @@ export class MessagesService {
     workspaceId: string,
     envId: string,
     sessionId: string,
-    content: string
+    content: string,
+    // Optional metadata attached to the synthesized user message. Used by
+    // server-initiated turns (Slack reply, scheduled scan, etc.) so the UI
+    // can render them visually distinct from real user input — same
+    // role="user" for agent semantics, but rendered as a system notice.
+    metadata?: Record<string, unknown>
   ): Promise<{ sessionId: string }> {
     const receivedAt = Date.now();
     const owned = await this.sessions.assertSessionOwned(
@@ -257,8 +262,20 @@ export class MessagesService {
       });
     }
 
+    // JSON-safe coercion mirrors active-runs.service.ts buildMetadata —
+    // Prisma's Json type rejects `Record<string, unknown>` directly.
+    const safeMetadata = metadata
+      ? (JSON.parse(JSON.stringify(metadata)) as object)
+      : undefined;
     const userMessage = await this.prisma.client.message.create({
-      data: { envId, userId, sessionId, role: "user", content },
+      data: {
+        envId,
+        userId,
+        sessionId,
+        role: "user",
+        content,
+        ...(safeMetadata ? { metadata: safeMetadata } : {}),
+      },
     });
 
     this.activeRuns.enqueue({

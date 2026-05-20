@@ -3,9 +3,10 @@ import { WorkspacesController } from "./workspaces.controller";
 import { WorkspacesService } from "./workspaces.service";
 import { SecretsService } from "./secrets.service";
 import { ReposModule } from "../repos/repos.module";
+import { SlackModule } from "../slack/slack.module";
 
 @Module({
-  imports: [ReposModule],
+  imports: [ReposModule, SlackModule],
   controllers: [WorkspacesController],
   providers: [WorkspacesService, SecretsService],
   exports: [WorkspacesService, SecretsService],

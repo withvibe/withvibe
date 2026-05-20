@@ -27,6 +27,7 @@ import { TerminalModule } from "./terminal/terminal.module";
 import { GitModule } from "./git/git.module";
 import { McpBridgeModule } from "./mcp-bridge/mcp-bridge.module";
 import { RunnerModule } from "./runner/runner.module";
+import { SlackModule } from "./slack/slack.module";
 import { AllExceptionsFilter } from "./common/all-exceptions.filter";
 import { SessionRotationInterceptor } from "./auth/session-rotation.interceptor";
 import { RequestContextInterceptor } from "./common/request-context.interceptor";
@@ -111,6 +112,7 @@ import { RequestContextInterceptor } from "./common/request-context.interceptor"
     GitModule,
     McpBridgeModule,
     RunnerModule,
+    SlackModule,
   ],
   controllers: [HealthController],
   providers: [

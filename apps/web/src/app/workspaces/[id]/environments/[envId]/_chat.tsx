@@ -81,6 +81,18 @@ type StoredMessage = {
     debugEvents?: DebugSdkEvent[];
     debugMeta?: DebugMeta;
     debugToolLatencies?: Record<string, ToolLatency>;
+    // Server-initiated user-role messages mark themselves with a `source`
+    // so the UI can render them as a system notice instead of a normal
+    // user bubble. `slack_reply` is set by the Slack event handler.
+    source?: "slack_reply";
+    slackThreadTs?: string;
+    slackChannel?: string;
+    slackUserId?: string;
+    senderName?: string | null;
+    senderEmail?: string | null;
+    replyText?: string;
+    askedQuestion?: string;
+    pendingQuestionId?: string;
   } | null;
   createdAt: string;
   sessionId: string | null;
@@ -296,6 +308,53 @@ export function EnvironmentChat({
   const sending = !!activeState?.controller;
   const queuedCount = activeState?.queuedCount ?? 0;
 
+  // Hide internal Slack mechanics from the chat — the asker should see the
+  // agent's conclusion (or any explicit ask for their input), not every
+  // back-and-forth. Filtered out:
+  //   - slack_reply user messages: the raw Slack reply (agent has the full
+  //     text in its prompt context; surfacing it here is just noise)
+  //   - assistant turns whose tool calls include `slack_continue_thread`:
+  //     these are the agent talking back to Slack, not to the asker
+  //
+  // Anything else stays visible: slack_ask call (agent escalating), the
+  // agent's slack_conclude turn (the conclusion), and any normal assistant
+  // text response (agent involving the asker mid-Slack-conversation).
+  const visibleMessages = useMemo(() => {
+    return messages.filter((m) => {
+      if (m.metadata?.source === "slack_reply") return false;
+      if (m.role === "assistant") {
+        const calls = m.metadata?.toolCalls;
+        if (Array.isArray(calls)) {
+          for (const c of calls) {
+            if (c?.name && c.name.endsWith("slack_continue_thread")) {
+              return false;
+            }
+          }
+        }
+      }
+      return true;
+    });
+  }, [messages]);
+
+  // True when the in-flight agent turn was triggered by a Slack reply
+  // (not by the asker typing). Detected by walking back to the most
+  // recent user-role message: if it's a `slack_reply`, the run currently
+  // streaming was started by the Slack event handler. The LiveBubble
+  // (Thinking + chain-of-thought + streaming tool calls) is hidden in
+  // that case — otherwise the asker watches a whole internal turn flash
+  // up and then vanish when its filtered result lands. They see the
+  // result either way; suppressing the stream just kills the "noise →
+  // gone" flicker that confused the manager-delegation model.
+  const currentRunIsSlackTriggered = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "user") {
+        return m.metadata?.source === "slack_reply";
+      }
+    }
+    return false;
+  }, [messages]);
+
   const patchSession = useCallback(
     (key: string, patch: Partial<SessionState>) => {
       setSessionStates((prev) => ({
@@ -330,29 +389,29 @@ export function EnvironmentChat({
       .catch(() => {});
   }, [workspaceId]);
 
-  // Onboarding banner dismissed-state — persisted per env so a returning user
-  // doesn't see it again. Initial state read in an effect (not at render) to
-  // stay SSR-safe.
-  const onboardingKey = `withvibe.onboarding.dismissed:${envId}`;
-  const [onboardingDismissed, setOnboardingDismissed] = useState(true);
+  // First-time onboarding banner. Shown ONCE, on the very first visit to an
+  // env (DevOps chat only, with a brand-new env that has no chat activity
+  // yet). On mount we read the per-env "seen" flag AND set it for next
+  // visit — so even if the user just lands on the page and walks away
+  // without interacting, returning to the env keeps the banner hidden.
+  // Default `true` keeps it hidden during SSR and the first render before
+  // the effect runs.
+  const [hasSeenOnboarding, setHasSeenOnboarding] = useState(true);
   useEffect(() => {
+    const key = `withvibe.onboarding.seen:${envId}`;
     try {
-      setOnboardingDismissed(
-        window.localStorage.getItem(onboardingKey) === "1"
-      );
+      const seen = window.localStorage.getItem(key) === "1";
+      setHasSeenOnboarding(seen);
+      if (!seen) {
+        // Mark seen NOW so re-entering the env never shows it again, even
+        // if the user doesn't click X this time.
+        window.localStorage.setItem(key, "1");
+      }
     } catch {
-      // localStorage unavailable (private mode) — leave dismissed=true so the
-      // banner stays out of the way rather than nagging on every reload.
+      // localStorage unavailable (private mode) — leave hidden rather than
+      // nagging on every reload.
     }
-  }, [onboardingKey]);
-  function dismissOnboarding() {
-    setOnboardingDismissed(true);
-    try {
-      window.localStorage.setItem(onboardingKey, "1");
-    } catch {
-      /* ignore */
-    }
-  }
+  }, [envId]);
 
   // Prefill handler (from Ask-AI-to-generate button upstream).
   useEffect(() => {
@@ -470,8 +529,11 @@ export function EnvironmentChat({
 
   // Reattach to any active run for the *current session* (after navigation
   // back, page reload, or transient SSE drop). The run lives on the server;
-  // we just re-subscribe to its event stream. Keeps looping while a run is
-  // alive so that transient drops (proxy timeout, network blip) auto-heal.
+  // we just re-subscribe to its event stream. Keeps looping while the
+  // session is active so that transient drops (proxy timeout, network blip)
+  // auto-heal AND server-initiated turns (Slack reply → startSessionTurn,
+  // security scan, etc.) surface within ~3s without the user having to
+  // refresh / refocus the tab.
   // Re-runs whenever the active session changes — different sessions have
   // independent runs (Claude-Code-style: per-session lock, shared cwd).
   useEffect(() => {
@@ -499,16 +561,23 @@ export function EnvironmentChat({
             }
           | null;
         if (cancelled || !data) return;
-        // Run already finished (or none in flight): pull the latest messages
-        // from the DB for whichever session is active. This is what catches
-        // the "computer slept while the AI replied" case — we missed the
-        // live stream, but the assistant message is in the DB now.
+        // No run in flight: pull the latest messages from the DB (catches
+        // both "computer slept while the AI replied" and "Slack reply
+        // triggered a turn that already finished") and keep polling so
+        // future server-initiated turns show up live.
         if (data.status !== "running") {
           await loadMessages(sessionId).catch(() => {});
-          return;
+          await sleep(3000);
+          continue;
         }
-        // If we're already consuming this stream (e.g. from send()), skip.
-        if (sessionStatesRef.current[sessionId]?.controller) return;
+        // If we're already consuming this stream (e.g. from send()), wait
+        // and re-poll — we don't double-subscribe, but we DO need to keep
+        // the loop alive so the next server-initiated run after this one
+        // gets picked up.
+        if (sessionStatesRef.current[sessionId]?.controller) {
+          await sleep(2000);
+          continue;
+        }
         await loadMessages(sessionId);
         if (cancelled) return;
         const controller = new AbortController();
@@ -550,10 +619,17 @@ export function EnvironmentChat({
           continue;
         }
         const { ended } = await consumeStream(sessionId, streamRes, controller);
-        if (ended || cancelled) return;
-        // Stream dropped without `run_ended` — loop back and re-check the
-        // server. If the run is still active we'll re-subscribe.
+        if (cancelled) return;
+        // Stream ended OR dropped — loop back and re-poll. On `ended` the
+        // run is fully done; we keep looping so a *future* server-initiated
+        // turn (Slack reply, scheduled scan) shows up live. On a drop we
+        // re-subscribe to the still-in-flight run.
         await sleep(1000);
+        if (ended) {
+          // Refresh messages so the just-finished assistant turn is in the
+          // store before the next idle poll.
+          await loadMessages(sessionId).catch(() => {});
+        }
       }
     }
     void reattachLoop();
@@ -1368,7 +1444,7 @@ export function EnvironmentChat({
               Run security scan
             </Button>
           )}
-          {sending && (
+          {sending && !currentRunIsSlackTriggered && (
             <span className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/30 text-[11px] font-mono">
               <Loader2 className="size-3 animate-spin" />
               AI is working…
@@ -1398,14 +1474,28 @@ export function EnvironmentChat({
           )}
         </div>
 
-        {/* First-env onboarding banner. Shown when the active session has
-            exactly one message (the pre-persisted DevOps greeting) and no
-            user reply yet, OR when there are no messages at all on a fresh
-            session. Auto-disappears after the user sends their first
-            message; can also be dismissed manually. */}
-        {!onboardingDismissed &&
-          !messages.some((m) => m.role === "user") &&
-          !live && (
+        {/* First-time onboarding banner. Strict gate so it only ever shows
+            for a brand-new env, on the DevOps tab, on the user's first
+            visit:
+              - hasSeenOnboarding: localStorage flag, set on mount → only
+                ever true once per (envId, browser).
+              - active session is the DevOps one (matched by agent.slug
+                === "devops"; the seeded DevOps session).
+              - every session has at most its pre-persisted greeting
+                (messageCount <= 1) — any chat activity in this env, on
+                any agent, hides the banner.
+              - not currently streaming a reply. */}
+        {(() => {
+          if (hasSeenOnboarding) return null;
+          if (!sessions || sessions.length === 0) return null;
+          const devopsSession = sessions.find(
+            (s) => s.agent?.slug === "devops"
+          );
+          if (!devopsSession || active !== devopsSession.id) return null;
+          const noActivityYet = sessions.every((s) => s.messageCount <= 1);
+          if (!noActivityYet) return null;
+          if (live) return null;
+          return (
             <div className="mx-4 mt-2 mb-1 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 flex items-start gap-2 text-sm">
               <Sparkles className="size-4 text-primary mt-0.5 shrink-0" />
               <div className="flex-1 min-w-0">
@@ -1419,7 +1509,7 @@ export function EnvironmentChat({
               </div>
               <button
                 type="button"
-                onClick={dismissOnboarding}
+                onClick={() => setHasSeenOnboarding(true)}
                 className="text-muted-foreground hover:text-foreground transition-smooth shrink-0"
                 title="Dismiss"
                 aria-label="Dismiss onboarding hint"
@@ -1427,7 +1517,8 @@ export function EnvironmentChat({
                 <X className="size-4" />
               </button>
             </div>
-          )}
+          );
+        })()}
 
         {messages.length === 0 && !live ? (
           <div className="flex-1 min-h-0 overflow-y-auto">
@@ -1482,12 +1573,12 @@ export function EnvironmentChat({
               };
             }}
             className="flex-1 min-h-0"
-            data={messages}
+            data={visibleMessages}
             atBottomThreshold={40}
             followOutput={() =>
               stickToBottomRef.current ? "smooth" : false
             }
-            initialTopMostItemIndex={Math.max(0, messages.length - 1)}
+            initialTopMostItemIndex={Math.max(0, visibleMessages.length - 1)}
             increaseViewportBy={{ top: 400, bottom: 400 }}
             components={{
               Header: () => <div className="h-6" />,
@@ -1496,7 +1587,9 @@ export function EnvironmentChat({
                 // never sit flush against the composer — keeps the text
                 // visible above the input box at all scroll positions.
                 <div className="px-6 pb-16 space-y-5">
-                  {live && <LiveBubble live={live} debugMode={debugMode} />}
+                  {live && !currentRunIsSlackTriggered && (
+                    <LiveBubble live={live} debugMode={debugMode} />
+                  )}
                   {error && (
                     <Alert variant="destructive">
                       <AlertDescription>{error}</AlertDescription>
@@ -1883,6 +1976,11 @@ const MessageBubble = memo(function MessageBubble({
     isUser && message.attachments && message.attachments.length > 0
       ? message.attachments
       : null;
+
+  // Slack-reply messages are filtered out of `visibleMessages` upstream —
+  // the agent sees them in its prompt context but they never reach the
+  // chat UI. The asker only sees the agent's eventual response (which
+  // attributes the Slack answer inline, e.g. "yariv (via Slack) said…").
 
   // User-side render — attachments float *outside* the colored text bubble so
   // images aren't framed by a blue rectangle. The text bubble only appears

@@ -11,6 +11,7 @@ import {
   EyeOff,
   KeyRound,
   Layers,
+  MessageSquare,
   Plus,
   ShieldAlert,
   Sparkles,
@@ -39,9 +40,18 @@ type KeyStatus = {
   connected: boolean;
 };
 
+type SlackStatus = {
+  workspaceSet: boolean;
+  connected: boolean;
+  teamName: string | null;
+  appTokenSet: boolean;
+  twoWayEnabled: boolean;
+};
+
 type Integrations = {
   anthropic: KeyStatus;
   github: KeyStatus;
+  slack: SlackStatus;
   allowDirectMerge: boolean;
   debugMode: boolean;
   defaultModel: ModelChoice;
@@ -217,6 +227,26 @@ export default function SettingsPage(
           </Section>
 
           <Section
+            title="Communication"
+            description="Where the AI can post updates and ask teammates when it needs human input."
+            beta
+          >
+            <SlackField
+              id={id}
+              isAdmin={isAdmin}
+              status={data.slack}
+              onChange={load}
+            />
+            <Divider />
+            <SlackAppTokenField
+              id={id}
+              isAdmin={isAdmin}
+              status={data.slack}
+              onChange={load}
+            />
+          </Section>
+
+          <Section
             title="Storage"
             description="Where compose files and env assets are written. Defaults to local disk on the API host; switch to S3 to store across machines."
           >
@@ -279,17 +309,27 @@ export default function SettingsPage(
 function Section({
   title,
   description,
+  beta,
   children,
 }: {
   title: string;
   description: string;
+  beta?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <section className="space-y-5">
       <div className="space-y-1">
-        <h2 className="text-base font-mono font-semibold tracking-tight">
+        <h2 className="text-base font-mono font-semibold tracking-tight flex items-center gap-2">
           {title}
+          {beta && (
+            <Badge
+              variant="outline"
+              className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0 h-4 text-amber-400 border-amber-400/40 bg-amber-400/10"
+            >
+              beta
+            </Badge>
+          )}
         </h2>
         <p className="text-xs text-muted-foreground max-w-prose">
           {description}
@@ -490,6 +530,465 @@ function SecretField({
               size="sm"
               className="text-destructive hover:text-destructive h-7 px-2 text-xs"
               onClick={clearKey}
+              disabled={clearing}
+            >
+              {clearing ? "Removing…" : "Disconnect"}
+            </Button>
+          )}
+        </>
+      )}
+    </SettingRow>
+  );
+}
+
+// Pre-filled app manifest for Slack's "Create app from manifest" flow.
+// Slack lets you drop the manifest into the URL via the `manifest_json` query
+// param (see docs.slack.dev/app-manifests/configuring-apps-with-app-manifests)
+// — clicking the link lands the user on a Create-App form with these scopes
+// already populated, so they just confirm + install + grab the bot token.
+//
+// Bot scopes here cover Phase 2 (notify) + Phase 3 (ask/answer):
+//   chat:write          post messages
+//   chat:write.public   post in public channels without joining
+//   im:write            open DMs to teammates
+//   users:read          enumerate workspace users
+//   users:read.email    resolve member ↔ Slack-user by email
+const SLACK_APP_MANIFEST = {
+  display_information: {
+    name: "WithVibe",
+    description:
+      "AI agents post updates and ask teammates questions on Slack.",
+  },
+  features: {
+    bot_user: { display_name: "WithVibe", always_online: true },
+    // Messages tab enabled (read-only off) so users can REPLY to the bot's
+    // DMs. Without this, Slack shows "Sending messages to this app has been
+    // turned off" on every DM the agent sends.
+    app_home: {
+      home_tab_enabled: false,
+      messages_tab_enabled: true,
+      messages_tab_read_only_enabled: false,
+    },
+  },
+  oauth_config: {
+    scopes: {
+      bot: [
+        "chat:write",
+        "chat:write.public",
+        "im:write",
+        "files:write",
+        "users:read",
+        "users:read.email",
+      ],
+    },
+  },
+  settings: {
+    // Socket Mode + event subscriptions = the two-way Q&A path. With these
+    // pre-enabled, the only thing the admin still has to do by hand is
+    // generate the app-level token (`xapp-...`) — Slack doesn't put
+    // app-level tokens in the manifest, they're created in the UI per app.
+    event_subscriptions: {
+      bot_events: ["message.im", "message.channels", "message.groups"],
+    },
+    socket_mode_enabled: true,
+    org_deploy_enabled: false,
+    token_rotation_enabled: false,
+  },
+};
+const SLACK_NEW_APP_URL = `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(SLACK_APP_MANIFEST))}`;
+
+function SlackField({
+  id,
+  isAdmin,
+  status,
+  onChange,
+}: {
+  id: string;
+  isAdmin: boolean;
+  status: SlackStatus;
+  onChange: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const [reveal, setReveal] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [error, setError] = useState("");
+
+  async function save() {
+    setSaving(true);
+    setError("");
+    const res = await fetch(`/api/workspaces/${id}/settings/integrations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slackBotToken: value.trim() || null }),
+    });
+    setSaving(false);
+    if (res.ok) {
+      setValue("");
+      toast.success("Slack connected");
+      onChange();
+    } else {
+      // Surface the real Slack error (invalid_auth, missing_scope, etc.) —
+      // validating in PATCH means the server returns a 400 with the reason.
+      const j = (await res.json().catch(() => ({}))) as { message?: string };
+      const msg = j.message || "Failed to save";
+      setError(msg);
+      toast.error(msg);
+    }
+  }
+
+  async function disconnect() {
+    if (!confirm("Disconnect Slack from this workspace?")) return;
+    setClearing(true);
+    setError("");
+    const res = await fetch(`/api/workspaces/${id}/settings/integrations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slackBotToken: null }),
+    });
+    setClearing(false);
+    if (res.ok) {
+      toast.success("Slack disconnected");
+      onChange();
+    }
+  }
+
+  const badge = status.workspaceSet ? (
+    <Badge className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20 gap-1 font-mono text-[10px]">
+      <Check className="size-3" /> {status.teamName ?? "Connected"}
+    </Badge>
+  ) : (
+    <Badge
+      variant="outline"
+      className="gap-1 text-muted-foreground font-mono text-[10px]"
+    >
+      <X className="size-3" /> Not connected
+    </Badge>
+  );
+
+  return (
+    <SettingRow
+      icon={<MessageSquare className="size-4" />}
+      title="Slack bot token"
+      hint={
+        <>
+          <span className="block">
+            Lets agents post messages and ask teammates questions on Slack.
+          </span>
+          <span className="mt-1.5 block">
+            <a
+              href={SLACK_NEW_APP_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary underline underline-offset-2 hover:opacity-80"
+            >
+              Create a Slack app for WithVibe →
+            </a>
+          </span>
+          <span className="mt-1.5 block">
+            Then, in the Slack app settings page:
+          </span>
+          <span className="mt-1 block pl-3">
+            1. Click{" "}
+            <span className="font-mono text-foreground">OAuth &amp; Permissions</span>{" "}
+            in the left sidebar.
+          </span>
+          <span className="mt-0.5 block pl-3">
+            2. Click{" "}
+            <span className="font-mono text-foreground">Install to Workspace</span>{" "}
+            and approve the scopes Slack shows.
+          </span>
+          <span className="mt-0.5 block pl-3">
+            3. Copy the{" "}
+            <span className="font-mono text-foreground">Bot User OAuth Token</span>{" "}
+            (starts with{" "}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              xoxb-
+            </code>
+            ).
+          </span>
+          <span className="mt-0.5 block pl-3">
+            4. Paste it below and click{" "}
+            <span className="font-mono text-foreground">Connect</span>.
+          </span>
+          <span className="mt-1.5 block">
+            The manifest pre-fills the bot scopes the agent needs:{" "}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              chat:write
+            </code>{" "}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              chat:write.public
+            </code>{" "}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              im:write
+            </code>{" "}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              files:write
+            </code>{" "}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              users:read
+            </code>{" "}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              users:read.email
+            </code>
+            .
+          </span>
+          <span className="mt-1.5 block text-[11px] text-muted-foreground/80">
+            Already created the app before <code className="font-mono">files:write</code> was added? Open OAuth &amp; Permissions, add the scope under{" "}
+            <span className="font-mono text-foreground">
+              Bot Token Scopes
+            </span>
+            , then click <span className="font-mono text-foreground">Reinstall to Workspace</span> at the top — the bot token stays the same.
+          </span>
+        </>
+      }
+      badge={badge}
+    >
+      {!isAdmin ? (
+        <p className="text-xs text-muted-foreground">
+          Admins only. The saved token is never shown again after it&apos;s set.
+        </p>
+      ) : (
+        <>
+          <div className="space-y-1.5">
+            <Label htmlFor="slackBotToken" className="text-xs font-mono">
+              {status.workspaceSet ? "Replace" : "Add token"}
+            </Label>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Input
+                  id="slackBotToken"
+                  type={reveal ? "text" : "password"}
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                  placeholder="xoxb-…"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono pr-9"
+                />
+                <button
+                  type="button"
+                  onClick={() => setReveal((r) => !r)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  aria-label={reveal ? "Hide" : "Reveal"}
+                >
+                  {reveal ? (
+                    <EyeOff className="size-4" />
+                  ) : (
+                    <Eye className="size-4" />
+                  )}
+                </button>
+              </div>
+              <Button
+                onClick={save}
+                disabled={!value.trim() || saving}
+                size="sm"
+              >
+                {saving ? "Saving…" : "Connect"}
+              </Button>
+            </div>
+            {error && (
+              <p className="text-xs text-destructive font-mono">{error}</p>
+            )}
+          </div>
+          {status.workspaceSet && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive h-7 px-2 text-xs"
+              onClick={disconnect}
+              disabled={clearing}
+            >
+              {clearing ? "Removing…" : "Disconnect"}
+            </Button>
+          )}
+        </>
+      )}
+    </SettingRow>
+  );
+}
+
+function SlackAppTokenField({
+  id,
+  isAdmin,
+  status,
+  onChange,
+}: {
+  id: string;
+  isAdmin: boolean;
+  status: SlackStatus;
+  onChange: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const [reveal, setReveal] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [error, setError] = useState("");
+
+  async function save() {
+    setSaving(true);
+    setError("");
+    const res = await fetch(`/api/workspaces/${id}/settings/integrations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slackAppToken: value.trim() || null }),
+    });
+    setSaving(false);
+    if (res.ok) {
+      setValue("");
+      toast.success("Two-way Q&A enabled");
+      onChange();
+    } else {
+      const j = (await res.json().catch(() => ({}))) as { message?: string };
+      const msg = j.message || "Failed to save";
+      setError(msg);
+      toast.error(msg);
+    }
+  }
+
+  async function disconnect() {
+    if (
+      !confirm(
+        "Remove the app-level token? Two-way Q&A (slack_ask) will stop working; one-way slack_notify keeps working."
+      )
+    )
+      return;
+    setClearing(true);
+    setError("");
+    const res = await fetch(`/api/workspaces/${id}/settings/integrations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slackAppToken: null }),
+    });
+    setClearing(false);
+    if (res.ok) {
+      toast.success("App-level token removed");
+      onChange();
+    }
+  }
+
+  const botConnected = status.workspaceSet;
+  const badge = status.twoWayEnabled ? (
+    <Badge className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20 gap-1 font-mono text-[10px]">
+      <Check className="size-3" /> Two-way enabled
+    </Badge>
+  ) : (
+    <Badge
+      variant="outline"
+      className="gap-1 text-muted-foreground font-mono text-[10px]"
+    >
+      <X className="size-3" /> Notify-only
+    </Badge>
+  );
+
+  return (
+    <SettingRow
+      icon={<MessageSquare className="size-4" />}
+      title="Slack app-level token (for two-way Q&A)"
+      hint={
+        <>
+          <span className="block">
+            Without this, the agent can only POST to Slack (
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              slack_notify
+            </code>
+            ). Add the app-level token to enable{" "}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              slack_ask
+            </code>
+            : the agent posts a question, you reply in the Slack thread, and
+            your answer comes back to the chat automatically.
+          </span>
+          <span className="mt-1.5 block">In the Slack app settings page:</span>
+          <span className="mt-1 block pl-3">
+            1. Click{" "}
+            <span className="font-mono text-foreground">Basic Information</span>{" "}
+            in the left sidebar.
+          </span>
+          <span className="mt-0.5 block pl-3">
+            2. Scroll to{" "}
+            <span className="font-mono text-foreground">App-Level Tokens</span>{" "}
+            → click{" "}
+            <span className="font-mono text-foreground">Generate Token</span>.
+          </span>
+          <span className="mt-0.5 block pl-3">
+            3. Name it (e.g.{" "}
+            <span className="font-mono text-foreground">withvibe</span>) and
+            add the{" "}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              connections:write
+            </code>{" "}
+            scope.
+          </span>
+          <span className="mt-0.5 block pl-3">
+            4. Copy the token (starts with{" "}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              xapp-
+            </code>
+            ) and paste it below.
+          </span>
+        </>
+      }
+      badge={badge}
+    >
+      {!botConnected ? (
+        <p className="text-xs text-muted-foreground">
+          Connect the Slack bot token first.
+        </p>
+      ) : !isAdmin ? (
+        <p className="text-xs text-muted-foreground">
+          Admins only. The saved token is never shown again after it&apos;s
+          set.
+        </p>
+      ) : (
+        <>
+          <div className="space-y-1.5">
+            <Label htmlFor="slackAppToken" className="text-xs font-mono">
+              {status.appTokenSet ? "Replace" : "Add token"}
+            </Label>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Input
+                  id="slackAppToken"
+                  type={reveal ? "text" : "password"}
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                  placeholder="xapp-…"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono pr-9"
+                />
+                <button
+                  type="button"
+                  onClick={() => setReveal((r) => !r)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  aria-label={reveal ? "Hide" : "Reveal"}
+                >
+                  {reveal ? (
+                    <EyeOff className="size-4" />
+                  ) : (
+                    <Eye className="size-4" />
+                  )}
+                </button>
+              </div>
+              <Button
+                onClick={save}
+                disabled={!value.trim() || saving}
+                size="sm"
+              >
+                {saving ? "Saving…" : "Connect"}
+              </Button>
+            </div>
+            {error && (
+              <p className="text-xs text-destructive font-mono">{error}</p>
+            )}
+          </div>
+          {status.appTokenSet && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive h-7 px-2 text-xs"
+              onClick={disconnect}
               disabled={clearing}
             >
               {clearing ? "Removing…" : "Disconnect"}

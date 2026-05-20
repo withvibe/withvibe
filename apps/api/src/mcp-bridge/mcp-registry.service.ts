@@ -8,6 +8,7 @@ import { HumanQuestionService } from "../chat/human-question.service";
 import { DockerMcpService } from "../docker/docker-mcp.service";
 import { AgentChatService } from "../agents/agent-chat.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
+import { SlackMcpService } from "../slack/slack-mcp.service";
 import type { McpBridgeCtx, McpServerSpec } from "./mcp-tool-types";
 
 /**
@@ -27,7 +28,8 @@ export class McpRegistryService {
     private readonly humanQuestion: HumanQuestionService,
     private readonly dockerMcp: DockerMcpService,
     private readonly agentChat: AgentChatService,
-    private readonly envClones: EnvCloneService
+    private readonly envClones: EnvCloneService,
+    private readonly slackMcp: SlackMcpService
   ) {}
 
   async describeServer(
@@ -46,6 +48,21 @@ export class McpRegistryService {
 
       case "withvibe-docker":
         return this.dockerMcp.describeMcpServer(ctx.envId);
+
+      case "withvibe-slack": {
+        const ws = await this.prisma.client.workspace.findUnique({
+          where: { id: ctx.workspaceId },
+          select: { slackAppToken: true },
+        });
+        const asksEnabled = !!ws?.slackAppToken && !!ctx.sessionId;
+        return this.slackMcp.describeMcpServer({
+          workspaceId: ctx.workspaceId,
+          envId: ctx.envId,
+          sessionId: ctx.sessionId,
+          agentId: ctx.agentId,
+          asksEnabled,
+        });
+      }
 
       case "withvibe-agent": {
         if (!ctx.agentId) {

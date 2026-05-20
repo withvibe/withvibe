@@ -1,7 +1,8 @@
-import { Module } from "@nestjs/common";
+import { Module, forwardRef } from "@nestjs/common";
 import { McpTokenModule } from "../mcp-bridge/mcp-token.module";
 import { RunnerModule } from "../runner/runner.module";
 import { EnvCloneModule } from "../env-clones/env-clone.module";
+import { SlackModule } from "../slack/slack.module";
 import { ChatContextService } from "./chat-context.service";
 import { ChatStreamService } from "./chat-stream.service";
 import { ClaudeCodeEngineService } from "./claude-code-engine.service";
@@ -27,7 +28,12 @@ import { BenchService } from "./bench/bench.service";
 import { BenchController } from "./bench/bench.controller";
 
 @Module({
-  imports: [McpTokenModule, RunnerModule, EnvCloneModule],
+  imports: [
+    McpTokenModule,
+    RunnerModule,
+    EnvCloneModule,
+    forwardRef(() => SlackModule),
+  ],
   controllers: [
     SessionsController,
     MessagesController,
@@ -64,6 +70,9 @@ import { BenchController } from "./bench/bench.controller";
     // otherwise a mid-build orchestrator keeps writing into a clone path
     // that's about to be removed, leaving orphan files/containers.
     ActiveRunsService,
+    // SlackEventHandlerService → MessagesService.startSessionTurn (via
+    // SlackModule's forwardRef back into ChatModule).
+    MessagesService,
   ],
 })
 export class ChatModule {}

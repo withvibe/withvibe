@@ -46,6 +46,12 @@ model User {
   defaultWorkspaceId  String?
   positions           String[]          @default([])
   bio                 String?
+  // Cached Slack user id for the workspace that has Slack connected. Resolved
+  // lazily via `users.lookupByEmail` the first time the agent targets this
+  // user; null until then. Slack ids are stable per workspace, so a single
+  // cached value is fine until the user joins a second Slack-connected
+  // workspace (out of scope for now).
+  slackUserId         String?
   createdAt           DateTime          @default(now())
 
   memberships     WorkspaceMember[]
@@ -100,6 +106,20 @@ model Workspace {
   repoContext       String?
   anthropicApiKey   String?
   githubToken       String?
+  // Slack bot token (`xoxb-...`) + cached team metadata captured at validate
+  // time. The agent posts/asks via this token; member→Slack-user mapping
+  // happens lazily via `users.lookupByEmail` (cached on User.slackUserId).
+  // Stored plaintext — same posture as `anthropicApiKey` / `githubToken`.
+  slackBotToken     String?
+  slackTeamId       String?
+  slackTeamName     String?
+  // Slack app-level token (`xapp-...`) with `connections:write`. Required for
+  // the two-way ask/answer flow: SlackSocketService opens a Socket Mode
+  // connection per workspace that has BOTH tokens, listens for message events
+  // in threads where the bot asked a question, and triggers an agent turn
+  // with the reply. Workspaces with only the bot token get one-way notify;
+  // adding the app token unlocks `slack_ask` end-to-end.
+  slackAppToken     String?
   allowDirectMerge  Boolean   @default(false)
   debugMode         Boolean   @default(false)
   // When true, refuse any push whose target ref is the env's baseBranch
@@ -141,6 +161,65 @@ model Workspace {
   knowledge   WorkspaceKnowledge[]
   envTemplates EnvTemplate[]
   secrets     WorkspaceSecret[]
+  slackPendingQuestions SlackPendingQuestion[]
+}
+
+enum SlackQStatus {
+  pending
+  answered
+  cancelled
+}
+
+// One row per `slack_ask` the agent has posted. Pending rows are matched on
+// `slackThreadTs` when a Slack message event arrives; the matched row is
+// flipped to `answered` and an agent turn is triggered with the reply
+// injected as a system-attributed user message.
+//
+// Why thread_ts is the index: Slack's events API gives us back the
+// `thread_ts` on every reply in that thread, so a unique index lets the
+// webhook resolve the question in O(1). One bot per workspace + a globally
+// unique thread_ts means no collision across workspaces in practice.
+model SlackPendingQuestion {
+  id              String       @id @default(cuid())
+  workspace       Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId     String
+  // The chat session that called `slack_ask`. When the reply arrives we
+  // trigger a new turn on this session so the agent picks up the answer in
+  // the same conversation.
+  chatSessionId   String
+  // Env scope is informational — the session already pins an env. Stored for
+  // the inbox UI ("Q from env <title>").
+  envId           String?
+  agentId         String?
+  // The Slack channel + thread the question was posted to. For a DM-style
+  // question, slackChannel is the DM channel id (D…) and slackThreadTs is
+  // the parent message ts.
+  slackChannel    String
+  slackThreadTs   String       @unique
+  // What the agent asked + who. `askedSlackUserId` is set when the agent
+  // targeted a specific person; null for channel-wide asks.
+  askedSlackUserId String?
+  askedEmail      String?
+  question        String
+  status          SlackQStatus @default(pending)
+  answer          String?
+  // Cached for the inbox UI / agent context — Slack user id + display name
+  // of whoever actually replied (may differ from askedSlackUserId for
+  // channel-wide asks).
+  answeredBySlackUserId String?
+  answeredByName        String?
+  askedAt         DateTime     @default(now())
+  answeredAt      DateTime?
+  // Set when the agent calls `slack_conclude` — the conversation is over,
+  // a summary has been posted back to Slack, and a `slack_conclusion`
+  // message has been written to the originating WithVibe chat. Used to
+  // collapse intermediate slack_reply cards in the UI: once concluded,
+  // the user sees only the conclusion, not every back-and-forth.
+  concludedAt     DateTime?
+  summary         String?
+
+  @@index([workspaceId, status])
+  @@index([chatSessionId])
 }
 
 // Named secrets injected into env materialization for template variables of

@@ -14,6 +14,8 @@ import { AgentSeedService } from "../agents/agent-seed.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { StorageService } from "../storage/storage.service";
 import { ReposService } from "../repos/repos.service";
+import { SlackService } from "../slack/slack.service";
+import { SlackSocketService } from "../slack/slack-socket.service";
 import { getAppVersion } from "../common/version";
 
 export type CreateWorkspaceInput = {
@@ -88,7 +90,9 @@ export class WorkspacesService {
     private readonly agentSeed: AgentSeedService,
     private readonly envClones: EnvCloneService,
     private readonly storage: StorageService,
-    private readonly repos: ReposService
+    private readonly repos: ReposService,
+    private readonly slack: SlackService,
+    private readonly slackSockets: SlackSocketService
   ) {}
 
   async create(userId: string, input: CreateWorkspaceInput) {
@@ -290,6 +294,9 @@ export class WorkspacesService {
       select: {
         anthropicApiKey: true,
         githubToken: true,
+        slackBotToken: true,
+        slackAppToken: true,
+        slackTeamName: true,
         allowDirectMerge: true,
         debugMode: true,
         defaultModel: true,
@@ -298,6 +305,8 @@ export class WorkspacesService {
     });
     const envAnthropic = Boolean(process.env.ANTHROPIC_API_KEY);
     const envGithub = Boolean(process.env.GITHUB_TOKEN);
+    const slackBotSet = Boolean(workspace?.slackBotToken);
+    const slackAppSet = Boolean(workspace?.slackAppToken);
     return {
       anthropic: {
         workspaceSet: Boolean(workspace?.anthropicApiKey),
@@ -308,6 +317,15 @@ export class WorkspacesService {
         workspaceSet: Boolean(workspace?.githubToken),
         envFallback: envGithub,
         connected: Boolean(workspace?.githubToken) || envGithub,
+      },
+      slack: {
+        workspaceSet: slackBotSet,
+        connected: slackBotSet,
+        teamName: workspace?.slackTeamName ?? null,
+        appTokenSet: slackAppSet,
+        // Two-way ask/answer needs BOTH tokens — bot for posting, app for
+        // Socket Mode event delivery.
+        twoWayEnabled: slackBotSet && slackAppSet,
       },
       allowDirectMerge: Boolean(workspace?.allowDirectMerge),
       debugMode: Boolean(workspace?.debugMode),
@@ -323,6 +341,8 @@ export class WorkspacesService {
     body: {
       anthropicApiKey?: string | null;
       githubToken?: string | null;
+      slackBotToken?: string | null;
+      slackAppToken?: string | null;
       allowDirectMerge?: boolean;
       debugMode?: boolean;
       defaultModel?: string;
@@ -333,11 +353,16 @@ export class WorkspacesService {
     const data: {
       anthropicApiKey?: string | null;
       githubToken?: string | null;
+      slackBotToken?: string | null;
+      slackAppToken?: string | null;
+      slackTeamId?: string | null;
+      slackTeamName?: string | null;
       allowDirectMerge?: boolean;
       debugMode?: boolean;
       defaultModel?: string;
       sandboxBypass?: boolean | null;
     } = {};
+    let slackTokenChanged = false;
 
     if (body.anthropicApiKey !== undefined) {
       data.anthropicApiKey =
@@ -350,6 +375,56 @@ export class WorkspacesService {
         typeof body.githubToken === "string" && body.githubToken.trim()
           ? body.githubToken.trim()
           : null;
+    }
+    // Slack: validate the token against Slack before storing — a bad token
+    // should fail loudly at save time, not at first agent use. On disconnect
+    // (null/empty), also clear the cached team metadata so the UI doesn't
+    // show a stale team name.
+    if (body.slackBotToken !== undefined) {
+      const trimmed =
+        typeof body.slackBotToken === "string" ? body.slackBotToken.trim() : "";
+      if (trimmed) {
+        let info;
+        try {
+          info = await this.slack.testToken(trimmed);
+        } catch (err) {
+          throw new BadRequestException(
+            err instanceof Error ? err.message : "Invalid Slack bot token"
+          );
+        }
+        data.slackBotToken = trimmed;
+        data.slackTeamId = info.teamId;
+        data.slackTeamName = info.teamName;
+      } else {
+        data.slackBotToken = null;
+        data.slackTeamId = null;
+        data.slackTeamName = null;
+      }
+      slackTokenChanged = true;
+    }
+    // Slack app-level token: same posture as bot token. Validated by opening
+    // (and immediately discarding) a Socket Mode connection — confirms the
+    // token has the `connections:write` scope without committing to a live
+    // listener here. The live socket is owned by SlackSocketService and gets
+    // refreshed below.
+    if (body.slackAppToken !== undefined) {
+      const trimmed =
+        typeof body.slackAppToken === "string" ? body.slackAppToken.trim() : "";
+      if (trimmed) {
+        try {
+          await this.slack.testAppToken(trimmed);
+        } catch (err) {
+          throw new BadRequestException(
+            err instanceof Error
+              ? err.message
+              : "Invalid Slack app-level token"
+          );
+        }
+        data.slackAppToken = trimmed;
+      } else {
+        data.slackAppToken = null;
+      }
+      slackTokenChanged = true;
     }
     if (typeof body.allowDirectMerge === "boolean") {
       data.allowDirectMerge = body.allowDirectMerge;
@@ -377,6 +452,22 @@ export class WorkspacesService {
       where: { id: workspaceId },
       data,
     });
+
+    // Sync the live Socket Mode connection set with the new DB state. Fire
+    // and forget — admins see the save returning "ok" immediately; if the
+    // reconnect fails (e.g. Slack rejects the token at connect time despite
+    // passing auth.test) the error lands in server logs and we'll surface
+    // it via a status badge in a later pass.
+    if (slackTokenChanged) {
+      this.slackSockets.reconnectWorkspace(workspaceId).catch((err) => {
+        this.logger.warn(
+          `Slack socket reconnect failed for ${workspaceId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      });
+    }
+
     return { ok: true };
   }
 

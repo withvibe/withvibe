@@ -24,6 +24,25 @@ import { assertSecretsAtBoot } from "./common/startup-secrets";
 // bit on envDir (set in `ensureEnvDir`) handles group propagation.
 process.umask(0o002);
 
+// Safety net: an unhandled promise rejection from a long-lived background
+// service (e.g. Slack Socket Mode reconnect after a token rotation, a
+// Playwright sidecar disconnect, a Docker stream drop) must not crash the
+// whole API. Default Node 20 behavior IS to crash on unhandled rejections;
+// here we log and keep serving. Any rejection reaching this handler is a
+// bug to fix at the source — but the API staying up matters more than
+// any single integration's failure mode.
+process.on("unhandledRejection", (reason: unknown) => {
+  // Avoid using nestjs-pino here — it isn't initialized yet during boot
+  // and may not be ready in all edge cases. Plain stderr is good enough
+  // for a last-resort safety net; the real source logs the original error.
+  const msg =
+    reason instanceof Error
+      ? `${reason.message}\n${reason.stack}`
+      : String(reason);
+  // eslint-disable-next-line no-console
+  console.error(`[unhandledRejection] ${msg}`);
+});
+
 async function bootstrap() {
   // C4: fail closed on a weak/empty/placeholder INTERNAL_JWT_SECRET before
   // doing any work. In production this exits; outside it warns loudly.

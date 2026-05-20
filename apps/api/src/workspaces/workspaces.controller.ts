@@ -75,6 +75,8 @@ export class WorkspacesController {
     body: {
       anthropicApiKey?: string | null;
       githubToken?: string | null;
+      slackBotToken?: string | null;
+      slackAppToken?: string | null;
       allowDirectMerge?: boolean;
       debugMode?: boolean;
       defaultModel?: string;

@@ -3,6 +3,7 @@ import { ChatModule } from "../chat/chat.module";
 import { DockerModule } from "../docker/docker.module";
 import { AgentsModule } from "../agents/agents.module";
 import { EnvCloneModule } from "../env-clones/env-clone.module";
+import { SlackModule } from "../slack/slack.module";
 import { McpTokenModule } from "./mcp-token.module";
 import { McpController } from "./mcp.controller";
 import { McpRegistryService } from "./mcp-registry.service";
@@ -14,7 +15,14 @@ import { McpRegistryService } from "./mcp-registry.service";
  * an alternate transport.
  */
 @Module({
-  imports: [McpTokenModule, ChatModule, DockerModule, AgentsModule, EnvCloneModule],
+  imports: [
+    McpTokenModule,
+    ChatModule,
+    DockerModule,
+    AgentsModule,
+    EnvCloneModule,
+    SlackModule,
+  ],
   controllers: [McpController],
   providers: [McpRegistryService],
 })
