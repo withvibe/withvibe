@@ -501,6 +501,73 @@ export class DockerService {
   }
 
   /**
+   * Per-service lifecycle action. Unlike the env-level methods above, this
+   * does NOT touch the env-level `containerStatus` — per-service state is
+   * derived from `docker ps` via listEnvContainers. Progress lines land in
+   * the same log buffer the SSE endpoint streams.
+   *
+   * `--no-deps` keeps each action scoped to the named service: rebuilding
+   * backend doesn't disturb postgres/redis. `--force-recreate` on rebuild
+   * makes sure a new image actually replaces the running container.
+   */
+  async serviceAction(
+    envId: string,
+    service: string,
+    action: "start" | "stop" | "restart" | "rebuild"
+  ): Promise<void> {
+    void this.serviceBg(envId, service, action);
+  }
+
+  private async serviceBg(
+    envId: string,
+    service: string,
+    action: "start" | "stop" | "restart" | "rebuild"
+  ): Promise<void> {
+    this.pushLog(envId, `[${action} ${service}] resolving compose…\n`);
+    const ctx = await this.getEnvironmentCompose(envId);
+    if ("error" in ctx) {
+      this.pushLog(envId, `[${action} ${service}] ${ctx.error}\n`);
+      return;
+    }
+    // Run the compose-security gate for ops that re-parse the compose file
+    // (start/rebuild can introduce new containers). stop/restart only act on
+    // already-running containers, so they don't need it.
+    if (action === "start" || action === "rebuild") {
+      const tag: "start" | "rebuild" = action === "rebuild" ? "rebuild" : "start";
+      if (!(await this.assertComposeSafe(envId, ctx, tag))) return;
+    }
+    const proj = this.composeProjectName(envId);
+    const argMap: Record<typeof action, string[]> = {
+      start: ["up", "-d", "--no-deps", service],
+      stop: ["stop", service],
+      restart: ["restart", service],
+      rebuild: [
+        "up",
+        "-d",
+        "--build",
+        "--no-deps",
+        "--force-recreate",
+        service,
+      ],
+    };
+    try {
+      await this.runCompose(
+        envId,
+        proj,
+        ctx.composeFile,
+        argMap[action],
+        10 * 60 * 1000
+      );
+      this.pushLog(envId, `[${action} ${service}] done\n`);
+    } catch (err) {
+      this.pushLog(
+        envId,
+        `[${action} ${service}] FAILED: ${this.formatErr(err)}\n`
+      );
+    }
+  }
+
+  /**
    * Authoritative compose-security gate. Resolves the compose exactly as
    * `docker compose up` will (interpolation/anchors/extends/include) and
    * rejects host-escape directives — privileged, host namespaces, device
@@ -934,10 +1001,21 @@ export class DockerService {
   async listEnvContainers(
     envId: string
   ): Promise<{
-    containers: { id: string; name: string; status: string; image: string }[];
+    containers: {
+      id: string;
+      name: string;
+      service: string;
+      status: string;
+      image: string;
+    }[];
   }> {
     const project = this.composeProjectName(envId);
     try {
+      // `service` comes from com.docker.compose.service so the per-service
+      // lifecycle endpoint can take it as `docker compose <verb> <service>`
+      // without re-parsing the container name. Falls back to the container
+      // name when the label is missing (shouldn't happen for compose-owned
+      // containers, but defensive).
       const { stdout } = await exec(
         "docker",
         [
@@ -945,7 +1023,7 @@ export class DockerService {
           "--filter",
           `label=com.docker.compose.project=${project}`,
           "--format",
-          "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}",
+          "{{.ID}}\t{{.Names}}\t{{.Label \"com.docker.compose.service\"}}\t{{.Status}}\t{{.Image}}",
         ],
         { timeout: 10_000 }
       );
@@ -954,8 +1032,8 @@ export class DockerService {
         .map((l) => l.trim())
         .filter(Boolean)
         .map((line) => {
-          const [idPart, name, status, image] = line.split("\t");
-          return { id: idPart, name, status, image };
+          const [idPart, name, service, status, image] = line.split("\t");
+          return { id: idPart, name, service: service || name, status, image };
         });
       return { containers };
     } catch {

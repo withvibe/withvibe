@@ -1,23 +1,26 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshCw, Terminal as TerminalIcon } from "lucide-react";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Play,
+  RefreshCw,
+  Square,
+  Terminal as TerminalIcon,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 import "@xterm/xterm/css/xterm.css";
 
 type Container = {
   id: string;
   name: string;
+  // compose service name (e.g. "backend"), authoritative for lifecycle verbs.
+  service: string;
   status: string;
   image: string;
 };
+
+type ServiceAction = "start" | "stop" | "rebuild";
 
 type ConnState = "idle" | "connecting" | "open" | "closed" | "error";
 
@@ -34,6 +37,11 @@ export function TerminalPanel({
   const [selected, setSelected] = useState<string | null>(null);
   const [connState, setConnState] = useState<ConnState>("idle");
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Disable a row's buttons while an action is in flight on that service so
+  // double-clicks don't queue duplicates. Keyed by compose service name.
+  const [actingOn, setActingOn] = useState<Record<string, ServiceAction | null>>(
+    {}
+  );
   const termRef = useRef<HTMLDivElement>(null);
   const termInstanceRef = useRef<{
     term: import("@xterm/xterm").Terminal;
@@ -227,6 +235,40 @@ export function TerminalPanel({
     wsRef.current = null;
   }
 
+  // Per-service lifecycle. Hits the same env action endpoint as the
+  // workspace-level start/stop/rebuild buttons — adding `service` selects
+  // a single compose service. The api streams progress into the env's
+  // log buffer, which the Logs panel renders via SSE.
+  const serviceAction = useCallback(
+    async (service: string, action: ServiceAction) => {
+      setActingOn((p) => ({ ...p, [service]: action }));
+      try {
+        const res = await fetch(
+          `/api/workspaces/${workspaceId}/envs/${envId}/container`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action, service }),
+          }
+        );
+        if (!res.ok) {
+          toast.error(`Failed to ${action} ${service}`);
+          return;
+        }
+        toast.info(`${capitalize(action)}ing ${service}…`);
+        // Refresh after a short delay so the status badge reflects the
+        // new state. The action is async server-side; this is just a
+        // best-effort UI refresh, not authoritative.
+        setTimeout(() => {
+          void loadContainers();
+        }, 1500);
+      } finally {
+        setActingOn((p) => ({ ...p, [service]: null }));
+      }
+    },
+    [workspaceId, envId, loadContainers]
+  );
+
   if (!running) {
     return (
       <div className="h-full min-h-[400px] flex items-center justify-center text-center p-8 text-sm text-muted-foreground bg-muted/10">
@@ -237,36 +279,10 @@ export function TerminalPanel({
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border/60 bg-muted/30 text-xs font-mono text-muted-foreground">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border/60 bg-muted/30 text-[11px] font-mono text-muted-foreground">
         <div className="flex items-center gap-2">
           <TerminalIcon className="size-3.5" />
-          <Select
-            value={selected ?? ""}
-            onValueChange={(v) => setSelected(v)}
-            disabled={!containers || containers.length === 0}
-          >
-            <SelectTrigger size="sm" className="h-6 text-xs min-w-[180px]">
-              <SelectValue
-                placeholder={
-                  containers === null
-                    ? "Loading…"
-                    : containers.length === 0
-                      ? "No containers"
-                      : "Pick a container"
-                }
-              />
-            </SelectTrigger>
-            <SelectContent>
-              {(containers || []).map((c) => (
-                <SelectItem key={c.id} value={c.name}>
-                  <div className="flex flex-col items-start">
-                    <span className="font-mono">{c.name}</span>
-                    <span className="text-[10px] opacity-70">{c.image}</span>
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <span>Services</span>
           <Button
             size="icon"
             variant="ghost"
@@ -278,16 +294,105 @@ export function TerminalPanel({
           </Button>
         </div>
         <span>
-          {connState === "open"
-            ? "connected"
-            : connState === "connecting"
-              ? "connecting…"
-              : connState === "closed"
-                ? "disconnected"
-                : connState === "error"
-                  ? "error"
-                  : ""}
+          {selected ? (
+            <>
+              terminal:{" "}
+              <span className="text-foreground">{selected}</span>{" "}
+              {connState === "open"
+                ? "(connected)"
+                : connState === "connecting"
+                  ? "(connecting…)"
+                  : connState === "closed"
+                    ? "(disconnected)"
+                    : connState === "error"
+                      ? "(error)"
+                      : ""}
+            </>
+          ) : null}
         </span>
+      </div>
+      <div className="max-h-[40%] overflow-auto border-b border-border/60 bg-card/30">
+        {containers === null ? (
+          <div className="px-3 py-2 text-xs font-mono text-muted-foreground italic">
+            Loading services…
+          </div>
+        ) : containers.length === 0 ? (
+          <div className="px-3 py-2 text-xs font-mono text-muted-foreground italic">
+            No running containers.
+          </div>
+        ) : (
+          <ul className="divide-y divide-border/60">
+            {containers.map((c) => {
+              const isSelected = selected === c.name;
+              const busy = actingOn[c.service];
+              const state = classifyStatus(c.status);
+              const isRunning = state === "running" || state === "unhealthy";
+              // Disable rules mirror docker compose's own no-op behavior so
+              // the UI never invites a click that won't do anything useful:
+              //   Start/Restart  — enabled unless we're already acting or the
+              //                    container is mid-transition (Restarting /
+              //                    Removing); compose up is idempotent so it
+              //                    stays enabled in every other state.
+              //   Stop           — only when the container is actually up.
+              //   Rebuild        — same gate as Start; refuses to fight an
+              //                    in-flight transition.
+              const transitioning =
+                state === "restarting" || state === "removing";
+              return (
+                <li
+                  key={c.id}
+                  className={`flex items-center justify-between gap-3 px-3 py-2 text-xs font-mono cursor-pointer transition-colors ${
+                    isSelected
+                      ? "bg-primary/10 border-l-2 border-l-primary"
+                      : "hover:bg-muted/30 border-l-2 border-l-transparent"
+                  }`}
+                  onClick={() => setSelected(c.name)}
+                >
+                  <div className="flex flex-col min-w-0 flex-1">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className={`inline-block size-2 rounded-full shrink-0 ${stateDotClass(state)}`}
+                        aria-hidden
+                      />
+                      <span className="font-semibold truncate">{c.service}</span>
+                    </div>
+                    <span
+                      className={`text-[10px] truncate pl-4 ${stateTextClass(state)}`}
+                    >
+                      {c.status} · {c.image}
+                    </span>
+                  </div>
+                  <div
+                    className="flex items-center gap-1 shrink-0"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <ServiceActionButton
+                      icon={<Play className="size-3" />}
+                      label={isRunning ? "Restart" : "Start"}
+                      active={busy === "start"}
+                      disabled={!!busy || transitioning}
+                      onClick={() => serviceAction(c.service, "start")}
+                    />
+                    <ServiceActionButton
+                      icon={<Square className="size-3" />}
+                      label="Stop"
+                      active={busy === "stop"}
+                      disabled={!!busy || !isRunning}
+                      onClick={() => serviceAction(c.service, "stop")}
+                    />
+                    <ServiceActionButton
+                      icon={<RefreshCw className="size-3" />}
+                      label="Rebuild"
+                      active={busy === "rebuild"}
+                      disabled={!!busy || transitioning}
+                      onClick={() => serviceAction(c.service, "rebuild")}
+                    />
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
       {loadError && (
         <div className="px-3 py-2 text-xs font-mono text-destructive bg-destructive/10 border-b border-destructive/30">
@@ -301,4 +406,103 @@ export function TerminalPanel({
       />
     </div>
   );
+}
+
+function ServiceActionButton({
+  icon,
+  label,
+  active,
+  disabled,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  active: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Button
+      size="icon"
+      variant="ghost"
+      className="size-7"
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {active ? <RefreshCw className="size-3 animate-spin" /> : icon}
+    </Button>
+  );
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// Coarse classification of `docker ps`'s status column. Format varies:
+//   "Up 5 minutes"               → running
+//   "Up About an hour (healthy)" → running
+//   "Up 2 minutes (unhealthy)"   → unhealthy
+//   "Restarting (1) 3s ago"      → restarting
+//   "Exited (0) 12 minutes ago"  → stopped
+//   "Created"                    → created
+//   "Paused"                     → paused
+//   "Removing"                   → removing
+//   "Dead"                       → dead
+type ServiceState =
+  | "running"
+  | "unhealthy"
+  | "restarting"
+  | "stopped"
+  | "created"
+  | "paused"
+  | "removing"
+  | "dead"
+  | "unknown";
+
+function classifyStatus(status: string): ServiceState {
+  if (status.startsWith("Up")) {
+    return status.includes("(unhealthy)") ? "unhealthy" : "running";
+  }
+  if (status.startsWith("Restarting")) return "restarting";
+  if (status.startsWith("Exited")) return "stopped";
+  if (status.startsWith("Created")) return "created";
+  if (status.startsWith("Paused")) return "paused";
+  if (status.startsWith("Removing")) return "removing";
+  if (status.startsWith("Dead")) return "dead";
+  return "unknown";
+}
+
+function stateDotClass(state: ServiceState): string {
+  switch (state) {
+    case "running":
+      return "bg-emerald-500";
+    case "unhealthy":
+      return "bg-amber-500";
+    case "restarting":
+    case "removing":
+      return "bg-sky-500 animate-pulse";
+    case "stopped":
+    case "created":
+    case "paused":
+      return "bg-muted-foreground/40";
+    case "dead":
+      return "bg-destructive";
+    default:
+      return "bg-muted-foreground/40";
+  }
+}
+
+function stateTextClass(state: ServiceState): string {
+  switch (state) {
+    case "unhealthy":
+      return "text-amber-400/80";
+    case "dead":
+      return "text-destructive/80";
+    case "restarting":
+    case "removing":
+      return "text-sky-400/80";
+    default:
+      return "opacity-70";
+  }
 }

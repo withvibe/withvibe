@@ -362,9 +362,8 @@ export const AssistantPanel = forwardRef<AssistantPanelHandle, Props>(function A
               <Bot className="size-4" /> DevOps
             </div>
             <div className="text-xs text-muted-foreground">
-              The same agent that materializes envs from this template. Ask it
-              to design the stack — proposed edits show as cards you accept or
-              reject.
+              Ask it to design the stack — proposed edits show as cards you
+              accept or reject.
             </div>
           </div>
           {!inline && (

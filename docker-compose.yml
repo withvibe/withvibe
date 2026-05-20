@@ -118,6 +118,14 @@ services:
       REPO_BASE_DIR: ${REPO_BASE_DIR:-/root/.withvibe/repos}
       # Persisted per-user `code tunnel` auth dirs. Mounted volume below.
       CODE_TUNNEL_DATA_DIR: /var/lib/withvibe/code-tunnel
+      # Comma-separated extra VS Code extension IDs to preinstall into every
+      # `code tunnel` session (in addition to the always-on anthropic.claude-code).
+      # Operator-configurable via `withvibe configure` → Tunnel customization.
+      CODE_TUNNEL_EXTENSIONS: ${CODE_TUNNEL_EXTENSIONS:-}
+      # Comma-separated apt packages installed in this container at boot
+      # (see docker-entrypoint.sh) so tunnel'd VS Code extensions have their
+      # runtime tooling on PATH (e.g. openjdk-21-jdk-headless for Java).
+      CODE_TUNNEL_APT_PACKAGES: ${CODE_TUNNEL_APT_PACKAGES:-}
       # Claude Code refuses --dangerously-skip-permissions / Bypass
       # Permissions mode as root. The api container runs as root (needs
       # docker.sock), and the `code tunnel` server it spawns hosts the

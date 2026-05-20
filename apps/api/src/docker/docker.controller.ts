@@ -18,6 +18,11 @@ import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { DockerService } from "./docker.service";
 
 type Action = "start" | "stop" | "rebuild";
+type ServiceAction = "start" | "stop" | "restart" | "rebuild";
+
+// Compose service names: lowercase letters, digits, underscore, hyphen.
+// Validating here keeps the name out of `docker compose` argv unsanitized.
+const SERVICE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
 /**
  * Container lifecycle + live logs. One controller per route so the SSE
@@ -37,17 +42,48 @@ export class DockerContainerController {
     @CurrentUser() user: AuthUser,
     @Param("workspaceId") workspaceId: string,
     @Param("envId") envId: string,
-    @Body() body: { action?: unknown }
+    @Body() body: { action?: unknown; service?: unknown }
   ) {
     await this.assertEnv(user.id, workspaceId, envId);
-    const action = body?.action as Action | undefined;
-    if (!action || !["start", "stop", "rebuild"].includes(action)) {
+    const action = body?.action;
+    const rawService = body?.service;
+    const service =
+      typeof rawService === "string" ? rawService.trim() : "";
+
+    if (service) {
+      // Per-service lifecycle. Adds `restart` on top of the env-level set;
+      // the env doesn't have a meaningful single-call "restart" today.
+      if (
+        typeof action !== "string" ||
+        !["start", "stop", "restart", "rebuild"].includes(action)
+      ) {
+        throw new BadRequestException(
+          "action must be one of: start, stop, restart, rebuild"
+        );
+      }
+      if (!SERVICE_NAME_RE.test(service)) {
+        throw new BadRequestException("invalid service name");
+      }
+      await this.docker.serviceAction(
+        envId,
+        service,
+        action as ServiceAction
+      );
+      return { ok: true };
+    }
+
+    // Env-level action (existing behavior).
+    if (
+      typeof action !== "string" ||
+      !["start", "stop", "rebuild"].includes(action)
+    ) {
       throw new BadRequestException(
         "action must be one of: start, stop, rebuild"
       );
     }
-    if (action === "start") await this.docker.startEnvironment(envId);
-    else if (action === "stop") await this.docker.stopEnvironment(envId);
+    const envAction = action as Action;
+    if (envAction === "start") await this.docker.startEnvironment(envId);
+    else if (envAction === "stop") await this.docker.stopEnvironment(envId);
     else await this.docker.rebuildEnvironment(envId);
     return { ok: true };
   }
