@@ -95,28 +95,31 @@ export default function EditTemplatePage(
     };
   }, [id, templateId]);
 
-  return (
-    <div className="max-w-4xl mx-auto px-6 sm:px-8 py-10 space-y-6">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-mono font-bold tracking-tight">
-          Edit template
-        </h1>
-      </header>
-
-      {error ? (
+  // The TemplateEditor renders its own IDE shell (full-width 3-pane layout)
+  // so we skip the centered container. Errors and loading states render in a
+  // small centered container before the editor takes over.
+  if (error) {
+    return (
+      <div className="max-w-2xl mx-auto px-6 py-10">
         <Alert variant="destructive">
           <AlertDescription>{error}</AlertDescription>
         </Alert>
-      ) : state === null ? (
+      </div>
+    );
+  }
+  if (state === null) {
+    return (
+      <div className="max-w-4xl mx-auto px-6 py-10">
         <Skeleton className="h-[600px] rounded-md" />
-      ) : (
-        <TemplateEditor
-          workspaceId={id}
-          mode="edit"
-          templateId={templateId}
-          initial={state}
-        />
-      )}
-    </div>
+      </div>
+    );
+  }
+  return (
+    <TemplateEditor
+      workspaceId={id}
+      mode="edit"
+      templateId={templateId}
+      initial={state}
+    />
   );
 }

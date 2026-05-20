@@ -1,15 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Sparkles, Trash2, Upload } from "lucide-react";
+import dynamic from "next/dynamic";
+import { Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { AssetTree } from "./asset-tree";
 import {
   AssistantPanel,
   type ApplyToolResult,
@@ -25,6 +25,26 @@ import {
 import { RoutingModeFields, type RoutingMode } from "@/components/routing-mode-fields";
 import { BranchAutocomplete } from "@/components/branch-autocomplete";
 import { toast } from "sonner";
+import { IdeShell } from "@/components/ide-shell";
+import {
+  SidebarNav,
+  type SectionEntry,
+  type SectionKey,
+  type SectionStatus,
+} from "./_components/sidebar-nav";
+import { SidebarFiles, COMPOSE_PATH } from "./_components/sidebar-files";
+import { FileTabs } from "./_components/file-tabs";
+
+// Monaco loads its own worker bundle in the browser; avoid SSR.
+const MonacoEditor = dynamic(
+  () => import("@monaco-editor/react").then((m) => m.default),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="text-xs text-muted-foreground p-3">Loading editor…</div>
+    ),
+  }
+);
 
 export type TemplateVariableKind =
   | "system-port"
@@ -161,6 +181,41 @@ export function TemplateEditor({
   const [branchInfo, setBranchInfo] = useState<
     Record<string, { branches: string[]; defaultBranch: string | null }>
   >({});
+  // The center pane shows either the active section's form OR the active
+  // file's Monaco editor — never both. Picking a section clears activeFile;
+  // opening a file clears activeSection. openFiles is the tab strip's order.
+  const [activeSection, setActiveSection] = useState<SectionKey | null>("basics");
+  const [openFiles, setOpenFiles] = useState<string[]>([]);
+  const [activeFile, setActiveFile] = useState<string | null>(null);
+
+  function selectSection(key: SectionKey) {
+    setActiveSection(key);
+    setActiveFile(null);
+  }
+
+  function openFile(path: string) {
+    setActiveFile(path);
+    setActiveSection(null);
+    setOpenFiles((prev) => (prev.includes(path) ? prev : [...prev, path]));
+  }
+
+  function closeFile(path: string) {
+    setOpenFiles((prev) => {
+      const next = prev.filter((p) => p !== path);
+      // If closing the active tab, jump to the neighbor on the right (or left
+      // if it was the last tab). If no tabs remain, fall back to a section.
+      if (path === activeFile) {
+        if (next.length === 0) {
+          setActiveFile(null);
+          setActiveSection("basics");
+        } else {
+          const closedIdx = prev.indexOf(path);
+          setActiveFile(next[Math.min(closedIdx, next.length - 1)]);
+        }
+      }
+      return next;
+    });
+  }
 
   // Stable snapshot for the assistant panel — it reads the latest state on
   // every send without re-rendering when state changes.
@@ -575,23 +630,169 @@ export function TemplateEditor({
     router.refresh();
   }
 
+  // Section completion: drives the sidebar checkmarks. Compose + assets used
+  // to be sections; they're files now and live in the sidebar's Files panel.
+  const sections = useMemo<SectionEntry[]>(() => {
+    const basicsStatus: SectionStatus =
+      state.slug.trim() && state.name.trim() ? "complete" : "incomplete";
+    const agentStatus: SectionStatus = state.agentInstructions.trim()
+      ? "complete"
+      : "optional";
+    const servicesStatus: SectionStatus =
+      state.services.length === 0 ? "optional" : "complete";
+    const variablesStatus: SectionStatus =
+      state.variables.length === 0
+        ? "optional"
+        : state.variables.some((v) => !v.key.trim())
+          ? "warning"
+          : "complete";
+    const reposStatus: SectionStatus =
+      state.repos.length === 0 ? "optional" : "complete";
+    const runtimeOk =
+      state.routingMode !== "subdomain" ||
+      state.routingBaseDomain.trim().length > 0;
+    const runtimeStatus: SectionStatus = runtimeOk ? "complete" : "warning";
+
+    return [
+      { key: "basics", label: "Basics", status: basicsStatus },
+      { key: "agent", label: "Agent instructions", status: agentStatus },
+      { key: "services", label: "Services", status: servicesStatus },
+      { key: "variables", label: "Variables", status: variablesStatus },
+      { key: "repos", label: "Repositories", status: reposStatus },
+      { key: "runtime", label: "Routing & QA", status: runtimeStatus },
+    ];
+  }, [state]);
+
   return (
-    <form onSubmit={submit} className="space-y-8">
-      <div className="flex justify-end">
-        <AssistantPanel
-          ref={assistantRef}
-          workspaceId={workspaceId}
-          getState={() => stateRef.current}
-          applyToolCall={applyToolCall}
-        />
-      </div>
+    <form onSubmit={submit}>
+      <IdeShell
+        header={
+          <>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-mono font-medium">
+                {mode === "create" ? "New template" : "Edit template"}
+                {state.name && (
+                  <span className="text-muted-foreground"> — {state.name}</span>
+                )}
+              </div>
+              <div className="text-xs text-muted-foreground truncate">
+                Define the stack, the variables the orchestrator fills in, and
+                any asset files.
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => router.back()}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" size="sm" disabled={submitting}>
+              {submitting
+                ? "Saving…"
+                : mode === "create"
+                  ? "Create template"
+                  : "Save changes"}
+            </Button>
+          </>
+        }
+        sidebar={
+          <div className="flex flex-col gap-3 pb-3">
+            <SidebarNav
+              sections={sections}
+              activeKey={activeSection}
+              onSelect={selectSection}
+            />
+            <SidebarFiles
+              assets={state.assets}
+              onAssetsChange={(next) => setField("assets", next)}
+              activeFile={activeFile}
+              onOpenFile={openFile}
+              composePresent={state.composeFile.trim().length > 0}
+            />
+          </div>
+        }
+        ai={
+          <AssistantPanel
+            ref={assistantRef}
+            workspaceId={workspaceId}
+            getState={() => stateRef.current}
+            applyToolCall={applyToolCall}
+            variant="inline"
+          />
+        }
+        center={
+          activeFile !== null ? (
+            <FileView
+              activeFile={activeFile}
+              openFiles={openFiles}
+              onActivate={openFile}
+              onClose={closeFile}
+              composeFile={state.composeFile}
+              setComposeFile={setComposeFile}
+              assets={state.assets}
+              onAssetChange={(path, content) =>
+                setField(
+                  "assets",
+                  state.assets.map((a) =>
+                    a.path === path ? { ...a, content } : a
+                  )
+                )
+              }
+              onAssetInterpolateChange={(path, isTemplate) =>
+                setField(
+                  "assets",
+                  state.assets.map((a) =>
+                    a.path === path ? { ...a, isTemplate } : a
+                  )
+                )
+              }
+              mode={mode}
+              error={error}
+              onUploadCompose={() =>
+                document.getElementById("tpl-compose-file")?.click()
+              }
+              onGenerateCompose={(description) =>
+                assistantRef.current?.openWith({
+                  prompt:
+                    `Generate a docker-compose.yml and the matching variables, services notes, and any required asset files for the following stack:\n\n${description}\n\n` +
+                    "Use the appropriate tools (setComposeFile, addVariable, setService, writeAsset). " +
+                    "Pick port-based variables for any host ports (kind: system-port). Use service-url variables for inter-service URLs. " +
+                    "Mark user-facing services. Keep the design minimal — only include services the user described.",
+                  autoSend: true,
+                })
+              }
+            >
+              <input
+                id="tpl-compose-file"
+                type="file"
+                accept=".yml,.yaml,application/yaml,text/yaml,text/plain"
+                className="hidden"
+                onChange={async (e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!f) return;
+                  try {
+                    const text = await f.text();
+                    setComposeFile(text);
+                    toast.success(`Loaded ${f.name}`);
+                  } catch {
+                    toast.error("Failed to read file");
+                  }
+                }}
+              />
+            </FileView>
+          ) : (
+          <div className="max-w-4xl mx-auto px-6 sm:px-8 py-6 space-y-6">
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-
+            {activeSection === "basics" && (
+              <>
       <section className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="slug">Slug</Label>
@@ -630,85 +831,10 @@ export function TemplateEditor({
           placeholder="What this template spins up and when to pick it."
         />
       </div>
-
-      <div className="space-y-2">
-        <div className="flex items-center justify-between gap-2">
-          <Label htmlFor="compose">docker-compose.yml</Label>
-          <div className="flex items-center gap-2">
-            {state.composeFile && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setField("composeFile", "")}
-              >
-                Clear
-              </Button>
+              </>
             )}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => document.getElementById("tpl-compose-file")?.click()}
-            >
-              <Upload className="size-4" /> Upload file
-            </Button>
-          </div>
-        </div>
 
-        {mode === "create" && !state.composeFile.trim() && (
-          <BlankStateGenerator
-            onGenerate={(description) =>
-              assistantRef.current?.openWith({
-                prompt:
-                  `Generate a docker-compose.yml and the matching variables, services notes, and any required asset files for the following stack:\n\n${description}\n\n` +
-                  "Use the appropriate tools (setComposeFile, addVariable, setService, writeAsset). " +
-                  "Pick port-based variables for any host ports (kind: system-port). Use service-url variables for inter-service URLs. " +
-                  "Mark user-facing services. Keep the design minimal — only include services the user described.",
-                autoSend: true,
-              })
-            }
-          />
-        )}
-        <p className="text-xs text-muted-foreground">
-          Use <code className="font-mono text-foreground">{"${VAR_NAME}"}</code>{" "}
-          placeholders. The orchestrator will write a{" "}
-          <code className="font-mono text-foreground">.env</code> next to this
-          file at start time — compose reads it automatically.
-          <br />
-          Leave this empty if your template attaches exactly one repo and that
-          repo has its own{" "}
-          <code className="font-mono text-foreground">docker-compose.yml</code>{" "}
-          at its root — the materializer will use it directly.
-        </p>
-        <input
-          id="tpl-compose-file"
-          type="file"
-          accept=".yml,.yaml,application/yaml,text/yaml,text/plain"
-          className="hidden"
-          onChange={async (e) => {
-            const f = e.target.files?.[0];
-            e.target.value = "";
-            if (!f) return;
-            try {
-              const text = await f.text();
-              setComposeFile(text);
-              toast.success(`Loaded ${f.name}`);
-            } catch {
-              toast.error("Failed to read file");
-            }
-          }}
-        />
-        <Textarea
-          id="compose"
-          spellCheck={false}
-          value={state.composeFile}
-          onChange={(e) => setComposeFile(e.target.value)}
-          className="font-mono text-xs h-80 resize-y overflow-auto [field-sizing:fixed]"
-          placeholder={`Paste your docker-compose.yml here, or click "Upload file" above. Leave empty to use a single attached repo's own docker-compose.yml.\n\nservices:\n  app:\n    ports:\n      - "\${APP_PORT}:8080"`}
-        />
-      </div>
-
+            {activeSection === "agent" && (
       <section className="space-y-3 rounded-md border p-4">
         <div>
           <h3 className="font-mono text-sm font-semibold">Agent instructions</h3>
@@ -726,7 +852,9 @@ export function TemplateEditor({
           placeholder={`e.g. "Prefer named volumes over bind mounts. Treat any *_URL variable as internal-only — do not expose it through subdomain routing."`}
         />
       </section>
+            )}
 
+            {activeSection === "services" && (
       <section className="space-y-3">
         <div className="flex items-start justify-between gap-2">
           <div>
@@ -750,7 +878,7 @@ export function TemplateEditor({
                 })
               }
             >
-              <Sparkles className="size-4" /> Suggest with AI
+              <Sparkles className="size-4" /> Ask DevOps
             </Button>
           )}
         </div>
@@ -822,7 +950,10 @@ export function TemplateEditor({
           </div>
         )}
       </section>
+            )}
 
+            {activeSection === "runtime" && (
+              <>
       <section className="space-y-3 rounded-md border p-4">
         <div>
           <h3 className="font-mono text-sm font-semibold">Routing</h3>
@@ -890,7 +1021,10 @@ export function TemplateEditor({
           </label>
         </div>
       </section>
+              </>
+            )}
 
+            {activeSection === "variables" && (
       <section className="space-y-3">
         <div className="flex items-center justify-between">
           <div>
@@ -1080,7 +1214,9 @@ export function TemplateEditor({
           ))}
         </div>
       </section>
+            )}
 
+            {activeSection === "repos" && (
       <section className="space-y-3">
         <div>
           <h3 className="font-mono text-sm font-semibold">Repositories</h3>
@@ -1187,42 +1323,228 @@ export function TemplateEditor({
           </div>
         )}
       </section>
+            )}
 
-      <section className="space-y-3">
-        <div>
-          <h3 className="font-mono text-sm font-semibold">Assets</h3>
-          <p className="text-xs text-muted-foreground">
-            Files copied into the env dir on materialization. Toggle{" "}
-            <span className="font-mono">Interpolate</span> on a file to
-            substitute <code className="font-mono text-foreground">{"${VAR}"}</code>{" "}
-            inside its content. Drag files between folders to reorganize.
-          </p>
-        </div>
-        <AssetTree
-          assets={state.assets}
-          onChange={(next) => setField("assets", next)}
-        />
-      </section>
-
-      <div className="flex justify-end gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          onClick={() => router.back()}
-        >
-          Cancel
-        </Button>
-        <Button type="submit" disabled={submitting}>
-          {submitting
-            ? "Saving…"
-            : mode === "create"
-              ? "Create template"
-              : "Save changes"}
-        </Button>
-      </div>
+          </div>
+          )
+        }
+      />
     </form>
   );
 }
+
+/**
+ * Center-pane file view: VS Code-style tab strip on top, the active file's
+ * Monaco editor below, a per-file toolbar and status bar around the editor.
+ * The compose file gets an Upload + Clear toolbar + the BlankStateGenerator
+ * in `create` mode when the file is empty. Asset files get an Interpolate
+ * toggle. The hidden compose <input> is forwarded via children so the parent
+ * controls its onChange.
+ */
+function FileView({
+  activeFile,
+  openFiles,
+  onActivate,
+  onClose,
+  composeFile,
+  setComposeFile,
+  assets,
+  onAssetChange,
+  onAssetInterpolateChange,
+  mode,
+  error,
+  onUploadCompose,
+  onGenerateCompose,
+  children,
+}: {
+  activeFile: string;
+  openFiles: string[];
+  onActivate: (path: string) => void;
+  onClose: (path: string) => void;
+  composeFile: string;
+  setComposeFile: (s: string) => void;
+  assets: EditorAsset[];
+  onAssetChange: (path: string, content: string) => void;
+  onAssetInterpolateChange: (path: string, isTemplate: boolean) => void;
+  mode: "create" | "edit";
+  error: string;
+  onUploadCompose: () => void;
+  onGenerateCompose: (description: string) => void;
+  children?: React.ReactNode;
+}) {
+  const isCompose = activeFile === COMPOSE_PATH;
+  const asset = isCompose ? null : assets.find((a) => a.path === activeFile);
+
+  return (
+    <div className="h-full flex flex-col">
+      {error && (
+        <div className="shrink-0 border-b border-destructive/40 bg-destructive/10 px-4 py-2">
+          <Alert variant="destructive" className="border-0 bg-transparent p-0">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        </div>
+      )}
+
+      <FileTabs
+        openFiles={openFiles}
+        activeFile={activeFile}
+        onActivate={onActivate}
+        onClose={onClose}
+      />
+
+      {/* Per-file toolbar */}
+      <div className="shrink-0 flex items-center gap-2 border-b border-border/60 bg-card/30 px-3 py-1.5 text-xs">
+        <code className="font-mono text-muted-foreground truncate">
+          {isCompose ? "docker-compose.yml" : activeFile}
+        </code>
+        <div className="ml-auto flex items-center gap-1">
+          {isCompose ? (
+            <>
+              {composeFile && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setComposeFile("")}
+                >
+                  <X className="size-3.5" /> Clear
+                </Button>
+              )}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={onUploadCompose}
+              >
+                <Upload className="size-3.5" /> Upload
+              </Button>
+            </>
+          ) : asset ? (
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <Checkbox
+                id="file-interpolate"
+                checked={asset.isTemplate}
+                onCheckedChange={(c) =>
+                  onAssetInterpolateChange(asset.path, c === true)
+                }
+              />
+              <span className="text-xs">
+                Interpolate{" "}
+                <code className="font-mono">{"${VAR}"}</code>
+              </span>
+            </label>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Editor body */}
+      {isCompose && mode === "create" && !composeFile.trim() ? (
+        <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[1fr_2fr]">
+          <div className="border-r border-border/60 p-4 overflow-y-auto">
+            <BlankStateGenerator onGenerate={onGenerateCompose} />
+            <p className="text-xs text-muted-foreground mt-4">
+              Or upload a compose file, or just start typing in the editor on
+              the right — the AI panel on the far right will help you refine
+              it.
+            </p>
+          </div>
+          <div className="min-h-0">
+            <MonacoEditor
+              height="100%"
+              language="yaml"
+              value={composeFile}
+              onChange={(v) => setComposeFile(v ?? "")}
+              options={MONACO_OPTIONS}
+              theme="vs-dark"
+            />
+          </div>
+        </div>
+      ) : isCompose ? (
+        <div className="flex-1 min-h-0">
+          <MonacoEditor
+            height="100%"
+            language="yaml"
+            value={composeFile}
+            onChange={(v) => setComposeFile(v ?? "")}
+            options={MONACO_OPTIONS}
+            theme="vs-dark"
+          />
+        </div>
+      ) : asset ? (
+        <div className="flex-1 min-h-0">
+          <MonacoEditor
+            height="100%"
+            language={languageForPath(asset.path)}
+            value={asset.content}
+            onChange={(v) => onAssetChange(asset.path, v ?? "")}
+            options={MONACO_OPTIONS}
+            theme="vs-dark"
+          />
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 flex items-center justify-center text-xs text-muted-foreground p-6 text-center">
+          File not found — it may have been renamed or removed.
+        </div>
+      )}
+
+      {/* Status bar */}
+      <div className="shrink-0 border-t border-border/60 bg-card/40 px-3 py-1 flex items-center gap-3 text-[11px] text-muted-foreground">
+        <span className="font-mono">
+          {isCompose ? "YAML" : asset ? languageForPath(asset.path) : ""}
+        </span>
+        {isCompose && (
+          <span>
+            Use{" "}
+            <code className="font-mono text-foreground">{"${VAR_NAME}"}</code>{" "}
+            placeholders — the orchestrator writes a{" "}
+            <code className="font-mono text-foreground">.env</code> at start
+            time.
+          </span>
+        )}
+        <span className="ml-auto">
+          {(isCompose
+            ? composeFile.length
+            : asset?.content.length ?? 0
+          ).toLocaleString()}{" "}
+          chars
+        </span>
+      </div>
+
+      {children}
+    </div>
+  );
+}
+
+function languageForPath(path: string): string {
+  const lower = path.toLowerCase();
+  const base = lower.split("/").pop() ?? "";
+  if (base === "dockerfile" || base.startsWith("dockerfile.")) return "dockerfile";
+  if (base === ".env" || base.startsWith(".env.")) return "ini";
+  if (lower.endsWith(".yml") || lower.endsWith(".yaml")) return "yaml";
+  if (lower.endsWith(".json")) return "json";
+  if (lower.endsWith(".sh") || lower.endsWith(".bash")) return "shell";
+  if (lower.endsWith(".toml") || lower.endsWith(".ini")) return "ini";
+  if (lower.endsWith(".md")) return "markdown";
+  if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
+  if (lower.endsWith(".js") || lower.endsWith(".jsx")) return "javascript";
+  if (lower.endsWith(".py")) return "python";
+  if (lower.endsWith(".sql")) return "sql";
+  if (lower.endsWith(".html")) return "html";
+  if (lower.endsWith(".css")) return "css";
+  if (lower.endsWith(".conf")) return "ini";
+  return "plaintext";
+}
+
+const MONACO_OPTIONS = {
+  minimap: { enabled: false },
+  fontSize: 13,
+  scrollBeyondLastLine: false,
+  wordWrap: "on" as const,
+  tabSize: 2,
+  renderLineHighlight: "all" as const,
+  smoothScrolling: true,
+  cursorBlinking: "smooth" as const,
+};
 
 function BlankStateGenerator({
   onGenerate,
@@ -1233,7 +1555,7 @@ function BlankStateGenerator({
   return (
     <div className="rounded-md border border-dashed bg-muted/30 p-3 space-y-2">
       <div className="flex items-center gap-2 text-xs font-mono">
-        <Sparkles className="size-4" /> Generate with AI
+        <Sparkles className="size-4" /> Generate with DevOps
       </div>
       <p className="text-xs text-muted-foreground">
         Describe what you want and the assistant will draft a compose file,

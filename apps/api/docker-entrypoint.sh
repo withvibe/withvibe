@@ -9,6 +9,22 @@ set -e
 # not root (compose can run the api as non-root).
 [ "$(id -u)" = "0" ] && chmod 711 /root 2>/dev/null || true
 
+# Optional: install extra apt packages needed by tunnel'd VS Code extensions
+# (e.g. openjdk-21-jdk-headless for the Java pack, python3 for the Python pack,
+# golang-go for Go). Comma- or whitespace-separated. Skipped if not root or
+# the list is empty. Failure is non-fatal so a bad package name can't brick
+# the api — check the boot log if an extension still says "not found".
+if [ -n "${CODE_TUNNEL_APT_PACKAGES:-}" ] && [ "$(id -u)" = "0" ]; then
+  pkgs=$(echo "${CODE_TUNNEL_APT_PACKAGES}" | tr ',' ' ')
+  echo "[entrypoint] installing CODE_TUNNEL_APT_PACKAGES: ${pkgs}"
+  if apt-get update && apt-get install --no-install-recommends -y $pkgs; then
+    echo "[entrypoint] installed: ${pkgs}"
+  else
+    echo "[entrypoint] WARN: apt install failed for: ${pkgs} — continuing" >&2
+  fi
+  rm -rf /var/lib/apt/lists/*
+fi
+
 # Sync the schema to the database before the app accepts traffic.
 #
 # We use `prisma db push` to match the project's dev workflow (no migrations/

@@ -69,6 +69,8 @@ const ENV_KEY_ORDER = [
   "TRAEFIK_ACME_EMAIL",
   "TRAEFIK_HTTP_HOST_PORT",
   "TRAEFIK_HTTPS_HOST_PORT",
+  "CODE_TUNNEL_EXTENSIONS",
+  "CODE_TUNNEL_APT_PACKAGES",
 ];
 
 const ENV_COMMENTS: Record<string, string> = {
@@ -86,6 +88,10 @@ const ENV_COMMENTS: Record<string, string> = {
     "Wildcard base domain for env-service subdomains + demo templates. Defaults to the Traefik base domain.",
   TRAEFIK_HTTP_HOST_PORT:
     "Host-side ports Traefik listens on. Default 80/443; auto-bumped on macOS where 80 is often taken by AirPlay.",
+  CODE_TUNNEL_EXTENSIONS:
+    "Extra VS Code extensions to preinstall in every `code tunnel` session, comma-separated marketplace IDs (e.g. vscjava.vscode-java-pack,redhat.java). Claude Code is always installed regardless.",
+  CODE_TUNNEL_APT_PACKAGES:
+    "Extra apt packages installed in the api container at boot, for tooling the tunnel'd VS Code needs (e.g. openjdk-21-jdk-headless,maven for Java; python3 for Python). Restart the api after editing.",
 };
 
 // "Default" preset — used by the one-click flow and when -y is passed. Every
@@ -340,6 +346,12 @@ export async function runInit(opts: InitOptions): Promise<void> {
     GOOGLE_CLIENT_ID: "",
     GOOGLE_CLIENT_SECRET: "",
     GITHUB_TOKEN: "",
+    // Tunnel customization — blank by default. Default install adds NO extra
+    // extensions beyond the always-on `anthropic.claude-code` (see
+    // code-tunnel.service.ts) and NO extra apt packages in the api container.
+    // Operators opt in later via `withvibe configure` → "Tunnel customization".
+    CODE_TUNNEL_EXTENSIONS: "",
+    CODE_TUNNEL_APT_PACKAGES: "",
     WEB_PUBLIC_URL: answers.webPublicUrl,
     API_PUBLIC_URL: answers.apiPublicUrl,
     PUBLIC_HOST: answers.publicHost,

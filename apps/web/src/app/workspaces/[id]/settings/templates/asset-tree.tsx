@@ -32,6 +32,17 @@ const MonacoEditor = dynamic(
 type Props = {
   assets: EditorAsset[];
   onChange: (next: EditorAsset[]) => void;
+  /**
+   * "embedded" hides the built-in editor column and emits selection events
+   * upward — used when the tree lives in the IDE sidebar and the actual file
+   * is edited in a Monaco tab elsewhere. "standalone" (default) shows the
+   * tree + editor side-by-side, the original behavior.
+   */
+  variant?: "standalone" | "embedded";
+  /** Controlled selection — when set, the tree highlights this path. */
+  selectedPath?: string | null;
+  /** Fires whenever a file row is clicked in embedded mode. */
+  onSelectFile?: (path: string) => void;
 };
 
 type TreeNode =
@@ -140,10 +151,31 @@ function validateName(name: string): string | null {
   return null;
 }
 
-export function AssetTree({ assets, onChange }: Props) {
+export function AssetTree({
+  assets,
+  onChange,
+  variant = "standalone",
+  selectedPath,
+  onSelectFile,
+}: Props) {
+  const embedded = variant === "embedded";
   const [ephemeralFolders, setEphemeralFolders] = useState<string[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([""]));
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  // Internal selection only matters in standalone mode. In embedded mode the
+  // parent owns selection via `selectedPath`.
+  const [internalSelectedFile, setInternalSelectedFile] = useState<string | null>(
+    null
+  );
+  const selectedFile = embedded
+    ? selectedPath ?? null
+    : internalSelectedFile;
+  const setSelectedFile = (path: string | null) => {
+    if (embedded) {
+      if (path) onSelectFile?.(path);
+    } else {
+      setInternalSelectedFile(path);
+    }
+  };
   const [selectedFolder, setSelectedFolder] = useState<string>("");
   const [renaming, setRenaming] = useState<{
     path: string;
@@ -378,10 +410,24 @@ export function AssetTree({ assets, onChange }: Props) {
     );
   }
 
+  // Embedded variant collapses to a single column (just the tree), removes
+  // the wrapper border (the sidebar already has its own), and lets the parent
+  // size the height. Standalone keeps the original two-column UI.
   return (
-    <div className="grid gap-3 sm:grid-cols-[260px_1fr] rounded-md border">
-      {/* Left pane — tree */}
-      <div className="border-r min-h-[400px] flex flex-col">
+    <div
+      className={
+        embedded
+          ? "flex flex-col"
+          : "grid gap-3 sm:grid-cols-[260px_1fr] rounded-md border"
+      }
+    >
+      <div
+        className={
+          embedded
+            ? "flex flex-col"
+            : "border-r min-h-[400px] flex flex-col"
+        }
+      >
         <div className="flex items-center justify-between gap-1 px-2 py-2 border-b">
           <span className="text-xs font-mono text-muted-foreground">
             {selectedFolder ? selectedFolder + "/" : "/"}
@@ -533,7 +579,9 @@ export function AssetTree({ assets, onChange }: Props) {
         </div>
       </div>
 
-      {/* Right pane — editor */}
+      {/* Right pane — editor. Hidden in embedded mode; the parent renders
+          the file in its own Monaco tab. */}
+      {!embedded && (
       <div className="min-h-[400px] flex flex-col">
         {selectedAsset ? (
           <>
@@ -589,6 +637,7 @@ export function AssetTree({ assets, onChange }: Props) {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

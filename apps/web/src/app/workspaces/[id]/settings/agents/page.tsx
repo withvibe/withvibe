@@ -181,6 +181,9 @@ export default function WorkspaceAgentsPage(
           >
             <UserRound className="size-4" />
             Create my clone
+            <Badge className="ml-1 bg-yellow-400 text-yellow-950 hover:bg-yellow-400 dark:bg-yellow-500 dark:text-yellow-950">
+              beta
+            </Badge>
           </Button>
           <Button onClick={() => setCreateOpen(true)}>
             <Plus className="size-4" />

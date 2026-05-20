@@ -54,6 +54,7 @@ export async function runConfigure(args: ConfigureArgs): Promise<void> {
           { title: "Public URLs (PUBLIC_HOST / WEB_PUBLIC_URL / API_PUBLIC_URL)", value: "urls" },
           { title: "Rotate secrets (INTERNAL_JWT_SECRET / POSTGRES_PASSWORD)", value: "rotate" },
           { title: "Update Anthropic key", value: "anthropic" },
+          { title: "Tunnel VS Code customization (extensions / apt packages)", value: "tunnel" },
           {
             title: "Shared infra / external DB access (advanced)",
             value: "advanced",
@@ -74,6 +75,7 @@ export async function runConfigure(args: ConfigureArgs): Promise<void> {
     else if (choice.v === "urls") await editUrls(installDir);
     else if (choice.v === "rotate") await rotateSecrets(installDir);
     else if (choice.v === "anthropic") await updateAnthropicKey(installDir);
+    else if (choice.v === "tunnel") await configureTunnel(installDir);
     else if (choice.v === "advanced") await configureAdvanced(installDir);
 
     await writeState(installDir, state);
@@ -441,6 +443,41 @@ async function updateAnthropicKey(installDir: string): Promise<void> {
   // (chat-stream.service.ts) detects the prefix and routes at spawn time.
   await mergeEnv(installDir, { ANTHROPIC_API_KEY: key });
   log.ok("ANTHROPIC_API_KEY updated.");
+}
+
+// Tunnel VS Code customization. Two knobs:
+//   - CODE_TUNNEL_EXTENSIONS: extra extension marketplace IDs (the api always
+//     installs anthropic.claude-code; this is purely additive).
+//   - CODE_TUNNEL_APT_PACKAGES: apt packages installed in the api container at
+//     boot, for tooling the extension needs at runtime (e.g. a JDK for Java).
+// Both blank by default — default installs add nothing.
+async function configureTunnel(installDir: string): Promise<void> {
+  const env = await readEnvFile(envPath(installDir));
+  log.dim(
+    "Both fields are comma-separated and additive. Claude Code is always " +
+      "installed regardless of CODE_TUNNEL_EXTENSIONS."
+  );
+  const extensions = await ask({
+    type: "text",
+    name: "v",
+    message: "CODE_TUNNEL_EXTENSIONS (e.g. vscjava.vscode-java-pack,redhat.java):",
+    initial: env.CODE_TUNNEL_EXTENSIONS ?? "",
+  });
+  const aptPackages = await ask({
+    type: "text",
+    name: "v",
+    message: "CODE_TUNNEL_APT_PACKAGES (e.g. openjdk-21-jdk-headless,maven):",
+    initial: env.CODE_TUNNEL_APT_PACKAGES ?? "",
+  });
+  await mergeEnv(installDir, {
+    CODE_TUNNEL_EXTENSIONS: csvNorm(extensions),
+    CODE_TUNNEL_APT_PACKAGES: csvNorm(aptPackages),
+  });
+  log.ok("Tunnel customization updated.");
+  log.dim(
+    "Restart the api with `withvibe restart` so the apt step runs; new tunnel " +
+      "sessions pick up the extension list automatically."
+  );
 }
 
 // Operator gates for the multi-tenant network-isolation model. These are

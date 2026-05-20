@@ -354,7 +354,6 @@ export default function WorkspaceHomePage(
                   <TableHead className="w-[28%]">Name</TableHead>
                   <TableHead>Description</TableHead>
                   <TableHead className="w-[12%]">Status</TableHead>
-                  <TableHead className="w-[10%]">Port</TableHead>
                   <TableHead className="w-[18%] text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -393,24 +392,6 @@ function EnvRow({
   const agentRunning = isAgentRunning(env.id);
   const badge = CONTAINER_BADGE[env.containerStatus] || CONTAINER_BADGE.stopped;
   const href = `/workspaces/${workspaceId}/environments/${env.id}`;
-  // Subdomain-mode label: prefer the `web`/`frontend` service's host, fall
-  // back to the first serviceUrl. Port-mode stays on the published host port.
-  const webPort = env.containerPorts?.web;
-  const subdomainLabel = (() => {
-    const urls = env.serviceUrls;
-    if (!urls) return null;
-    const entries = Object.entries(urls);
-    if (entries.length === 0) return null;
-    const pick =
-      entries.find(([k]) => k === "web")?.[1] ??
-      entries.find(([k]) => k === "frontend")?.[1] ??
-      entries[0][1];
-    try {
-      return new URL(pick).host;
-    } catch {
-      return null;
-    }
-  })();
   const isRunning = env.containerStatus === "running";
   const isStopped = env.containerStatus === "stopped" || env.containerStatus === "error";
   const isTransitioning =
@@ -456,9 +437,6 @@ function EnvRow({
           <span className={cn("size-1.5 rounded-full", badge.dot)} />
           {badge.label}
         </span>
-      </TableCell>
-      <TableCell className="text-xs font-mono text-muted-foreground">
-        {subdomainLabel ?? (webPort ? `:${webPort}` : "—")}
       </TableCell>
       <TableCell>
         <div className="flex items-center justify-end gap-1">

@@ -40,6 +40,14 @@ type Props = {
   workspaceId: string;
   getState: () => TemplateEditorState;
   applyToolCall: ApplyToolCall;
+  /**
+   * "sheet" (default): collapsed by default, opens into a right-side overlay
+   * with a body-padding shim so the page shifts behind it.
+   * "inline": always visible, rendered in the parent flow with no fixed
+   * positioning, no toggle button, no body-padding shim. Use when the panel
+   * is part of an IDE-style three-pane layout.
+   */
+  variant?: "sheet" | "inline";
 };
 
 export type AssistantPanelHandle = {
@@ -52,10 +60,13 @@ function uid() {
 }
 
 export const AssistantPanel = forwardRef<AssistantPanelHandle, Props>(function AssistantPanel(
-  { workspaceId, getState, applyToolCall },
+  { workspaceId, getState, applyToolCall, variant = "sheet" },
   forwardedRef
 ) {
-  const [open, setOpen] = useState(false);
+  // Inline mode is always visible — the sheet's open/close state is irrelevant
+  // there. Default the controlled flag accordingly.
+  const inline = variant === "inline";
+  const [open, setOpen] = useState(inline);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -90,8 +101,10 @@ export const AssistantPanel = forwardRef<AssistantPanelHandle, Props>(function A
     },
   }));
 
-  // ⌘K / Ctrl+K toggles the panel.
+  // ⌘K / Ctrl+K toggles the panel. Inline mode skips this — the panel is
+  // always visible and there's nothing to toggle.
   useEffect(() => {
+    if (inline) return;
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -100,12 +113,13 @@ export const AssistantPanel = forwardRef<AssistantPanelHandle, Props>(function A
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [inline]);
 
-  // While the panel is open, reserve space for it on the right so the
+  // While the sheet is open, reserve space for it on the right so the
   // editor's centered layout shifts left instead of being overlapped.
-  // Uses body padding-right (works with the existing mx-auto wrappers).
+  // Inline mode skips this — the parent already lays out a column for us.
   useEffect(() => {
+    if (inline) return;
     const PANEL_WIDTH_PX = 512; // matches md:w-[32rem] below
     if (!open) return;
     const prev = document.body.style.paddingRight;
@@ -113,7 +127,7 @@ export const AssistantPanel = forwardRef<AssistantPanelHandle, Props>(function A
     return () => {
       document.body.style.paddingRight = prev;
     };
-  }, [open]);
+  }, [open, inline]);
 
   function stop() {
     abortRef.current?.abort();
@@ -312,48 +326,58 @@ export const AssistantPanel = forwardRef<AssistantPanelHandle, Props>(function A
 
   return (
     <>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        title="Ask AI (⌘K)"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <Sparkles className="size-4" /> Ask AI
-        <kbd className="ml-1 hidden md:inline-block text-[10px] font-mono text-muted-foreground border rounded px-1">
-          ⌘K
-        </kbd>
-      </Button>
+      {!inline && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          title="DevOps (⌘K)"
+          onClick={() => setOpen((o) => !o)}
+        >
+          <Sparkles className="size-4" /> DevOps
+          <kbd className="ml-1 hidden md:inline-block text-[10px] font-mono text-muted-foreground border rounded px-1">
+            ⌘K
+          </kbd>
+        </Button>
+      )}
 
-      {/* Non-modal side panel: anchored on the right, no backdrop, doesn't
-          trap focus. The page reserves padding-right while open so the
-          editor shifts to the left of the panel without being covered. */}
+      {/* Sheet variant: non-modal right-side overlay with body-padding shim.
+          Inline variant: drop the fixed-positioning + width classes, let the
+          parent IDE layout size and position the column. */}
       <div
-        aria-hidden={!open}
+        aria-hidden={!inline && !open}
         className={cn(
-          "fixed inset-y-0 right-0 z-40 flex w-full sm:w-[28rem] md:w-[32rem] flex-col border-l bg-popover text-popover-foreground shadow-xl transition-transform duration-200 ease-out",
-          open ? "translate-x-0" : "translate-x-full pointer-events-none"
+          "flex flex-col bg-popover text-popover-foreground",
+          inline
+            ? "h-full w-full"
+            : cn(
+                "fixed inset-y-0 right-0 z-40 w-full sm:w-[28rem] md:w-[32rem] border-l shadow-xl transition-transform duration-200 ease-out",
+                open ? "translate-x-0" : "translate-x-full pointer-events-none"
+              )
         )}
       >
         <div className="border-b px-4 py-3 flex items-center justify-between gap-2">
           <div>
             <div className="flex items-center gap-2 text-base font-medium">
-              <Bot className="size-4" /> Template assistant
+              <Bot className="size-4" /> DevOps
             </div>
             <div className="text-xs text-muted-foreground">
-              Ask design questions or describe changes — proposed edits show
-              as cards you accept or reject.
+              The same agent that materializes envs from this template. Ask it
+              to design the stack — proposed edits show as cards you accept or
+              reject.
             </div>
           </div>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => setOpen(false)}
-            title="Close (⌘K)"
-          >
-            <X className="size-4" />
-          </Button>
+          {!inline && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => setOpen(false)}
+              title="Close (⌘K)"
+            >
+              <X className="size-4" />
+            </Button>
+          )}
         </div>
 
         <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -398,7 +422,7 @@ export const AssistantPanel = forwardRef<AssistantPanelHandle, Props>(function A
               }
             }}
             rows={3}
-            placeholder="Ask the assistant…  (Enter to send, Shift+Enter for newline)"
+            placeholder="Ask DevOps…  (Enter to send, Shift+Enter for newline)"
             className="text-sm h-20 resize-none [field-sizing:fixed]"
             disabled={busy}
           />
