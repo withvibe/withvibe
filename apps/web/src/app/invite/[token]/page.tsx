@@ -87,7 +87,12 @@ export default function AcceptInvitePage(
     }
 
     const { workspaceId } = await res.json();
-    router.push(`/workspaces/${workspaceId}`);
+    // Hard nav, not router.push — same reason as /login: the destination
+    // workspace page may have been prefetched while the user wasn't a
+    // member (403) and the cached payload is stale-bad. Forcing a fresh
+    // load sidesteps Next.js's prefetch cache and the silent-redirect bug
+    // that produces (see login/page.tsx for the full diagnosis).
+    window.location.assign(`/workspaces/${workspaceId}`);
   }
 
   if (error) {

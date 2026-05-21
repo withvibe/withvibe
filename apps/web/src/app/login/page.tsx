@@ -5,7 +5,7 @@ import {
   ServerStartingError,
   login as loginApi,
 } from "@/lib/auth-client";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -20,7 +20,6 @@ import {
 } from "@/components/auth/app-preview";
 
 function LoginForm() {
-  const router = useRouter();
   const params = useSearchParams();
   const invite = params.get("invite");
   const next = params.get("next");
@@ -41,7 +40,15 @@ function LoginForm() {
         : next && next.startsWith("/")
           ? next
           : "/";
-      router.push(dest);
+      // Hard navigation, not router.push: Next.js prefetches the destination
+      // at /login mount time WHILE THE USER IS STILL UNAUTHENTICATED. The
+      // cached RSC payload for `/` therefore contains the server-side
+      // `redirect("/login")` from when the API said 401 — and router.push
+      // honors that stale cache, bouncing the user right back to /login
+      // (silently, so the spinner stays spinning forever). A hard nav
+      // forces a fresh request with the new session cookie, sidestepping
+      // the prefetch entirely.
+      window.location.assign(dest);
     } catch (err) {
       if (err instanceof ServerStartingError) {
         // Fresh-install bringup case — the API container is up but Prisma is
