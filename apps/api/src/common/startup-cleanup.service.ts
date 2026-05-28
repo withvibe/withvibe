@@ -18,7 +18,10 @@ const exec = promisify(execFile);
  * restart policy, so a host reboot leaves them stopped while the DB still
  * says running. Templates that opt into `restart: unless-stopped` (e.g. the
  * aquarium demo) genuinely come back, so we can't blindly flip everything
- * to stopped — we ask Docker per env.
+ * to stopped — we ask Docker per env. A host reboot can also bring *some*
+ * services back (those with a restart policy) but not others, leaving the
+ * env half-up; we report that as "partial" so the badge stops claiming a
+ * fully-running env when servlet/db are actually down.
  */
 @Injectable()
 export class StartupCleanupService implements OnApplicationBootstrap {
@@ -72,12 +75,23 @@ export class StartupCleanupService implements OnApplicationBootstrap {
     const results = await Promise.all(
       runningEnvs.map(async (e) => ({
         id: e.id,
-        alive: await this.composeProjectHasRunningContainer(e.id),
+        state: await this.composeProjectState(e.id),
       }))
     );
 
-    const dead = results.filter((r) => r.alive === false).map((r) => r.id);
-    const unknown = results.filter((r) => r.alive === null).length;
+    // null state = docker call failed → leave the env as-is.
+    // total === 0 (no containers at all) or running === 0 → stopped.
+    // 0 < running < total → partial (some services up, some down).
+    // running === total → fully up, leave as "running".
+    const dead = results
+      .filter((r) => r.state && r.state.running === 0)
+      .map((r) => r.id);
+    const partial = results
+      .filter(
+        (r) => r.state && r.state.running > 0 && r.state.running < r.state.total
+      )
+      .map((r) => r.id);
+    const unknown = results.filter((r) => r.state === null).length;
 
     if (dead.length > 0) {
       await c.env.updateMany({
@@ -88,6 +102,15 @@ export class StartupCleanupService implements OnApplicationBootstrap {
         `Startup cleanup: flipped ${dead.length} env(s) from running → stopped (no live container found)`
       );
     }
+    if (partial.length > 0) {
+      await c.env.updateMany({
+        where: { id: { in: partial } },
+        data: { containerStatus: "partial" },
+      });
+      this.logger.warn(
+        `Startup cleanup: flipped ${partial.length} env(s) from running → partial (only some services came back)`
+      );
+    }
     if (unknown > 0) {
       this.logger.warn(
         `Startup cleanup: could not verify ${unknown} env(s) (docker unreachable); left as-is`
@@ -95,25 +118,34 @@ export class StartupCleanupService implements OnApplicationBootstrap {
     }
   }
 
-  // null = docker call failed (don't touch DB), true/false = authoritative.
-  private async composeProjectHasRunningContainer(
+  // null = docker call failed (don't touch DB). Otherwise counts of how many
+  // of the project's containers are running vs how many exist at all. Mirrors
+  // finalizeAfterUp's definition that every compose service should be running.
+  private async composeProjectState(
     envId: string
-  ): Promise<boolean | null> {
+  ): Promise<{ running: number; total: number } | null> {
     const project = composeProjectName(envId);
     try {
       const { stdout } = await exec(
         "docker",
         [
           "ps",
-          "-q",
+          "-a",
           "--filter",
           `label=com.docker.compose.project=${project}`,
-          "--filter",
-          "status=running",
+          "--format",
+          "{{.State}}",
         ],
         { timeout: 10_000 }
       );
-      return stdout.trim().length > 0;
+      const states = stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return {
+        running: states.filter((s) => s === "running").length,
+        total: states.length,
+      };
     } catch (err) {
       this.logger.debug(
         { envId, err: (err as Error).message },

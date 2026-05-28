@@ -54,6 +54,7 @@ type ContainerStatus =
   | "stopped"
   | "starting"
   | "running"
+  | "partial"
   | "stopping"
   | "building"
   | "error";
@@ -89,6 +90,11 @@ const CONTAINER_BADGE: Record<
     label: "running",
     className: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
     dot: "bg-emerald-400",
+  },
+  partial: {
+    label: "partial",
+    className: "bg-orange-500/10 text-orange-400 border-orange-500/20",
+    dot: "bg-orange-400",
   },
   stopping: {
     label: "stopping",

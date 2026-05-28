@@ -117,7 +117,24 @@ RUN npm install -g @anthropic-ai/claude-code \
     # into its own working dir. It then hangs ~30s and exits with no output
     # and no error (run shows "done" with an empty reply). 711 lets the claude
     # user *traverse* /root without being able to read/list it.
-    && chmod 711 /root
+    && chmod 711 /root \
+    # Pre-create the SDK config dir owned by `claude`. The stack compose mounts a
+    # named volume here (claude-home) so chat transcripts survive api redeploys.
+    # A named volume initializes from the image's dir at the mount point — if that
+    # dir doesn't exist, Docker makes the volume root-owned and the uid-1500 claude
+    # child can't write transcripts. Creating it claude-owned makes the volume
+    # inherit claude ownership on first init.
+    && mkdir -p /home/claude/.claude \
+    && chown -R claude:claude /home/claude/.claude
+
+# Multi-turn chat memory depends on the Agent SDK resuming the prior session's
+# transcript. The wrapper above drops the claude child to the `claude` user, so
+# the SDK writes transcripts under /home/claude/.claude — but the api process
+# runs as root (HOME=/root), and ChatStreamService.resolveResumeSessionId looks
+# up the transcript from the api process's own home. Pin CLAUDE_CONFIG_DIR so
+# both sides agree (runuser preserves it; only HOME/USER get reset), otherwise
+# every turn fails the existsSync check and starts a fresh, memory-less session.
+ENV CLAUDE_CONFIG_DIR=/home/claude/.claude
 
 WORKDIR /app
 

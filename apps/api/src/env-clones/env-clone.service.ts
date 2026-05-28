@@ -181,6 +181,68 @@ exit 0
     return p;
   }
 
+  /**
+   * Create the env branch off its base branch, trying progressively wider
+   * sources so a non-default base branch (e.g. a prior env's `env/...`
+   * branch chosen as the base) resolves even if the main-clone fetch above
+   * didn't deliver it locally:
+   *   1. `origin/<base>` — the remote-tracking ref copied from the main clone.
+   *   2. a local `<base>` branch — for bases that exist only on disk.
+   *   3. a direct `git fetch origin <base>` from the env clone's own origin
+   *      (now the canonical GitHub URL, with a full `*` refspec) → FETCH_HEAD.
+   * Only if all three miss do we throw — with a message that names the base
+   * branch and the likely cause instead of git's opaque "is not a commit".
+   */
+  private async checkoutFromBase(
+    clonePath: string,
+    branch: string,
+    baseBranch: string
+  ): Promise<void> {
+    const tryCheckout = async (startPoint: string): Promise<boolean> => {
+      try {
+        await exec(
+          "git",
+          ["-C", clonePath, "checkout", "-b", branch, startPoint],
+          { timeout: 30_000 }
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    if (await tryCheckout(`origin/${baseBranch}`)) return;
+    if (await tryCheckout(baseBranch)) return;
+
+    // Last resort: fetch the base branch straight from origin (GitHub) into
+    // this clone. A fresh `git clone` keeps the default `+refs/heads/*:...`
+    // refspec, so unlike the single-branch main clone this fetch DOES create
+    // the remote-tracking ref — but we also have FETCH_HEAD to fall back on.
+    const fetched = await exec(
+      "git",
+      [
+        "-C",
+        clonePath,
+        "fetch",
+        "origin",
+        `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`,
+      ],
+      { timeout: 60_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }
+    )
+      .then(() => true)
+      .catch(() => false);
+    if (fetched) {
+      if (await tryCheckout(`origin/${baseBranch}`)) return;
+      if (await tryCheckout("FETCH_HEAD")) return;
+    }
+
+    throw new Error(
+      `Base branch "${baseBranch}" could not be resolved for the env clone — ` +
+        `it was not found locally or on origin. If it is another env's branch, ` +
+        `make sure that env exists and its branch was pushed to origin.`
+    );
+  }
+
   private async doEnsureEnvClone(
     envRepoId: string
   ): Promise<{ localPath: string; branch: string } | { error: string }> {
@@ -273,9 +335,26 @@ exit 0
       // Refresh base + env branch on the main clone so the new clone inherits
       // up-to-date remote-tracking refs. Both fetches are best-effort —
       // network may be down or the env branch may not exist on origin yet.
+      //
+      // CRITICAL: use an EXPLICIT refspec (`+refs/heads/X:refs/remotes/origin/X`),
+      // not the bare branch name. The main clone is created with `git clone
+      // --depth 50`, which implies `--single-branch` — so its configured
+      // `remote.origin.fetch` only matches the default branch. A bare
+      // `git fetch origin <baseBranch>` for any OTHER branch (e.g. a prior
+      // env's `env/...` branch picked as the base) then lands only in
+      // FETCH_HEAD and never creates `refs/remotes/origin/<baseBranch>`. The
+      // copy below (and the `origin/<baseBranch>` checkout) would then miss it,
+      // leaving the fallback to `checkout -b <branch> <baseBranch>` against a
+      // ref that doesn't exist → `fatal: '<baseBranch>' is not a commit`.
       await exec(
         "git",
-        ["-C", mainClone, "fetch", "origin", baseBranch],
+        [
+          "-C",
+          mainClone,
+          "fetch",
+          "origin",
+          `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`,
+        ],
         {
           timeout: 60_000,
           env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
@@ -283,7 +362,13 @@ exit 0
       ).catch(() => {});
       await exec(
         "git",
-        ["-C", mainClone, "fetch", "origin", branch],
+        [
+          "-C",
+          mainClone,
+          "fetch",
+          "origin",
+          `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+        ],
         {
           timeout: 60_000,
           env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
@@ -345,21 +430,7 @@ exit 0
         );
       } else {
         createdFresh = true;
-        // Try origin/<base> first; fall back to a local <base> ref if origin
-        // wasn't reachable.
-        try {
-          await exec(
-            "git",
-            ["-C", clonePath, "checkout", "-b", branch, `origin/${baseBranch}`],
-            { timeout: 30_000 }
-          );
-        } catch {
-          await exec(
-            "git",
-            ["-C", clonePath, "checkout", "-b", branch, baseBranch],
-            { timeout: 30_000 }
-          );
-        }
+        await this.checkoutFromBase(clonePath, branch, baseBranch);
       }
 
       // Install the pre-push hook before any push happens so even the

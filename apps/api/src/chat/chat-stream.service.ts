@@ -1,5 +1,8 @@
 import { Injectable } from "@nestjs/common";
 import { mkdir } from "fs/promises";
+import { existsSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import { createHash } from "crypto";
 import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatContext } from "./chat-context.service";
@@ -31,6 +34,41 @@ export function friendlyAuthError(
   if (code) return `AI request failed (${code}).`;
   if (httpStatus) return `AI request failed (HTTP ${httpStatus}).`;
   return "AI request failed.";
+}
+
+/**
+ * Maps a non-success SDK `result` (subtype + terminal_reason + errors[]) to a
+ * user-facing message. `error_during_execution` is the catch-all the SDK emits
+ * when its turn loop throws; `terminal_reason` and `errors[]` say why. We map
+ * the cases a user can actually act on and otherwise fall back to surfacing
+ * the raw error text so the turn never ends with a meaningless code.
+ */
+export function friendlyResultError(
+  subtype: string,
+  terminalReason?: string | null,
+  errors?: string[]
+): string {
+  const detail = errors && errors.length ? ` (${errors.join("; ")})` : "";
+  switch (terminalReason) {
+    case "prompt_too_long":
+      return "The conversation grew too long for the model's context window. Start a new chat, or remove some attached repos/files to shrink the context.";
+    case "model_error":
+      return `The model returned an error mid-turn${detail}. Please try again.`;
+    case "blocking_limit":
+    case "rapid_refill_breaker":
+      return "Anthropic usage limit reached — please wait a moment and try again.";
+    case "stop_hook_prevented":
+    case "hook_stopped":
+      return "The turn was stopped by a configured hook before completing.";
+    case "aborted_streaming":
+    case "aborted_tools":
+      return "The run was interrupted before it finished.";
+  }
+  if (subtype === "error_max_turns")
+    return "The AI hit its maximum number of turns before finishing. Try a more focused request.";
+  if (subtype === "error_max_budget_usd")
+    return "The AI hit its per-run cost limit before finishing.";
+  return `AI request failed (${subtype})${detail}.`;
 }
 
 export type DebugEvent =
@@ -344,14 +382,11 @@ export class ChatStreamService {
       // Streaming input mode: hand the SDK an async iterator of user messages
       // instead of a string. We yield one message per turn and let `resume`
       // pick up the prior session, so the SDK owns multi-turn context.
-      const resumeSessionId = opts.context.sessionId
-        ? (
-            await this.prisma.client.chatSession.findUnique({
-              where: { id: opts.context.sessionId },
-              select: { sdkSessionId: true },
-            })
-          )?.sdkSessionId ?? null
-        : null;
+      const resumeSessionId = await this.resolveResumeSessionId(
+        opts.context.sessionId,
+        opts.context.cwd,
+        agent?.agentId
+      );
 
       async function* userMessages(): AsyncGenerator<SDKUserMessage> {
         yield {
@@ -559,14 +594,25 @@ export class ChatStreamService {
           } else {
             const httpStatus =
               msg.subtype === "success" ? (msg.api_error_status ?? null) : null;
+            // Error result subtypes (error_during_execution, error_max_turns,
+            // …) carry the real cause in `errors[]` and `terminal_reason`. The
+            // generic subtype alone is undebuggable, so pull both through to
+            // the log and the user-facing message.
+            const errResult = msg as {
+              errors?: string[];
+              terminal_reason?: string;
+            };
+            const errors = errResult.errors ?? [];
+            const terminalReason = errResult.terminal_reason;
             this.logger.error(
-              `Agent query failed (${msg.subtype}${httpStatus ? ` http=${httpStatus}` : ""})${agent ? ` agent="${agent.agentId}"` : ""}`
+              `Agent query failed (${msg.subtype}${httpStatus ? ` http=${httpStatus}` : ""}${terminalReason ? ` terminal_reason=${terminalReason}` : ""})${agent ? ` agent="${agent.agentId}"` : ""}` +
+                (errors.length ? ` errors=${JSON.stringify(errors)}` : "")
             );
             yield {
               type: "error",
               message: httpStatus
                 ? friendlyAuthError(null, httpStatus)
-                : `AI request failed (${msg.subtype}).`,
+                : friendlyResultError(msg.subtype, terminalReason, errors),
             };
           }
           return;
@@ -606,6 +652,44 @@ export class ChatStreamService {
       );
       yield { type: "error", message: msg };
     }
+  }
+
+  /**
+   * Resolve the SDK `resume` id for this turn — but only if its transcript
+   * still exists under the *current* cwd. The Agent SDK partitions transcripts
+   * by cwd (`~/.claude/projects/<cwd-with-non-alnum→dash>/<id>.jsonl`), so a
+   * stored `sdkSessionId` created under a different cwd (e.g. the repos base
+   * dir was relocated) is unresumable: `query({ resume })` fails the whole turn
+   * with `error_during_execution: No conversation found with session ID`, and
+   * the resulting early child-exit has crashed the API process via an
+   * unhandled EPIPE on the SDK's stdin pipe. Validating up-front lets us fall
+   * back to a fresh session cleanly instead of issuing a doomed resume. The
+   * next successful turn overwrites the stale id.
+   */
+  private async resolveResumeSessionId(
+    sessionId: string | null,
+    cwd: string,
+    agentId?: string
+  ): Promise<string | null> {
+    if (!sessionId) return null;
+    const stored =
+      (
+        await this.prisma.client.chatSession.findUnique({
+          where: { id: sessionId },
+          select: { sdkSessionId: true },
+        })
+      )?.sdkSessionId ?? null;
+    if (!stored) return null;
+
+    const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+    const projectDir = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+    const transcript = join(configDir, "projects", projectDir, `${stored}.jsonl`);
+    if (existsSync(transcript)) return stored;
+
+    this.logger.warn(
+      `[chat-stream] resume transcript missing for session ${stored} (cwd=${cwd})${agentId ? ` agent="${agentId}"` : ""} — starting a fresh SDK session instead of a doomed resume`
+    );
+    return null;
   }
 
   private async persistSdkSessionId(

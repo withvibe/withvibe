@@ -147,8 +147,44 @@ export class DockerService {
   // `com.docker.compose.project` label and the sidecar/runner network
   // resolution (db-viewer.findEnvNetwork etc.) is completely unaffected.
 
-  private readonly traefikContainer =
-    process.env.WITHVIBE_TRAEFIK_CONTAINER || "withvibe-traefik";
+  /** Cached resolved Traefik container name (see resolveTraefikContainer). */
+  private resolvedTraefik: string | null = null;
+
+  /** The Traefik container to bridge onto env edge nets. Honors
+   * WITHVIBE_TRAEFIK_CONTAINER; otherwise discovers the running Traefik by its
+   * Compose service label, so the `-1` replica suffix and the stack's project
+   * name are never assumed. (The old hardcoded "withvibe-traefik" missed the
+   * `-1` suffix, so `network connect` failed silently and envs 504'd.) Falls
+   * back to the conventional name; only a successful discovery is cached. */
+  private async resolveTraefikContainer(): Promise<string> {
+    const override = process.env.WITHVIBE_TRAEFIK_CONTAINER;
+    if (override) return override;
+    if (this.resolvedTraefik) return this.resolvedTraefik;
+    try {
+      const { stdout } = await exec(
+        "docker",
+        [
+          "ps",
+          "--filter",
+          "label=com.docker.compose.service=traefik",
+          "--format",
+          "{{.Names}}",
+        ],
+        { timeout: 10_000 }
+      );
+      const name = stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean)[0];
+      if (name) {
+        this.resolvedTraefik = name;
+        return name;
+      }
+    } catch {
+      // daemon not ready / no match — fall back and retry on the next call
+    }
+    return "withvibe-traefik-1";
+  }
 
   /** This env's per-env proxy network name, or null when the env is not
    * subdomain-routed (port-mode envs have no Traefik and publish host
@@ -190,27 +226,50 @@ export class DockerService {
   }
 
   /** Connect Traefik to this env's edge net so it can route to the env's
-   * exposed services. Best-effort + idempotent: already-connected, no Traefik
-   * (local/port-mode installs), or net-not-yet-created all no-op safely. */
+   * exposed services. No-op for legacy envs (no edge net) and idempotent when
+   * Traefik is already attached. A *real* failure is logged loudly — it means
+   * the env's public hostname will 504 until fixed, which must never again be
+   * a silent swallow. */
   private async connectTraefik(envId: string): Promise<void> {
     const net = await this.perEnvProxyNet(envId);
     if (!net) return;
-    await exec(
-      "docker",
-      ["network", "connect", net, this.traefikContainer],
-      { timeout: 10_000 }
-    ).catch(() => undefined);
+    // Legacy (pre-isolation) envs reference the shared net, not `-edge`, so the
+    // edge net is never created — there is nothing to bridge.
+    const edgeExists = await exec("docker", ["network", "inspect", net], {
+      timeout: 10_000,
+    })
+      .then(() => true)
+      .catch(() => false);
+    if (!edgeExists) return;
+    const traefik = await this.resolveTraefikContainer();
+    try {
+      await exec("docker", ["network", "connect", net, traefik], {
+        timeout: 10_000,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Idempotent happy path: Traefik is already on the net.
+      if (/already exists|endpoint with name/i.test(msg)) return;
+      this.logger.warn(
+        { envId, net, traefik, err: msg },
+        `Failed to attach Traefik (${traefik}) to env edge net ${net}; ` +
+          `public routing will 504 until fixed — check WITHVIBE_TRAEFIK_CONTAINER`
+      );
+      this.pushLog(
+        envId,
+        `[net] WARN: could not attach Traefik to ${net}: ${msg}\n`
+      );
+    }
   }
 
   /** Detach Traefik from the edge net so the network can then be removed. */
   private async disconnectTraefik(envId: string): Promise<void> {
     const net = await this.perEnvProxyNet(envId);
     if (!net) return;
-    await exec(
-      "docker",
-      ["network", "disconnect", net, this.traefikContainer],
-      { timeout: 10_000 }
-    ).catch(() => undefined);
+    const traefik = await this.resolveTraefikContainer();
+    await exec("docker", ["network", "disconnect", net, traefik], {
+      timeout: 10_000,
+    }).catch(() => undefined);
   }
 
   /** Remove the env's edge net on stop. No-op for legacy envs (net was never

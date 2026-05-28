@@ -43,6 +43,36 @@ process.on("unhandledRejection", (reason: unknown) => {
   console.error(`[unhandledRejection] ${msg}`);
 });
 
+// Safety net for stray socket/pipe errors. A peer closing a connection mid-
+// write surfaces as an 'error' event on a Socket with no listener — e.g. the
+// Agent SDK writing to a claude child's stdin after that child exited, or a
+// client dropping an SSE/WS stream. Node turns an unhandled 'error' event into
+// an uncaughtException and crashes the process, which would take down every
+// in-flight request. These are expected, recoverable, and not tied to any one
+// request, so we log and keep serving. Anything that is NOT a transient socket
+// error is a genuine unknown-state crash — we re-raise it by exiting, since
+// continuing on corrupt state is worse than restarting.
+const RECOVERABLE_SOCKET_ERRORS = new Set([
+  "EPIPE",
+  "ECONNRESET",
+  "ERR_STREAM_WRITE_AFTER_END",
+  "ERR_STREAM_DESTROYED",
+]);
+process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
+  if (err && RECOVERABLE_SOCKET_ERRORS.has(err.code ?? "")) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[uncaughtException] ignoring transient socket error ${err.code}: ${err.message}`
+    );
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.error(
+    `[uncaughtException] fatal: ${err?.stack ?? String(err)} — exiting`
+  );
+  process.exit(1);
+});
+
 async function bootstrap() {
   // C4: fail closed on a weak/empty/placeholder INTERNAL_JWT_SECRET before
   // doing any work. In production this exits; outside it warns loudly.

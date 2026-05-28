@@ -19,6 +19,7 @@ export type ContainerStatus =
   | "stopped"
   | "starting"
   | "running"
+  | "partial"
   | "stopping"
   | "building"
   | "error";

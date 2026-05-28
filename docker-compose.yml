@@ -154,6 +154,11 @@ services:
       # Persist `code tunnel` per-user auth dirs across redeploys so users
       # don't have to re-run the device-code login every time.
       - code-tunnel-data:/var/lib/withvibe/code-tunnel
+      # Persist the Agent SDK chat transcripts (CLAUDE_CONFIG_DIR) so multi-turn
+      # conversation memory survives api redeploys/recreates. The image
+      # pre-creates this dir owned by `claude` so the volume initializes with the
+      # right ownership (see apps/api/Dockerfile).
+      - claude-home:/home/claude/.claude
     extra_hosts:
       # So spawned sidecars resolving host.docker.internal hit the host
       # gateway on Linux too (Docker Desktop wires this automatically on
@@ -188,6 +193,7 @@ services:
 volumes:
   postgres-data:
   code-tunnel-data:
+  claude-home:
 
 networks:
   withvibe:
