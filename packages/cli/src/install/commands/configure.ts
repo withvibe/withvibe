@@ -15,7 +15,11 @@ import { setTraefik, TRAEFIK_BYOCERT_DYNAMIC } from "../compose-rewriter.js";
 import { readState, writeState, type InstallState } from "../state.js";
 import { validateAnthropicKey } from "../anthropic-validate.js";
 import { randomSecret } from "../secrets.js";
-import { buildAllImages, pullAllImages } from "../build-images.js";
+import {
+  buildAllImages,
+  pullAllImages,
+  readBuildArgContext,
+} from "../build-images.js";
 
 export type ConfigureArgs = { installDir?: string };
 
@@ -289,7 +293,12 @@ async function toggleSidecar(
   // Re-enabling: make sure the image is present.
   const featureFlags = state.features;
   if (state.mode === "from-source" && state.source) {
-    await buildAllImages({ repoPath: state.source.repoPath, features: featureFlags });
+    const buildArgContext = await readBuildArgContext(state.installDir);
+    await buildAllImages({
+      repoPath: state.source.repoPath,
+      features: featureFlags,
+      buildArgContext,
+    });
   } else if (state.mode === "from-registry" && state.registry) {
     await pullAllImages({
       namespace: state.registry.namespace,
@@ -475,8 +484,9 @@ async function configureTunnel(installDir: string): Promise<void> {
   });
   log.ok("Tunnel customization updated.");
   log.dim(
-    "Restart the api with `withvibe restart` so the apt step runs; new tunnel " +
-      "sessions pick up the extension list automatically."
+    "These values are baked into the withvibe-code-tunnel image at build " +
+      "time. Rebuild + restart to apply: `withvibe upgrade` (from-source) or " +
+      "rebuild + re-push your registry image (from-registry/bundle)."
   );
 }
 

@@ -5,7 +5,11 @@ import prompts from "prompts";
 import { run } from "../../exec.js";
 import { compose, readPublicUrls, waitForUrl } from "../compose.js";
 import { composePath, envPath } from "../paths.js";
-import { buildAllImages, pullAllImages } from "../build-images.js";
+import {
+  buildAllImages,
+  pullAllImages,
+  readBuildArgContext,
+} from "../build-images.js";
 import { log } from "../log.js";
 import { DEFAULT_INSTALL_DIR, expandHome } from "../paths.js";
 import { readState } from "../state.js";
@@ -50,7 +54,12 @@ export async function runUpgrade(args: UpgradeArgs): Promise<void> {
         log.fail("from-source upgrade needs --repo-path or a saved source path.");
         process.exit(1);
       }
-      await buildAllImages({ repoPath, features: state.features });
+      const buildArgContext = await readBuildArgContext(installDir);
+      await buildAllImages({
+        repoPath,
+        features: state.features,
+        buildArgContext,
+      });
     } else if (mode === "from-bundle") {
       const bundlePath = args.bundlePath ?? state.bundle?.bundlePath;
       if (!bundlePath) {

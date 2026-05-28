@@ -3,6 +3,7 @@
 // services. If you rename anything here, also update:
 //   - apps/api/src/runner/claude-runner.service.ts (CLAUDE_RUNNER_IMAGE)
 //   - apps/api/src/docker/code-server.service.ts (CODE_SERVER_IMAGE)
+//   - apps/api/src/docker/code-tunnel-sidecar.service.ts (CODE_TUNNEL_IMAGE)
 //   - apps/api/src/docker/browser-sidecar.service.ts (QA_BROWSER_IMAGE)
 //
 // Both compose (api/web) and the api-side sidecar spawners resolve the
@@ -21,6 +22,17 @@ export type ImageSpec = {
   feature?: "qaBrowser" | "codeServer";
   // Display label for logs.
   label: string;
+  // Build args passed to `docker build --build-arg`. Resolved at build time
+  // from the install state's tunnel customization (so apt packages and
+  // extensions are baked into the image, not installed at entrypoint).
+  buildArgs?: (state: BuildArgContext) => Record<string, string>;
+};
+
+// Inputs available when computing per-image build args. Sourced from the
+// install state — keeps build-args declarative + decoupled from CLI flags.
+export type BuildArgContext = {
+  codeTunnelAptPackages?: string;
+  codeTunnelExtensions?: string;
 };
 
 // The 5 images that make up the stack:
@@ -51,6 +63,19 @@ export const STACK_IMAGES: ImageSpec[] = [
     contextDir: "apps/api/code-server-image",
     feature: "codeServer",
     label: "code-server",
+  },
+  {
+    localName: "withvibe-code-tunnel:latest",
+    contextDir: "apps/api/code-tunnel-image",
+    label: "code-tunnel",
+    buildArgs: (ctx) => {
+      const args: Record<string, string> = {};
+      if (ctx.codeTunnelAptPackages)
+        args.CODE_TUNNEL_APT_PACKAGES = ctx.codeTunnelAptPackages;
+      if (ctx.codeTunnelExtensions)
+        args.CODE_TUNNEL_EXTENSIONS = ctx.codeTunnelExtensions;
+      return args;
+    },
   },
   {
     localName: "withvibe-qa-browser:latest",

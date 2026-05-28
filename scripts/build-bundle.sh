@@ -5,7 +5,8 @@
 #
 # Output: dist/withvibe-deploy-<version>.tar.gz containing:
 #   - images.tar          docker images: api, web, postgres, traefik,
-#                                        claude-runner, code-server, qa-browser
+#                                        claude-runner, code-server,
+#                                        code-tunnel, qa-browser
 #                         (matches `withvibe init` default preset)
 #   - docker-compose.yml  copied from repo root
 #   - .env.example        copied from repo root
@@ -45,7 +46,19 @@ API_IMAGE="withvibe/api:${VERSION}"
 WEB_IMAGE="withvibe/web:${VERSION}"
 RUNNER_IMAGE="withvibe-claude-runner:${VERSION}"
 CODE_SERVER_IMAGE="withvibe-code-server:${VERSION}"
+CODE_TUNNEL_IMAGE="withvibe-code-tunnel:${VERSION}"
 QA_BROWSER_IMAGE="withvibe-qa-browser:${VERSION}"
+
+# Operator-supplied tunnel customization is baked into the code-tunnel image
+# at build time (extensions + apt packages). Read from the host env so the
+# same vars that drive `withvibe configure` drive the bundle build.
+CODE_TUNNEL_APT_PACKAGES="${CODE_TUNNEL_APT_PACKAGES:-}"
+CODE_TUNNEL_EXTENSIONS="${CODE_TUNNEL_EXTENSIONS:-}"
+CODE_TUNNEL_BUILD_ARGS=()
+[ -n "$CODE_TUNNEL_APT_PACKAGES" ] && \
+  CODE_TUNNEL_BUILD_ARGS+=(--build-arg "CODE_TUNNEL_APT_PACKAGES=$CODE_TUNNEL_APT_PACKAGES")
+[ -n "$CODE_TUNNEL_EXTENSIONS" ] && \
+  CODE_TUNNEL_BUILD_ARGS+=(--build-arg "CODE_TUNNEL_EXTENSIONS=$CODE_TUNNEL_EXTENSIONS")
 
 OUT_DIR="dist/withvibe-deploy-${VERSION}"
 TARBALL="dist/withvibe-deploy-${VERSION}.tar.gz"
@@ -107,10 +120,15 @@ if [ "$SKIP_SIDECARS" != "1" ]; then
   echo "==> Building $CODE_SERVER_IMAGE"
   docker build ${PLATFORM_FLAG[@]+"${PLATFORM_FLAG[@]}"} -t "$CODE_SERVER_IMAGE" apps/api/code-server-image
 
+  echo "==> Building $CODE_TUNNEL_IMAGE"
+  docker build ${PLATFORM_FLAG[@]+"${PLATFORM_FLAG[@]}"} \
+    ${CODE_TUNNEL_BUILD_ARGS[@]+"${CODE_TUNNEL_BUILD_ARGS[@]}"} \
+    -t "$CODE_TUNNEL_IMAGE" apps/api/code-tunnel-image
+
   echo "==> Building $QA_BROWSER_IMAGE"
   docker build ${PLATFORM_FLAG[@]+"${PLATFORM_FLAG[@]}"} -t "$QA_BROWSER_IMAGE" apps/api/qa-browser-image
 
-  SIDECAR_TAGS=("$RUNNER_IMAGE" "$CODE_SERVER_IMAGE" "$QA_BROWSER_IMAGE")
+  SIDECAR_TAGS=("$RUNNER_IMAGE" "$CODE_SERVER_IMAGE" "$CODE_TUNNEL_IMAGE" "$QA_BROWSER_IMAGE")
 fi
 
 echo "==> Pulling $PG_IMAGE (so the bundle is self-contained)"
@@ -157,9 +175,9 @@ cat > "$OUT_DIR/INSTALL.md" <<EOF
 # withvibe — install on this host
 
 Prereqs: Docker 24+ with the compose plugin. The bundle ships api/web/postgres,
-Traefik, and the three sidecar images the api spawns dynamically
-(claude-runner, code-server, qa-browser) — matching the \`withvibe init\`
-default preset.
+Traefik, and the four sidecar images the api spawns dynamically
+(claude-runner, code-server, code-tunnel, qa-browser) — matching the
+\`withvibe init\` default preset.
 
 ## Recommended: guided install
 Use the CLI (Node 20+ required):

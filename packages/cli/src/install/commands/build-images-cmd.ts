@@ -4,6 +4,7 @@ import {
   buildAllImages,
   loadBundleImages,
   pullAllImages,
+  readBuildArgContext,
 } from "../build-images.js";
 import { log } from "../log.js";
 import { DEFAULT_INSTALL_DIR, expandHome } from "../paths.js";
@@ -59,7 +60,8 @@ export async function runBuildImages(args: BuildImagesArgs): Promise<void> {
       process.exit(1);
     }
     await assertDir(repoPath, "Source tree");
-    await buildAllImages({ repoPath, features });
+    const buildArgContext = await readBuildArgContext(installDir);
+    await buildAllImages({ repoPath, features, buildArgContext });
   } else if (mode === "from-bundle") {
     if (!bundlePath) {
       log.fail("from-bundle requires the bundle path. Pass --bundle-path.");

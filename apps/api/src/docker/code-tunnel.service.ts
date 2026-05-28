@@ -1,36 +1,59 @@
 import { Injectable, OnModuleDestroy } from "@nestjs/common";
 import { execFile, spawn, type ChildProcess } from "child_process";
 import { promisify } from "util";
-import { mkdir } from "fs/promises";
+import { existsSync } from "fs";
 import path from "path";
-import os from "os";
 import { PrismaService } from "../prisma/prisma.service";
 import { CodeWorkspaceService } from "../env-clones/code-workspace.service";
+import { resolveRepoBaseDir } from "../common/repo-base-dir";
+import { composeProjectName } from "./compose-naming";
+import { attachToWithvibe } from "./sidecar-net";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
 /**
- * Per-(env, user) `code tunnel` lifecycle for the desktop VS Code path.
+ * Per-USER `code tunnel` sidecar. Replaces the previous in-api spawn — the
+ * old path ran `code tunnel` directly inside the api container, which had
+ * the api's docker.sock mount and bind-mount of every workspace's clones,
+ * giving the tunnel's terminal effective root on the host.
  *
- * Tunnels run as long-lived child processes on the API host (NOT in a
- * container — `code` needs direct filesystem access to the env's clone
- * dirs, and the tunnel server hosts the Claude Code extension on the API
- * host, not in the user's local VS Code).
+ * This service spawns ONE container per user (not per env) from the
+ * `withvibe-code-tunnel` image:
+ *   - non-root `coder` user (uid 1500), no docker socket, no host access
+ *   - bind-mount: REPO_BASE_DIR → /workspace (every env the user can reach
+ *     today, since per-user-per-env perms don't exist yet; future spawner
+ *     will narrow to authorized envs without touching the image)
+ *   - per-user named volume: code-tunnel-user-<suffix> → /home/coder
+ *     (extensions, .claude config, MS device-code auth — persists across
+ *     container restarts and image upgrades; reused for every env this user
+ *     opens so they don't reinstall plugins per env)
+ *   - lazy `docker network connect` to each env's compose network as the
+ *     user opens envs; disconnect before `compose down` (see stopAllForEnv)
  *
- * Per-user auth: each user gets their own `--cli-data-dir` so their
- * Microsoft/GitHub auth token is independent. The dir lives on disk under
- * `<TUNNEL_DATA_DIR>/<userId>/` and survives Nest restarts — that's the
- * persistence the user requested ("don't re-prompt every env").
- *
- * Tunnel name: `wv-<envSuffix>-<userSuffix>` so it's unique per (env, user)
- * but stable, and short enough for Microsoft's tunnel-name limits.
+ * Tunnel name is per-user (`wv-u-<suffix>`), so opening multiple envs uses
+ * the same MS tunnel and the same in-container tunnel server — but the
+ * vscode://...?windowId=_blank URI opens a fresh window per env.
  */
-type TunnelHandle = {
-  child: ChildProcess;
-  tunnelName: string;
-  startedAt: number;
-};
+
+const DEFAULT_IMAGE = `withvibe-code-tunnel:${process.env.WITHVIBE_VERSION || "latest"}`;
+
+function preferredImage(): string {
+  return process.env.CODE_TUNNEL_IMAGE?.trim() || DEFAULT_IMAGE;
+}
+
+// Bind-mount target inside the sidecar. Env clones live at
+// /workspace/<workspaceId>/clones/<envId>/<repoName>.
+const WORKSPACE_MOUNT_TARGET = "/workspace";
+
+// Where the per-user volume mounts. Everything under here is the user's
+// persistent IDE state.
+const USER_HOME_MOUNT = "/home/coder";
+const CLI_DATA_DIR = `${USER_HOME_MOUNT}/.vscode-cli`;
+
+// Max time we'll wait for `code tunnel` to print its ready line before
+// giving up. First start is slow on first connect (server download).
+const SIDECAR_READY_TIMEOUT_MS = 90_000;
 
 type StartOk = {
   ok: true;
@@ -51,17 +74,27 @@ type StartErr = {
   error: string;
 };
 
+type PendingLogin = {
+  containerName: string;
+  url: string;
+  code: string;
+  startedAt: number;
+};
+
 @Injectable()
 export class CodeTunnelService implements OnModuleDestroy {
-  // Key: `<userId>:<envId>`. Cleared on Nest exit; tunnels then orphan and
-  // can be re-adopted by the same `--name` on next start.
-  private readonly tunnels = new Map<string, TunnelHandle>();
-  // Active device-code login attempts, keyed by userId. Stops us from
-  // spawning multiple `code tunnel user login` for the same user.
-  private readonly pendingLogins = new Map<
-    string,
-    { url: string; code: string; child: ChildProcess; startedAt: number }
-  >();
+  // In-memory cache of (userId → parsed URL+code) so the web UI doesn't have
+  // to re-parse container logs on every poll. Authoritative state lives on
+  // the host docker daemon — the login container has a stable per-user name
+  // (see loginContainerName) so we can re-find it after an api restart
+  // wipes this map (critical in dev where `pnpm` hot-reloads on every save
+  // and would otherwise orphan the user's in-flight device-code flow).
+  private readonly pendingLogins = new Map<string, PendingLogin>();
+
+  // In-flight image build (so two concurrent "Open in VS Code" clicks share
+  // one build instead of racing two `docker build` invocations on a fresh
+  // dev box). Mirrors the same pattern in CodeServerService.resolveImage.
+  private buildInFlight: Promise<string> | null = null;
 
   constructor(
     @InjectPinoLogger(CodeTunnelService.name)
@@ -70,21 +103,12 @@ export class CodeTunnelService implements OnModuleDestroy {
     private readonly codeWorkspace: CodeWorkspaceService
   ) {}
 
-  onModuleDestroy() {
-    for (const handle of this.tunnels.values()) {
-      try {
-        handle.child.kill("SIGTERM");
-      } catch {
-        // best-effort
-      }
-    }
-    for (const login of this.pendingLogins.values()) {
-      try {
-        login.child.kill("SIGTERM");
-      } catch {
-        // best-effort
-      }
-    }
+  async onModuleDestroy() {
+    // Intentionally NO-OP: long-lived tunnel sidecars AND in-flight login
+    // containers are deliberately left running so a user's IDE session and
+    // device-code flow survive api restarts (common in dev with hot reload).
+    // The pendingLogins in-memory cache is reseeded from `docker ps` on
+    // the next start() call (see findRunningLogin).
   }
 
   // ------ public API -------------------------------------------------------
@@ -95,61 +119,23 @@ export class CodeTunnelService implements OnModuleDestroy {
   ): Promise<StartOk | StartNeedsAuth | StartErr> {
     const env = await this.prisma.client.env.findUnique({
       where: { id: envId },
-      select: {
-        id: true,
-        title: true,
-        workspaceId: true,
-        sandboxBypass: true,
-        workspace: { select: { sandboxBypass: true } },
-      },
+      select: { id: true, title: true, workspaceId: true },
     });
     if (!env) return { ok: false, status: "error", error: "Env not found" };
 
-    const codeBin = await this.resolveCodeBin();
-    if (!codeBin) {
-      return {
-        ok: false,
-        status: "error",
-        error:
-          "The `code` CLI wasn't found on the API host. Install VS Code (which ships the `code` CLI), or set CODE_CLI_PATH in the API env to point at it (e.g. /Applications/Visual Studio Code.app/Contents/Resources/app/bin/code).",
-      };
-    }
+    const volumeName = this.userVolumeName(userId);
+    const containerName = this.userContainerName(userId);
+    const tunnelName = this.userTunnelName(userId);
 
-    // Reuse a live tunnel if there is one.
-    const key = this.key(userId, envId);
-    const existing = this.tunnels.get(key);
-    if (existing && !existing.child.killed && existing.child.exitCode === null) {
-      return {
-        ok: true,
-        status: "running",
-        tunnelName: existing.tunnelName,
-        vscodeUri: this.vscodeUri(
-          existing.tunnelName,
-          env.workspaceId,
-          env.id,
-          env.title
-        ),
-        vscodeDevUrl: this.vscodeDevUrl(
-          existing.tunnelName,
-          env.workspaceId,
-          env.id,
-          env.title
-        ),
-      };
-    }
+    await this.ensureUserVolume(volumeName);
 
-    // Auth check. If logged out, kick off device-code login and return the
-    // URL+code for the web UI to surface.
-    const dataDir = await this.ensureUserDataDir(userId);
-    const authed = await this.checkAuth(codeBin, dataDir);
-    if (!authed) {
-      const login = await this.beginLogin(codeBin, userId, dataDir);
-      if (!login) {
+    if (!(await this.checkAuth(userId, volumeName))) {
+      const login = await this.beginLogin(userId, volumeName);
+      if (!login.ok) {
         return {
           ok: false,
           status: "error",
-          error:
-            "Failed to start the tunnel auth flow. Check the API logs for the `code tunnel user login` output.",
+          error: login.error,
         };
       }
       return {
@@ -160,156 +146,120 @@ export class CodeTunnelService implements OnModuleDestroy {
       };
     }
 
-    // Authed → spawn the tunnel.
     await this.codeWorkspace.writeWorkspaceFiles(envId);
-    const envDir = this.codeWorkspace.envDir(env.workspaceId, env.id);
-    const tunnelName = this.tunnelName(env.id, userId);
 
-    // Pre-install extensions into the tunnel server's user data dir so they
-    // are present from the first connection. `code --install-extension` is
-    // idempotent — re-running for an already-installed extension is a no-op.
-    await this.installDefaultExtensions(codeBin, dataDir);
+    const sidecar = await this.ensureSidecar(
+      userId,
+      volumeName,
+      containerName,
+      tunnelName
+    );
+    if (!sidecar.ok) return sidecar;
 
-    try {
-      const child = spawn(
-        codeBin,
-        [
-          "tunnel",
-          "--accept-server-license-terms",
-          "--name",
-          tunnelName,
-          "--cli-data-dir",
-          dataDir,
-        ],
-        {
-          cwd: envDir,
-          stdio: ["ignore", "pipe", "pipe"],
-          detached: false,
-          // The tunnel server hosts the Claude Code extension, which inherits
-          // this env. The API host runs as root, so opening a session in
-          // Bypass Permissions mode spawns `claude
-          // --dangerously-skip-permissions`, which aborts as root unless
-          // IS_SANDBOX=1 (Claude Code's documented escape hatch for
-          // sandboxed/containerized hosts). Whether that's enabled is
-          // resolved per-env → per-workspace → deployment default; see
-          // resolveSandboxEnv.
-          env: this.resolveSandboxEnv(
-            env.sandboxBypass,
-            env.workspace.sandboxBypass
-          ),
-        }
+    // Connect the user's sidecar to this env's compose network so the
+    // tunnel's terminal can dial env services by their compose hostname.
+    const project = composeProjectName(envId);
+    const envNetwork = await this.findEnvNetwork(project);
+    if (envNetwork) {
+      await this.connectNetwork(envNetwork, containerName);
+    } else {
+      this.logger.warn(
+        `Env ${envId}: compose network not found (project=${project}). The tunnel will open, but env services won't be reachable from the terminal until the env is started.`
       );
-
-      // Wait for the tunnel to actually be reachable before returning the
-      // vscode:// URI. `code tunnel` prints "Open this link in your browser
-      // https://vscode.dev/tunnel/<name>" once Microsoft has registered the
-      // tunnel name; before that, the local VS Code's "Connecting to ..."
-      // spinner hangs forever because the name isn't resolvable yet.
-      // First-run is slower (downloads the VS Code server, ~30-60s).
-      const ready = new Promise<{ ok: true } | { ok: false; reason: string }>(
-        (resolve) => {
-          let settled = false;
-          const settle = (r: { ok: true } | { ok: false; reason: string }) => {
-            if (settled) return;
-            settled = true;
-            resolve(r);
-          };
-          const onChunk = (b: Buffer) => {
-            const text = b.toString();
-            this.logger.info(`[tunnel ${tunnelName}] ${text.trim()}`);
-            if (
-              /Open this link in your browser/i.test(text) ||
-              /vscode\.dev\/tunnel\//i.test(text) ||
-              /Connected to an existing tunnel process/i.test(text)
-            ) {
-              settle({ ok: true });
-            }
-          };
-          child.stdout?.on("data", onChunk);
-          child.stderr?.on("data", onChunk);
-          child.on("exit", (code, signal) => {
-            this.logger.info(
-              `Tunnel ${tunnelName} exited (code=${code} signal=${signal})`
-            );
-            this.tunnels.delete(key);
-            settle({
-              ok: false,
-              reason: `code tunnel exited (code=${code} signal=${signal}) before becoming ready`,
-            });
-          });
-          // First-run includes a server download, so give it generous time.
-          setTimeout(() => {
-            settle({
-              ok: false,
-              reason:
-                "Tunnel did not become ready within 90s. Check API logs for `[tunnel " +
-                tunnelName +
-                "]` lines.",
-            });
-          }, 90_000);
-        }
-      );
-
-      this.tunnels.set(key, {
-        child,
-        tunnelName,
-        startedAt: Date.now(),
-      });
-
-      const result = await ready;
-      if (!result.ok) {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // best-effort
-        }
-        this.tunnels.delete(key);
-        return { ok: false, status: "error", error: result.reason };
-      }
-
-      return {
-        ok: true,
-        status: "running",
-        tunnelName,
-        vscodeUri: this.vscodeUri(
-          tunnelName,
-          env.workspaceId,
-          env.id,
-          env.title
-        ),
-        vscodeDevUrl: this.vscodeDevUrl(
-          tunnelName,
-          env.workspaceId,
-          env.id,
-          env.title
-        ),
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { ok: false, status: "error", error: msg };
     }
+
+    return {
+      ok: true,
+      status: "running",
+      tunnelName,
+      vscodeUri: this.vscodeUri(tunnelName, env.workspaceId, env.id, env.title),
+      vscodeDevUrl: this.vscodeDevUrl(
+        tunnelName,
+        env.workspaceId,
+        env.id,
+        env.title
+      ),
+    };
   }
 
+  /**
+   * "Close this env's tunnel" from the user's perspective. The per-user
+   * sidecar stays running (it serves the user's other envs and holds their
+   * IDE state); we just unhook it from THIS env's compose network so the
+   * terminal can't reach services that the user is done with.
+   */
   async stop(userId: string, envId: string): Promise<{ ok: true }> {
-    const key = this.key(userId, envId);
-    const handle = this.tunnels.get(key);
-    if (handle) {
-      try {
-        handle.child.kill("SIGTERM");
-      } catch {
-        // best-effort
-      }
-      this.tunnels.delete(key);
+    const containerName = this.userContainerName(userId);
+    const project = composeProjectName(envId);
+    const envNetwork = await this.findEnvNetwork(project);
+    if (envNetwork) {
+      await this.disconnectNetwork(envNetwork, containerName).catch(() => {
+        // already disconnected / container gone — both fine
+      });
     }
     return { ok: true };
   }
 
-  async authStatus(
-    userId: string
-  ): Promise<{ authed: boolean; pendingLoginUrl?: string; pendingLoginCode?: string }> {
-    const codeBin = await this.resolveCodeBin();
-    const dataDir = await this.ensureUserDataDir(userId);
-    const authed = codeBin ? await this.checkAuth(codeBin, dataDir) : false;
+  /**
+   * Called by DockerService before `compose down --remove-orphans` for an
+   * env. Detaches every per-user sidecar still hooked into that env's
+   * network so the network can be removed cleanly. Sidecar containers stay
+   * up (per-user, not per-env).
+   */
+  async stopAllForEnv(envId: string): Promise<void> {
+    const project = composeProjectName(envId);
+    const network = await this.findEnvNetwork(project);
+    if (!network) return;
+    let names: string[] = [];
+    try {
+      const { stdout } = await exec(
+        "docker",
+        [
+          "network",
+          "inspect",
+          network,
+          "-f",
+          "{{range $k, $v := .Containers}}{{$v.Name}}\n{{end}}",
+        ],
+        { timeout: 10_000 }
+      );
+      names = stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.startsWith("withvibe-tunnel-"));
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      await this.disconnectNetwork(network, name).catch(() => {});
+    }
+  }
+
+  async authStatus(userId: string): Promise<{
+    authed: boolean;
+    pendingLoginUrl?: string;
+    pendingLoginCode?: string;
+  }> {
+    const volumeName = this.userVolumeName(userId);
+    const authed = (await this.volumeExists(volumeName))
+      ? await this.checkAuth(userId, volumeName)
+      : false;
+
+    // Auto-evict cached pending-login entry once auth has actually landed,
+    // OR if the login container has exited (success or failure). Without
+    // this, a successful login still surfaces stale `pendingLoginUrl/Code`
+    // to the web UI for one extra poll.
+    if (authed) {
+      this.pendingLogins.delete(userId);
+      await this.removeContainer(this.loginContainerName(userId));
+    } else {
+      const cached = this.pendingLogins.get(userId);
+      if (cached && !(await this.containerAlive(cached.containerName))) {
+        this.pendingLogins.delete(userId);
+        await this.removeContainer(cached.containerName);
+      }
+    }
+
     const pending = this.pendingLogins.get(userId);
     return {
       authed,
@@ -318,347 +268,738 @@ export class CodeTunnelService implements OnModuleDestroy {
     };
   }
 
-  /** Wipe stored auth for this user (forces a fresh login next time). */
+  /**
+   * Wipe MS tunnel auth for this user. Kills the live sidecar (so the next
+   * start() forces a fresh login + new server) and unregisters the tunnel
+   * name from Microsoft so the old name stops being resolvable from any
+   * client still holding it.
+   */
   async logout(userId: string): Promise<{ ok: true }> {
-    const dataDir = await this.ensureUserDataDir(userId);
-    const codeBin = await this.resolveCodeBin();
+    const containerName = this.userContainerName(userId);
+    const loginName = this.loginContainerName(userId);
+    const volumeName = this.userVolumeName(userId);
+    const tunnelName = this.userTunnelName(userId);
 
-    // Kill every running tunnel child for this user. Otherwise the child
-    // stays authenticated in-memory and keeps serving the local VS Code,
-    // and the next start() short-circuits on the live handle without
-    // re-checking auth — so the user never sees a fresh device-code prompt.
-    const prefix = `${userId}:`;
-    const liveTunnelNames: string[] = [];
-    for (const [key, handle] of this.tunnels) {
-      if (!key.startsWith(prefix)) continue;
-      liveTunnelNames.push(handle.tunnelName);
-      try {
-        handle.child.kill("SIGTERM");
-      } catch {
-        // best-effort
-      }
-      this.tunnels.delete(key);
-    }
+    await this.removeContainer(containerName);
+    await this.removeContainer(loginName);
+    this.pendingLogins.delete(userId);
 
-    if (codeBin) {
-      // Unregister each tunnel name from Microsoft so the old name stops
-      // being addressable from the local VS Code's cached account.
-      for (const name of liveTunnelNames) {
-        await exec(
-          codeBin,
-          ["tunnel", "unregister", "--name", name, "--cli-data-dir", dataDir],
-          { timeout: 10_000 }
-        ).catch(() => {});
-      }
-      await exec(
-        codeBin,
-        ["tunnel", "user", "logout", "--cli-data-dir", dataDir],
-        { timeout: 10_000 }
-      ).catch(() => {});
-    }
-    const pending = this.pendingLogins.get(userId);
-    if (pending) {
-      try {
-        pending.child.kill("SIGTERM");
-      } catch {
-        // best-effort
-      }
-      this.pendingLogins.delete(userId);
+    if (await this.volumeExists(volumeName)) {
+      await this.runOneShot(userId, volumeName, [
+        "tunnel",
+        "unregister",
+        "--name",
+        tunnelName,
+        "--cli-data-dir",
+        CLI_DATA_DIR,
+      ]).catch(() => {});
+      await this.runOneShot(userId, volumeName, [
+        "tunnel",
+        "user",
+        "logout",
+        "--cli-data-dir",
+        CLI_DATA_DIR,
+      ]).catch(() => {});
     }
     return { ok: true };
   }
 
-  // ------ helpers ----------------------------------------------------------
+  // ------ naming -----------------------------------------------------------
 
-  private key(userId: string, envId: string): string {
-    return `${userId}:${envId}`;
+  private userIdSuffix(userId: string): string {
+    // Docker container/volume names: lowercase, alphanumeric + dash/underscore.
+    // 12 chars of the id is enough collision-resistance with no real risk;
+    // we already namespace with `withvibe-tunnel-`.
+    return userId.toLowerCase().replace(/[^a-z0-9]/g, "").slice(-12);
+  }
+
+  private userContainerName(userId: string): string {
+    return `withvibe-tunnel-${this.userIdSuffix(userId)}`;
+  }
+
+  private loginContainerName(userId: string): string {
+    return `withvibe-tunnel-login-${this.userIdSuffix(userId)}`;
   }
 
   /**
-   * Build the env for the spawned `code tunnel` child, deciding whether the
-   * hosted Claude Code extension may run in Bypass Permissions mode as root.
+   * Stable per-user hostname passed via `--hostname` to every container we
+   * spawn. VS Code CLI's file keychain (the fallback used when no D-Bus
+   * Secret Service is available — which is always, in a container) derives
+   * its encryption key from the container's hostname. Containers with
+   * randomized hostnames can't decrypt each other's tokens, so an auth-check
+   * one-shot won't see what the login container just wrote. Pinning a
+   * stable hostname per user fixes that and keeps tokens portable across
+   * login → check → sidecar.
    *
-   * Resolution (first non-null wins): per-env override → workspace default
-   * → deployment default (the `IS_SANDBOX` env on the api container, set by
-   * docker-compose to `1` by default). When the resolved value is false we
-   * explicitly strip `IS_SANDBOX` from the inherited env so the deployment
-   * default can't leak through — Claude then runs with permission prompts
-   * (Bypass Permissions mode unavailable for that env's tunnel).
+   * RFC 1123: alphanumeric + dash, ≤ 63 chars, must not start/end with dash.
    */
-  private resolveSandboxEnv(
-    envOverride: boolean | null,
-    workspaceDefault: boolean | null
-  ): NodeJS.ProcessEnv {
-    const deploymentDefault = /^(1|true)$/i.test(
-      process.env.IS_SANDBOX ?? ""
-    );
-    const enabled = envOverride ?? workspaceDefault ?? deploymentDefault;
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    if (enabled) env.IS_SANDBOX = "1";
-    else delete env.IS_SANDBOX;
-    return env;
+  private userHostname(userId: string): string {
+    return `wv-tunnel-${this.userIdSuffix(userId)}`;
   }
 
-  private tunnelName(envId: string, userId: string): string {
-    // Microsoft tunnel names: lowercase, alphanumeric+dash, max 20 chars.
-    const env = envId.toLowerCase().replace(/[^a-z0-9]/g, "").slice(-8);
-    const user = userId.toLowerCase().replace(/[^a-z0-9]/g, "").slice(-8);
-    return `wv-${env}-${user}`;
+  private userVolumeName(userId: string): string {
+    return `code-tunnel-user-${this.userIdSuffix(userId)}`;
   }
 
-  /**
-   * `vscode://vscode-remote/tunnel+<tunnelName>/<absolute-path>` opens the
-   * user's local VS Code on the tunneled env. We point at the
-   * .code-workspace so all repos appear as a multi-root workspace.
-   */
-  private vscodeUri(
-    tunnelName: string,
-    workspaceId: string,
-    envId: string,
-    title: string
-  ): string {
-    // The tunnel exposes the API host's whole filesystem. The path in the
-    // URI must be the absolute path to the .code-workspace on that host
-    // (NOT relative to the tunnel's cwd — VS Code resolves it against `/`).
-    const envDir = this.codeWorkspace.envDir(workspaceId, envId);
-    const wsFile = this.codeWorkspace.workspaceFileName(envId, title);
-    const absPath = path.posix.join(envDir, wsFile);
-    // `windowId=_blank` forces VS Code to open a fresh window instead of
-    // reusing whatever window currently has focus.
-    return `vscode://vscode-remote/tunnel+${tunnelName}${absPath}?windowId=_blank`;
+  private userTunnelName(userId: string): string {
+    // MS tunnel name: lowercase, alphanumeric+dash, ≤20 chars.
+    return `wv-u-${this.userIdSuffix(userId)}`;
   }
 
-  /**
-   * Browser fallback: vscode.dev hosts the workbench in the page itself and
-   * authenticates via the user's browser GitHub session, sidestepping the
-   * local desktop app's Remote Tunnels client (which is the source of the
-   * 1006 / "Connecting to ..." hangs we keep seeing).
-   */
-  private vscodeDevUrl(
-    tunnelName: string,
-    workspaceId: string,
-    envId: string,
-    title: string
-  ): string {
-    const envDir = this.codeWorkspace.envDir(workspaceId, envId);
-    const wsFile = this.codeWorkspace.workspaceFileName(envId, title);
-    const absPath = path.posix.join(envDir, wsFile);
-    return `https://vscode.dev/tunnel/${tunnelName}${absPath}`;
-  }
+  // ------ volume / auth ----------------------------------------------------
 
-  private tunnelDataRoot(): string {
-    return (
-      process.env.CODE_TUNNEL_DATA_DIR ||
-      path.join(os.homedir(), ".withvibe", "code-tunnel")
-    );
-  }
-
-  private async ensureUserDataDir(userId: string): Promise<string> {
-    const dir = path.join(this.tunnelDataRoot(), userId);
-    await mkdir(dir, { recursive: true });
-    return dir;
-  }
-
-  private cachedCodeBin: string | null = null;
-
-  /**
-   * Resolve the absolute path to the `code` CLI. The Nest process often
-   * inherits a non-login PATH that doesn't include VS Code's shim, so just
-   * trying `code` against $PATH fails. Order:
-   *   1. CODE_CLI_PATH env override
-   *   2. Standard macOS install paths (VS Code + Cursor)
-   *   3. Standard Linux install paths
-   *   4. Fallback to bare `code` in case the shim IS on PATH
-   */
-  private async resolveCodeBin(): Promise<string | null> {
-    if (this.cachedCodeBin) {
-      const ok = await this.tryCodeBin(this.cachedCodeBin);
-      if (ok) return this.cachedCodeBin;
-      this.cachedCodeBin = null;
-    }
-    const candidates = [
-      process.env.CODE_CLI_PATH,
-      "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
-      "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code",
-      "/Applications/Cursor.app/Contents/Resources/app/bin/code",
-      "/usr/local/bin/code",
-      "/usr/bin/code",
-      "/snap/bin/code",
-      "code",
-    ].filter((p): p is string => Boolean(p));
-    for (const candidate of candidates) {
-      if (await this.tryCodeBin(candidate)) {
-        this.cachedCodeBin = candidate;
-        this.logger.info(`Using \`code\` CLI at ${candidate}`);
-        return candidate;
-      }
-    }
-    return null;
-  }
-
-  private async tryCodeBin(bin: string): Promise<boolean> {
+  private async volumeExists(name: string): Promise<boolean> {
     try {
-      await exec(bin, ["--version"], { timeout: 5_000 });
+      await exec("docker", ["volume", "inspect", name], { timeout: 5_000 });
       return true;
     } catch {
       return false;
     }
   }
 
-  private async codeCliAvailable(): Promise<boolean> {
-    return (await this.resolveCodeBin()) !== null;
+  private async ensureUserVolume(name: string): Promise<void> {
+    if (await this.volumeExists(name)) return;
+    await exec("docker", ["volume", "create", name], { timeout: 10_000 });
   }
 
   /**
-   * Extensions to install into every tunnel server. Override/extend via the
-   * CODE_TUNNEL_EXTENSIONS env var (comma-separated marketplace IDs).
+   * Run `code <args>` in a one-shot container against the user's volume.
+   * Used for auth/unregister calls that don't need the long-lived sidecar.
+   *
+   * `userId` is required so we can pin `--hostname` to the user's stable
+   * value — see userHostname for why.
    */
-  private defaultExtensionIds(): string[] {
-    const base = ["anthropic.claude-code"];
-    const extra = (process.env.CODE_TUNNEL_EXTENSIONS || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    return Array.from(new Set([...base, ...extra]));
+  private async runOneShot(
+    userId: string,
+    volumeName: string,
+    codeArgs: string[]
+  ): Promise<{ stdout: string; stderr: string }> {
+    const image = await this.resolveImage();
+    const { stdout, stderr } = await exec(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "--hostname",
+        this.userHostname(userId),
+        "-v",
+        `${volumeName}:${USER_HOME_MOUNT}`,
+        "--entrypoint",
+        "code",
+        image,
+        ...codeArgs,
+      ],
+      { timeout: 30_000 }
+    );
+    return { stdout, stderr };
   }
 
-  private async installDefaultExtensions(
-    codeBin: string,
-    dataDir: string
-  ): Promise<void> {
-    for (const id of this.defaultExtensionIds()) {
-      try {
-        await exec(
-          codeBin,
-          ["--install-extension", id, "--cli-data-dir", dataDir, "--force"],
-          { timeout: 60_000 }
-        );
-        this.logger.info(`Tunnel extension ensured: ${id}`);
-      } catch (err) {
-        this.logger.warn(
-          `Failed to pre-install tunnel extension ${id}: ${
-            err instanceof Error ? err.message : String(err)
-          }`
-        );
-      }
-    }
-  }
-
-  private async checkAuth(codeBin: string, dataDir: string): Promise<boolean> {
+  private async checkAuth(userId: string, volumeName: string): Promise<boolean> {
     try {
-      const { stdout } = await exec(
-        codeBin,
-        ["tunnel", "user", "show", "--cli-data-dir", dataDir],
-        { timeout: 10_000 }
-      );
-      // `user show` prints account info on success; on logged-out state it
-      // exits non-zero (caught below) or prints a clear "not logged in" line.
+      const { stdout } = await this.runOneShot(userId, volumeName, [
+        "tunnel",
+        "user",
+        "show",
+        "--cli-data-dir",
+        CLI_DATA_DIR,
+      ]);
       const out = stdout.toLowerCase();
       if (out.includes("not logged in") || out.includes("logged out")) {
         return false;
       }
       return stdout.trim().length > 0;
     } catch {
+      // `code tunnel user show` exits non-zero when logged out.
       return false;
     }
   }
 
   /**
-   * Spawn `code tunnel user login --provider github` and parse the device-code
-   * URL+code from its stderr. Returns the parsed credentials so the web UI
-   * can surface them. The child process keeps running until the user
-   * confirms in the browser; cleanup happens on exit.
+   * Ensure there's a `code tunnel user login` container running for this
+   * user and return its device-code URL + code. Idempotent:
+   *
+   *   - In-memory cache hit AND container still alive → return cached.
+   *   - Cache miss but a container with the stable login name is alive
+   *     (e.g. api restart after the user already got a code) → re-parse
+   *     URL/code from `docker logs` and reseed the cache.
+   *   - No container alive → start a fresh one, parse URL/code, cache.
+   *
+   * Stable name (`withvibe-tunnel-login-<suffix>`) is what lets us survive
+   * api restarts mid-flow — critical in dev where hot reload would
+   * otherwise orphan the user's device-code attempt.
    */
   private async beginLogin(
-    codeBin: string,
     userId: string,
-    dataDir: string
-  ): Promise<{ url: string; code: string } | null> {
-    // Reuse an in-flight login attempt instead of spawning a duplicate.
-    const existing = this.pendingLogins.get(userId);
-    if (
-      existing &&
-      !existing.child.killed &&
-      existing.child.exitCode === null
-    ) {
-      return { url: existing.url, code: existing.code };
+    volumeName: string
+  ): Promise<
+    | { ok: true; url: string; code: string }
+    | { ok: false; error: string }
+  > {
+    const containerName = this.loginContainerName(userId);
+
+    const cached = this.pendingLogins.get(userId);
+    if (cached && (await this.containerAlive(containerName))) {
+      return { ok: true, url: cached.url, code: cached.code };
+    }
+    if (cached) this.pendingLogins.delete(userId);
+
+    // Look for a still-running login container (e.g. survived an api restart
+    // because onModuleDestroy is now a no-op). Re-parse its logs so the user
+    // sees the SAME device code they're already entering on GitHub.
+    if (await this.containerAlive(containerName)) {
+      const reparsed = await this.reparseExistingLogin(containerName);
+      if (reparsed.ok) {
+        this.pendingLogins.set(userId, {
+          containerName,
+          url: reparsed.url,
+          code: reparsed.code,
+          startedAt: Date.now(),
+        });
+        return { ok: true, url: reparsed.url, code: reparsed.code };
+      }
+      // Container exists but logs don't carry the device-code info we can
+      // recognize — kill and start fresh.
+      await this.removeContainer(containerName);
+    } else {
+      // Stale exited container with the same name would block `docker run
+      // --name`. Best-effort cleanup.
+      await this.removeContainer(containerName);
     }
 
-    return new Promise((resolve) => {
-      const child = spawn(
-        codeBin,
+    try {
+      const image = await this.resolveImage();
+      await exec(
+        "docker",
         [
+          "run",
+          "-d",
+          "--name",
+          containerName,
+          "--hostname",
+          this.userHostname(userId),
+          "--label",
+          `com.withvibe.code-tunnel-login=${userId}`,
+          "-v",
+          `${volumeName}:${USER_HOME_MOUNT}`,
+          "--entrypoint",
+          "code",
+          image,
           "tunnel",
           "user",
           "login",
           "--provider",
           "github",
           "--cli-data-dir",
-          dataDir,
+          CLI_DATA_DIR,
         ],
-        { stdio: ["ignore", "pipe", "pipe"] }
+        { timeout: 15_000 }
       );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Failed to start tunnel-login container: ${msg}`);
+      return {
+        ok: false,
+        error: `Failed to start the tunnel-login container: ${msg}`,
+      };
+    }
 
+    this.logger.info(
+      `[tunnel-login ${containerName}] started; tailing logs for device code`
+    );
+    const parsed = await this.parseLoginLogs(containerName);
+    if (parsed.ok) {
+      this.pendingLogins.set(userId, {
+        containerName,
+        url: parsed.url,
+        code: parsed.code,
+        startedAt: Date.now(),
+      });
+      return { ok: true, url: parsed.url, code: parsed.code };
+    }
+
+    const dump = await this.dumpContainerLogs(containerName);
+    await this.removeContainer(containerName);
+    const reason = dump.trim()
+      ? `Login container output:\n${dump.trim()}`
+      : "Login container produced no output";
+    this.logger.warn(
+      `[tunnel-login ${containerName}] ${parsed.reason}. ${reason}`
+    );
+    return {
+      ok: false,
+      error: `${parsed.reason}. ${reason}`,
+    };
+  }
+
+  /**
+   * Re-parse device-code URL + code from a login container that was started
+   * by an earlier api process. `docker logs` (without -f) reads the full
+   * historical stream, so we get the original device-code line even if the
+   * container has been running for minutes.
+   */
+  private async reparseExistingLogin(
+    containerName: string
+  ): Promise<
+    | { ok: true; url: string; code: string }
+    | { ok: false; reason: string }
+  > {
+    const dump = await this.dumpContainerLogs(containerName);
+    if (!dump.trim()) {
+      return { ok: false, reason: "Container has produced no output yet" };
+    }
+    const urlMatch = dump.match(/https?:\/\/[^\s]+/);
+    const codeMatch = dump.match(/code\s+([A-Z0-9-]{4,})/i);
+    if (!urlMatch || !codeMatch) {
+      return {
+        ok: false,
+        reason: "Container logs don't contain a recognizable device-code line",
+      };
+    }
+    return { ok: true, url: urlMatch[0], code: codeMatch[1] };
+  }
+
+  private async dumpContainerLogs(containerId: string): Promise<string> {
+    try {
+      const { stdout, stderr } = await exec(
+        "docker",
+        ["logs", containerId],
+        { timeout: 5_000 }
+      );
+      return [stdout, stderr].filter(Boolean).join("\n");
+    } catch {
+      return "";
+    }
+  }
+
+  private parseLoginLogs(
+    containerName: string
+  ): Promise<
+    | { ok: true; url: string; code: string }
+    | { ok: false; reason: string }
+  > {
+    return new Promise((resolve) => {
       let resolved = false;
       let urlCaptured: string | null = null;
       let codeCaptured: string | null = null;
+      let child: ChildProcess | null = null;
 
-      const tryResolve = () => {
-        if (resolved || !urlCaptured || !codeCaptured) return;
+      const settle = (
+        value:
+          | { ok: true; url: string; code: string }
+          | { ok: false; reason: string }
+      ) => {
+        if (resolved) return;
         resolved = true;
-        this.pendingLogins.set(userId, {
-          url: urlCaptured,
-          code: codeCaptured,
-          child,
-          startedAt: Date.now(),
-        });
-        resolve({ url: urlCaptured, code: codeCaptured });
-      };
-
-      const onChunk = (b: Buffer) => {
-        const text = b.toString();
-        // Expected output (stderr):
-        //   "To grant access to the server, please log into ..."
-        //   "https://github.com/login/device  and use code XXXX-XXXX"
-        const urlMatch = text.match(/https?:\/\/[^\s]+/);
-        const codeMatch = text.match(/code\s+([A-Z0-9-]{4,})/i);
-        if (urlMatch) urlCaptured = urlMatch[0];
-        if (codeMatch) codeCaptured = codeMatch[1];
-        tryResolve();
-      };
-
-      child.stdout?.on("data", onChunk);
-      child.stderr?.on("data", onChunk);
-
-      child.on("exit", (code) => {
-        this.logger.info(
-          `code tunnel user login (user=${userId}) exited code=${code}`
-        );
-        this.pendingLogins.delete(userId);
-      });
-      child.on("error", (err) => {
-        this.logger.warn(
-          `code tunnel user login spawn error: ${err.message}`
-        );
-        if (!resolved) {
-          resolved = true;
-          resolve(null);
-        }
-      });
-
-      // Safety: if we never see the device code line within 15s, give up so
-      // the caller doesn't hang forever.
-      setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
+        if (child) {
           try {
             child.kill("SIGTERM");
           } catch {
             // best-effort
           }
-          resolve(null);
         }
-      }, 15_000);
+        resolve(value);
+      };
+
+      child = spawn("docker", ["logs", "-f", containerName], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const onChunk = (b: Buffer) => {
+        const text = b.toString();
+        this.logger.info(`[tunnel-login ${containerName}] ${text.trim()}`);
+        const urlMatch = text.match(/https?:\/\/[^\s]+/);
+        const codeMatch = text.match(/code\s+([A-Z0-9-]{4,})/i);
+        if (urlMatch) urlCaptured = urlMatch[0];
+        if (codeMatch) codeCaptured = codeMatch[1];
+        if (urlCaptured && codeCaptured) {
+          settle({ ok: true, url: urlCaptured, code: codeCaptured });
+        }
+      };
+      child.stdout?.on("data", onChunk);
+      child.stderr?.on("data", onChunk);
+      child.on("exit", () =>
+        settle({
+          ok: false,
+          reason:
+            "Login container exited before printing the device-code URL+code",
+        })
+      );
+      setTimeout(
+        () =>
+          settle({
+            ok: false,
+            reason:
+              "Timed out after 15s waiting for the device-code URL+code from `code tunnel user login`",
+          }),
+        15_000
+      );
     });
+  }
+
+  // ------ long-lived sidecar -----------------------------------------------
+
+  private async containerAlive(idOrName: string): Promise<boolean> {
+    try {
+      const { stdout } = await exec(
+        "docker",
+        ["inspect", "-f", "{{.State.Running}}", idOrName],
+        { timeout: 5_000 }
+      );
+      return stdout.trim() === "true";
+    } catch {
+      return false;
+    }
+  }
+
+  private async removeContainer(idOrName: string): Promise<void> {
+    await exec("docker", ["rm", "-f", idOrName], { timeout: 30_000 }).catch(
+      () => {
+        // already gone
+      }
+    );
+  }
+
+  private async ensureSidecar(
+    userId: string,
+    volumeName: string,
+    containerName: string,
+    tunnelName: string
+  ): Promise<{ ok: true } | StartErr> {
+    if (await this.containerAlive(containerName)) {
+      return { ok: true };
+    }
+    // Exists but stopped → remove so we can create fresh with current image.
+    await this.removeContainer(containerName);
+
+    // Best-effort: clear any prior Microsoft tunnel-name registration for
+    // this user's tunnel. The MS tunnel service binds a name to one
+    // machine identity at a time, so a sidecar respawn after a hostname
+    // or container-identity change (e.g. the per-user-hostname rollout)
+    // would otherwise hit `websocket error: HTTP error: 404 Not Found`
+    // when it tries to attach to a name still owned by the prior identity.
+    // `unregister` requires the same machine identity the registration
+    // used, which we now have (stable per-user hostname). Silent no-op
+    // when there's nothing to unregister, so safe to always run.
+    await this.runOneShot(userId, volumeName, [
+      "tunnel",
+      "unregister",
+      "--cli-data-dir",
+      CLI_DATA_DIR,
+    ]).catch(() => {
+      // unregister failures are non-fatal; if there's nothing to clear,
+      // the next `tunnel` call below will succeed; if there's a real
+      // conflict, `waitForTunnelReady` will surface the error.
+    });
+
+    const repoBase = resolveRepoBaseDir();
+    const image = await this.resolveImage();
+    const dockerArgs = [
+      "run",
+      "-d",
+      "--name",
+      containerName,
+      "--hostname",
+      this.userHostname(userId),
+      "--restart",
+      "unless-stopped",
+      // Safety net: VS Code Server + Claude Code extension fit comfortably
+      // under 1.5 GB; this just stops a runaway extension from being able
+      // to take down the host. Adjustable via WITHVIBE_TUNNEL_MEMORY (e.g.
+      // `2g`, `1024m`) if a workspace really does need more.
+      "--memory",
+      process.env.WITHVIBE_TUNNEL_MEMORY?.trim() || "1536m",
+      "--label",
+      `com.withvibe.code-tunnel-user=${userId}`,
+      // Env clones bind: REPO_BASE_DIR → /workspace. Today: every workspace's
+      // every env. Once per-user-per-env perms ship, this becomes a series of
+      // narrower mounts.
+      "-v",
+      `${repoBase}:${WORKSPACE_MOUNT_TARGET}`,
+      // Per-user persistent IDE state.
+      "-v",
+      `${volumeName}:${USER_HOME_MOUNT}`,
+      "-e",
+      `TUNNEL_NAME=${tunnelName}`,
+      image,
+    ];
+
+    try {
+      await exec("docker", dockerArgs, { timeout: 60_000 });
+    } catch (err) {
+      return {
+        ok: false,
+        status: "error",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    // Same trick code-server uses: join `withvibe` so a containerized api
+    // can reach the sidecar by IP (no published port here — the only
+    // consumer is `code tunnel` talking outbound to Microsoft).
+    await attachToWithvibe(containerName);
+
+    const ready = await this.waitForTunnelReady(containerName);
+    if (!ready.ok) {
+      await this.removeContainer(containerName);
+      return { ok: false, status: "error", error: ready.reason };
+    }
+    return { ok: true };
+  }
+
+  private waitForTunnelReady(
+    containerName: string
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let child: ChildProcess | null = null;
+      const settle = (r: { ok: true } | { ok: false; reason: string }) => {
+        if (settled) return;
+        settled = true;
+        if (child) {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // best-effort
+          }
+        }
+        resolve(r);
+      };
+      child = spawn("docker", ["logs", "-f", containerName], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const onChunk = (b: Buffer) => {
+        const text = b.toString();
+        this.logger.info(`[tunnel-sidecar ${containerName}] ${text.trim()}`);
+        if (
+          /Open this link in your browser/i.test(text) ||
+          /vscode\.dev\/tunnel\//i.test(text) ||
+          /Connected to an existing tunnel process/i.test(text)
+        ) {
+          settle({ ok: true });
+        }
+      };
+      child.stdout?.on("data", onChunk);
+      child.stderr?.on("data", onChunk);
+      child.on("exit", () =>
+        settle({
+          ok: false,
+          reason: `Tunnel sidecar ${containerName} exited before becoming ready`,
+        })
+      );
+      setTimeout(
+        () =>
+          settle({
+            ok: false,
+            reason: `Tunnel sidecar ${containerName} did not become ready within ${SIDECAR_READY_TIMEOUT_MS / 1000}s. Check api logs for [tunnel-sidecar ${containerName}] lines.`,
+          }),
+        SIDECAR_READY_TIMEOUT_MS
+      );
+    });
+  }
+
+  // ------ networking -------------------------------------------------------
+
+  private async findEnvNetwork(project: string): Promise<string | null> {
+    try {
+      const { stdout } = await exec(
+        "docker",
+        [
+          "network",
+          "ls",
+          "--filter",
+          `label=com.docker.compose.project=${project}`,
+          "--format",
+          "{{.Name}}",
+        ],
+        { timeout: 10_000 }
+      );
+      const names = stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (!names.length) return null;
+      // Prefer the `_default` net if compose created multiple.
+      const preferred = names.find((n) => n.endsWith("_default"));
+      return preferred || names[0];
+    } catch {
+      return null;
+    }
+  }
+
+  private async connectNetwork(
+    network: string,
+    container: string
+  ): Promise<void> {
+    try {
+      await exec("docker", ["network", "connect", network, container], {
+        timeout: 10_000,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        /already exists in network/i.test(msg) ||
+        /endpoint with name .* already exists/i.test(msg)
+      ) {
+        return;
+      }
+      this.logger.warn(
+        `Failed to connect ${container} to ${network}: ${msg}`
+      );
+    }
+  }
+
+  private async disconnectNetwork(
+    network: string,
+    container: string
+  ): Promise<void> {
+    await exec("docker", ["network", "disconnect", network, container], {
+      timeout: 10_000,
+    });
+  }
+
+  // ------ image resolution -------------------------------------------------
+
+  /**
+   * Resolve the image tag to use, auto-building from the in-tree Dockerfile
+   * if it's missing locally. Same lazy-build pattern CodeServerService uses
+   * — no manual `docker build` needed on a fresh dev box. There's no
+   * upstream fallback (this is our image), so a failed build surfaces back
+   * to the caller as an error.
+   *
+   * Build args (CODE_TUNNEL_APT_PACKAGES, CODE_TUNNEL_EXTENSIONS) are read
+   * from the api's process env on a lazy build. In a fresh dev install
+   * they're typically empty, which gives a minimal image (Claude Code
+   * extension only). For full operator customization, build via
+   * `withvibe upgrade` / `scripts/build-bundle.sh` which honor the
+   * configured values.
+   */
+  private async resolveImage(): Promise<string> {
+    const preferred = preferredImage();
+    if (await this.imageExists(preferred)) return preferred;
+    const buildContext = this.findBuildContext();
+    if (!buildContext) {
+      throw new Error(
+        `Image ${preferred} not found and no build context shipped. Build manually: docker build -t ${preferred} apps/api/code-tunnel-image`
+      );
+    }
+    if (!this.buildInFlight) {
+      this.buildInFlight = this.buildImage(preferred, buildContext).finally(
+        () => {
+          this.buildInFlight = null;
+        }
+      );
+    }
+    return this.buildInFlight;
+  }
+
+  private async imageExists(tag: string): Promise<boolean> {
+    try {
+      await exec("docker", ["image", "inspect", tag], { timeout: 5_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Walk up from this file looking for `code-tunnel-image/Dockerfile`. Works
+   * both in dev (`apps/api/src/docker/...`) and in a built dist
+   * (`apps/api/dist/...`). Returns null if the build context isn't shipped
+   * with the deployment (e.g. a from-registry install that lost the source).
+   */
+  private findBuildContext(): string | null {
+    let dir = __dirname;
+    for (let i = 0; i < 8; i++) {
+      const candidate = path.join(dir, "code-tunnel-image", "Dockerfile");
+      if (existsSync(candidate)) return path.dirname(candidate);
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return null;
+  }
+
+  private buildImage(tag: string, context: string): Promise<string> {
+    this.logger.info(
+      `Auto-building ${tag} from ${context} — this happens once per dev box and may take a couple minutes.`
+    );
+    const args = ["build", "-t", tag];
+    const apt = process.env.CODE_TUNNEL_APT_PACKAGES?.trim();
+    const exts = process.env.CODE_TUNNEL_EXTENSIONS?.trim();
+    if (apt) args.push("--build-arg", `CODE_TUNNEL_APT_PACKAGES=${apt}`);
+    if (exts) args.push("--build-arg", `CODE_TUNNEL_EXTENSIONS=${exts}`);
+    args.push(context);
+
+    return new Promise((resolve, reject) => {
+      const child = spawn("docker", args, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      child.stdout?.on("data", (b: Buffer) =>
+        this.logger.debug(`[tunnel-build ${tag}] ${b.toString().trim()}`)
+      );
+      child.stderr?.on("data", (b: Buffer) =>
+        this.logger.debug(`[tunnel-build ${tag}] ${b.toString().trim()}`)
+      );
+      // First build downloads the VS Code CLI, Node, the Claude Code
+      // extension, and (optionally) extras — give it 10 min on a cold box.
+      const timer = setTimeout(
+        () => {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // best-effort
+          }
+        },
+        10 * 60 * 1000
+      );
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        if (code === 0) {
+          this.logger.info(`Built ${tag} successfully.`);
+          resolve(tag);
+        } else {
+          reject(new Error(`docker build exited with code ${code}`));
+        }
+      });
+    });
+  }
+
+  // ------ URIs -------------------------------------------------------------
+
+  private vscodeUri(
+    tunnelName: string,
+    workspaceId: string,
+    envId: string,
+    title: string
+  ): string {
+    const wsFile = this.codeWorkspace.workspaceFileName(envId, title);
+    const absPath = path.posix.join(
+      WORKSPACE_MOUNT_TARGET,
+      workspaceId,
+      "clones",
+      envId,
+      wsFile
+    );
+    return `vscode://vscode-remote/tunnel+${tunnelName}${absPath}?windowId=_blank`;
+  }
+
+  private vscodeDevUrl(
+    tunnelName: string,
+    workspaceId: string,
+    envId: string,
+    title: string
+  ): string {
+    const wsFile = this.codeWorkspace.workspaceFileName(envId, title);
+    const absPath = path.posix.join(
+      WORKSPACE_MOUNT_TARGET,
+      workspaceId,
+      "clones",
+      envId,
+      wsFile
+    );
+    return `https://vscode.dev/tunnel/${tunnelName}${absPath}`;
   }
 }

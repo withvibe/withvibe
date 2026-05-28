@@ -50,6 +50,24 @@ const LOGS_SHAPE = {
     ),
 };
 
+const SERVICE_LOGS_SHAPE = {
+  service: z
+    .string()
+    .min(1)
+    .describe(
+      "The compose service name (e.g. 'api', 'frontend', 'db'). If you don't know which services exist, call `get_env_status` first — it lists every container with its service name."
+    ),
+  tail: z
+    .number()
+    .int()
+    .min(10)
+    .max(5000)
+    .optional()
+    .describe(
+      "Number of trailing log lines to return. Defaults to 200. Bump up if you're hunting an error and need more context."
+    ),
+};
+
 const DESCRIPTIONS = {
   start_env:
     "Start this env's docker-compose stack. Same action as the user clicking the **Start** button. Returns immediately — the actual start runs in the background and writes to the env's log buffer. Poll `get_env_status` to see when it's running or errored, and call `get_env_logs` to read what happened. Use this instead of running `docker compose up` via Bash — running compose directly will collide on host ports with the user's Start button.",
@@ -62,7 +80,9 @@ const DESCRIPTIONS = {
   wait_for_env_status:
     "Block server-side until this env's lifecycle status transitions into one of the target values (default: `running` or `error`), or until a timeout elapses. Use this after `start_env` / `rebuild_env` instead of busy-polling `get_env_status`.\n\nKeep `timeoutSec` modest (60–120s) and call this tool repeatedly — each call is one 'poll chunk'. Between calls, emit a short text update to the user (e.g. 'still building, 2 min elapsed') so they see progress. This is how you cover long builds (mvn package, npm install on cold start) inside a single chat turn.\n\n**There is no scheduler.** You cannot 'come back later' — everything must happen in this turn. If the status is still transitional after many polls, tell the user and stop; they can re-ask later.",
   get_env_logs:
-    "Read the tail of this env's compose log buffer — the same logs streaming into the UI log panel right now. Use this after start_env / rebuild_env to see what actually happened, and to diagnose failures before calling rebuild_env again. Not useful for application-level logs once the stack is steady-state; for that, the user's UI log panel (or a fresh start) is the right tool.",
+    "Read the tail of this env's compose **lifecycle** log buffer — the stdout/stderr captured during start_env / rebuild_env (the same stream the UI log panel shows while the stack is coming up). Use this to diagnose build/start failures before calling rebuild_env again. **For per-service application logs once the stack is running, use `get_env_service_logs` instead** — this buffer goes stale at steady state.",
+  get_env_service_logs:
+    "Read the tail of stdout+stderr from a single compose service's container — application/runtime logs. Use this once the stack is up to see what the app is actually doing: errors, request traces, debug output. Works for both running and stopped/crashed containers, so it's also the right tool to diagnose a service that exited. **Different from `get_env_logs`** (which only captures compose lifecycle/build output). Call `get_env_status` first if you don't know the service names.",
 };
 
 /**
@@ -272,6 +292,46 @@ export class DockerMcpService {
       },
     };
 
+    const getEnvServiceLogs: McpToolDescriptor<typeof SERVICE_LOGS_SHAPE> = {
+      name: "get_env_service_logs",
+      description: DESCRIPTIONS.get_env_service_logs,
+      inputShape: SERVICE_LOGS_SHAPE,
+      async handler(raw) {
+        const input = z.object(SERVICE_LOGS_SHAPE).parse(raw);
+        const tail = input.tail ?? 200;
+        self.logger.info(
+          `[docker-mcp] get_env_service_logs(${envId}, service=${input.service}, tail=${tail})`
+        );
+        const result = await self.docker.getServiceLogs(
+          envId,
+          input.service,
+          tail
+        );
+        if (!result.ok) {
+          const hint =
+            result.knownServices.length > 0
+              ? ` Known services in this env: ${result.knownServices.join(", ")}.`
+              : ` No containers found for this env — the stack may not have been started yet. Call get_env_status.`;
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `${result.error}${hint}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        const body =
+          result.text.length > 0
+            ? result.text
+            : `(no log lines yet for service "${input.service}" — the container has produced no output, or the tail window contains only blank lines)`;
+        return {
+          content: [{ type: "text" as const, text: body }],
+        };
+      },
+    };
+
     return {
       name: "withvibe-docker",
       version: "1.0.0",
@@ -282,6 +342,7 @@ export class DockerMcpService {
         getEnvStatus,
         waitForEnvStatus,
         getEnvLogs,
+        getEnvServiceLogs,
       ],
     };
   }

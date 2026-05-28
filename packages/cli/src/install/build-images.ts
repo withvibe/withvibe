@@ -1,19 +1,45 @@
 import path from "node:path";
 import { run } from "../exec.js";
 import { log } from "./log.js";
+import { readEnvFile, type EnvMap } from "./env-file.js";
+import { envPath } from "./paths.js";
 import {
   EXTERNAL_IMAGES,
   imagesForFeatures,
   registryName,
   STACK_IMAGES,
+  type BuildArgContext,
   type ImageSpec,
 } from "./images.js";
 import type { InstallState } from "./state.js";
+
+// Derive image-build-time args from the install's .env. Centralized so all
+// build entry points (init, configure, upgrade, build-images-cmd) pass the
+// same context — keeps `withvibe-code-tunnel` reproducible from .env alone.
+export function buildArgContextFromEnv(env: EnvMap): BuildArgContext {
+  return {
+    codeTunnelAptPackages: env.CODE_TUNNEL_APT_PACKAGES || undefined,
+    codeTunnelExtensions: env.CODE_TUNNEL_EXTENSIONS || undefined,
+  };
+}
+
+export async function readBuildArgContext(
+  installDir: string
+): Promise<BuildArgContext> {
+  const env = await readEnvFile(envPath(installDir));
+  return buildArgContextFromEnv(env);
+}
 
 export type BuildOptions = {
   // Source tree root. For from-source installs, this is state.source.repoPath.
   repoPath: string;
   features: InstallState["features"];
+  // Resolved from the install's .env (see resolveBuildArgContext in
+  // build-images-cmd / upgrade / configure). Forwarded to images that
+  // declare a `buildArgs` resolver — currently `withvibe-code-tunnel`
+  // bakes CODE_TUNNEL_APT_PACKAGES + CODE_TUNNEL_EXTENSIONS into the image
+  // so first-tunnel-start doesn't pay the install cost.
+  buildArgContext?: BuildArgContext;
 };
 
 // Build every stack image enabled by the install's features, locally, in
@@ -22,14 +48,22 @@ export async function buildAllImages(opts: BuildOptions): Promise<void> {
   const images = imagesForFeatures(opts.features);
   log.header(`Building ${images.length} image(s) from source`);
   for (const img of images) {
-    await buildOne(img, opts.repoPath);
+    await buildOne(img, opts.repoPath, opts.buildArgContext ?? {});
   }
   log.ok("All images built.");
 }
 
-async function buildOne(img: ImageSpec, repoPath: string): Promise<void> {
+async function buildOne(
+  img: ImageSpec,
+  repoPath: string,
+  buildArgContext: BuildArgContext
+): Promise<void> {
   const args = ["build", "-t", img.localName];
   if (img.dockerfile) args.push("-f", path.join(repoPath, img.dockerfile));
+  const extraArgs = img.buildArgs ? img.buildArgs(buildArgContext) : {};
+  for (const [k, v] of Object.entries(extraArgs)) {
+    args.push("--build-arg", `${k}=${v}`);
+  }
   args.push(path.join(repoPath, img.contextDir));
 
   log.step(`docker ${args.join(" ")}`);

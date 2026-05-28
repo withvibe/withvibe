@@ -554,6 +554,7 @@ export class ChatContextService {
       "mcp__withvibe-docker__get_env_status",
       "mcp__withvibe-docker__wait_for_env_status",
       "mcp__withvibe-docker__get_env_logs",
+      "mcp__withvibe-docker__get_env_service_logs",
       "mcp__withvibe-external-context__render_pdf",
     ];
 
@@ -1065,7 +1066,8 @@ You have in-process MCP tools that drive the exact same lifecycle the user's Sta
 - \`rebuild_env\` — same as the Rebuild button (compose down + up --build).
 - \`wait_for_env_status\` — **blocks server-side** until status transitions to \`running\` / \`error\` (or a custom target), or a timeout elapses. Use this instead of busy-polling \`get_env_status\`.
 - \`get_env_status\` — one-shot status snapshot (use sparingly; \`wait_for_env_status\` is almost always the right tool).
-- \`get_env_logs\` — tail of the env's log buffer (the same stream the UI log panel shows the user).
+- \`get_env_logs\` — tail of the env's **lifecycle** log buffer (the same stream the UI log panel shows during start/build). Goes stale once the stack is running.
+- \`get_env_service_logs\` — tail of a **single service's** runtime stdout/stderr (e.g. \`api\`, \`frontend\`). This is the right tool for "what is the backend doing right now / why did it crash" once the stack is up. Works for both running and stopped containers. Takes a \`service\` name — call \`get_env_status\` first if you don't know it.
 
 ### CRITICAL: you have ONE turn. There is no scheduler.
 

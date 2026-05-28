@@ -18,6 +18,7 @@ import { DbViewerService } from "./db-viewer.service";
 import { BrowserSidecarService } from "./browser-sidecar.service";
 import { PlaywrightMcpService } from "./playwright-mcp.service";
 import { CodeServerService } from "./code-server.service";
+import { CodeTunnelService } from "./code-tunnel.service";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
@@ -85,7 +86,8 @@ export class DockerService {
     private readonly dbViewer: DbViewerService,
     private readonly qaBrowser: BrowserSidecarService,
     private readonly playwrightMcp: PlaywrightMcpService,
-    private readonly codeServer: CodeServerService
+    private readonly codeServer: CodeServerService,
+    private readonly codeTunnel: CodeTunnelService
   ) {}
 
   // ---------- log buffer (public API) --------------------------------------
@@ -714,6 +716,11 @@ export class DockerService {
     await this.playwrightMcp.closeForEnv(envId);
     await this.qaBrowser.stopQuiet(envId);
     await this.codeServer.stopQuiet(envId);
+    // Per-user tunnel sidecars are long-lived (one per user, shared across
+    // envs), so we don't kill them — just disconnect them from this env's
+    // compose network so it can be removed cleanly. Their other envs (and
+    // the user's IDE state) stay up.
+    await this.codeTunnel.stopAllForEnv(envId).catch(() => {});
     // Detach Traefik so the edge net has no endpoints left and can be removed
     // after compose down. Other envs have their own edge nets — unaffected.
     await this.disconnectTraefik(envId);
@@ -778,6 +785,7 @@ export class DockerService {
     await this.playwrightMcp.closeForEnv(envId);
     await this.qaBrowser.stopQuiet(envId);
     await this.codeServer.stopQuiet(envId);
+    await this.codeTunnel.stopAllForEnv(envId).catch(() => {});
     const proj = this.composeProjectName(envId);
     try {
       await this.runCompose(
@@ -1098,6 +1106,97 @@ export class DockerService {
     } catch {
       return { containers: [] };
     }
+  }
+
+  /**
+   * Read runtime stdout/stderr of a single compose service in this env. Works
+   * for both running and stopped/crashed containers (uses `docker ps -a`), so
+   * it is the right tool for diagnosing app-level errors once the stack is up.
+   * Different from getLogBufferSnapshot, which only holds the compose
+   * lifecycle/build output streamed during start/rebuild.
+   */
+  async getServiceLogs(
+    envId: string,
+    service: string,
+    tail: number
+  ): Promise<
+    | {
+        ok: true;
+        text: string;
+        service: string;
+        containerIds: string[];
+      }
+    | {
+        ok: false;
+        error: string;
+        knownServices: string[];
+      }
+  > {
+    const project = this.composeProjectName(envId);
+    let containerIds: string[] = [];
+    try {
+      const { stdout } = await exec(
+        "docker",
+        [
+          "ps",
+          "-a",
+          "--filter",
+          `label=com.docker.compose.project=${project}`,
+          "--filter",
+          `label=com.docker.compose.service=${service}`,
+          "--format",
+          "{{.ID}}",
+        ],
+        { timeout: 10_000 }
+      );
+      containerIds = stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    } catch (err) {
+      return {
+        ok: false,
+        error: `docker ps failed: ${(err as Error).message}`,
+        knownServices: [],
+      };
+    }
+    if (containerIds.length === 0) {
+      const { containers } = await this.listEnvContainers(envId);
+      const knownServices = Array.from(
+        new Set(containers.map((c) => c.service))
+      ).sort();
+      return {
+        ok: false,
+        error: `No container found for service "${service}" in env ${envId}.`,
+        knownServices,
+      };
+    }
+    const blocks: string[] = [];
+    for (const id of containerIds) {
+      try {
+        const { stdout, stderr } = await exec(
+          "docker",
+          ["logs", "--tail", String(tail), "--timestamps", id],
+          { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 }
+        );
+        const combined = this.stripAnsi((stdout || "") + (stderr || ""));
+        blocks.push(
+          containerIds.length > 1
+            ? `--- container ${id} ---\n${combined}`
+            : combined
+        );
+      } catch (err) {
+        blocks.push(
+          `--- container ${id}: failed to read logs (${(err as Error).message}) ---`
+        );
+      }
+    }
+    return {
+      ok: true,
+      text: blocks.join("\n").trimEnd(),
+      service,
+      containerIds,
+    };
   }
 
   private async refreshDetectedDatabases(
