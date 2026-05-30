@@ -122,7 +122,7 @@ export default function TeamPage(props: PageProps<"/workspaces/[id]/team">) {
               <TableRow className="border-border/60">
                 <TableHead className="w-[28%]">Member</TableHead>
                 <TableHead className="w-[10%]">Role</TableHead>
-                <TableHead className="w-[22%]">Position</TableHead>
+                <TableHead className="w-[20%]">Position</TableHead>
                 <TableHead>About</TableHead>
                 <TableHead className="w-[6%]" />
               </TableRow>
@@ -421,3 +421,4 @@ function InviteDialog({
     </Dialog>
   );
 }
+

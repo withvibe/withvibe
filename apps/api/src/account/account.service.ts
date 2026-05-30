@@ -24,7 +24,10 @@ export class AccountService {
       },
     });
     if (!user) throw new NotFoundException("User not found");
-    return user;
+    const adminMemberships = await this.prisma.client.workspaceMember.count({
+      where: { userId, role: "admin" },
+    });
+    return { ...user, isDeploymentAdmin: adminMemberships > 0 };
   }
 
   async update(

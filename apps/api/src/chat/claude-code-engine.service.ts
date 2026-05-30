@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { ClaudeRunnerService } from "../runner/claude-runner.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
+import { PluginMcpBridgeService } from "../plugins/plugin-mcp-bridge.service";
 import type { ChatContext } from "./chat-context.service";
 import type { ChatEvent } from "./chat-stream.service";
 import { friendlyAuthError } from "./chat-stream.service";
@@ -102,7 +103,8 @@ export class ClaudeCodeEngineService {
     private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly runner: ClaudeRunnerService,
-    private readonly envClones: EnvCloneService
+    private readonly envClones: EnvCloneService,
+    private readonly pluginMcp: PluginMcpBridgeService
   ) {}
 
   /**
@@ -156,9 +158,21 @@ export class ClaudeCodeEngineService {
 
     // MCP config — one HTTP entry per bridged server, all sharing the session
     // bridge token. strict-mcp-config below ensures nothing else is loaded.
+    // Plugin MCP servers are added dynamically: any enabled plugin with
+    // mcp.enabled=true that has a running instance reachable for this
+    // chat context (env-scoped: this env, workspace-scoped: this workspace,
+    // global: the single global instance) appears as an additional server.
+    const pluginServers = await this.pluginMcp.listMcpServersForContext({
+      workspaceId: context.workspaceId,
+      envId: context.envId,
+    });
+    const allServers: { name: string }[] = [
+      ...MCP_SERVER_NAMES.map((name) => ({ name })),
+      ...pluginServers.map((s) => ({ name: s.serverName })),
+    ];
     const mcpConfig = {
       mcpServers: Object.fromEntries(
-        MCP_SERVER_NAMES.map((name) => [
+        allServers.map(({ name }) => [
           name,
           {
             type: "http" as const,

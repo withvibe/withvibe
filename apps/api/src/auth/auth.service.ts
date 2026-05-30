@@ -134,6 +134,7 @@ export class AuthService {
       data: { email: normalized, name },
       select: { id: true, email: true },
     });
+
     return created;
   }
 

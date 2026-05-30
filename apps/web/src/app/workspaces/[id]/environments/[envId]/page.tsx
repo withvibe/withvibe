@@ -46,6 +46,13 @@ import { QaBrowserPanel } from "./_qa-browser";
 import { ContextPanel } from "./_context-panel";
 import { ExportDialog } from "./_export-dialog";
 import { VsCodeMenu } from "./_vscode-menu";
+import {
+  PluginIcon,
+  PluginPanel,
+  type PluginListRow,
+  type PluginPrefRow,
+} from "./_plugin-panel";
+import { PluginManageDialog } from "./_plugin-manage-dialog";
 import { useActiveRuns } from "../../_active-runs";
 import { toast } from "sonner";
 
@@ -154,6 +161,12 @@ export default function EnvironmentDetailPage(
   const [activePanel, setActivePanel] = useState<
     "preview" | "logs" | "env" | "terminal" | "agents" | "git" | "database" | "qa-browser" | "context" | "security" | null
   >(null);
+  // Plugins (data-driven activity-bar entries). Cleared whenever the user
+  // selects a built-in panel — only one panel is visible at a time.
+  const [pluginList, setPluginList] = useState<PluginListRow[]>([]);
+  const [pluginPrefs, setPluginPrefs] = useState<PluginPrefRow[]>([]);
+  const [activePluginId, setActivePluginId] = useState<string | null>(null);
+  const [manageOpen, setManageOpen] = useState(false);
   const [chatPrefill, setChatPrefill] = useState<
     { text: string; id: number } | null
   >(null);
@@ -189,7 +202,13 @@ export default function EnvironmentDetailPage(
       | "context"
       | "security"
   ) {
+    setActivePluginId(null);
     setActivePanel((prev) => (prev === p ? null : p));
+  }
+
+  function togglePlugin(pluginId: string) {
+    setActivePanel(null);
+    setActivePluginId((prev) => (prev === pluginId ? null : pluginId));
   }
 
   // Open the Security panel and request a fresh scan. Bumping the signal
@@ -228,9 +247,25 @@ export default function EnvironmentDetailPage(
     if (res.ok) setEnv(await res.json());
   }, [id, envId]);
 
+  const loadPlugins = useCallback(async () => {
+    const [listRes, prefsRes] = await Promise.all([
+      fetch(`/api/workspaces/${id}/envs/${envId}/plugins`),
+      fetch(`/api/workspaces/${id}/envs/${envId}/plugins/prefs`),
+    ]);
+    if (listRes.ok) {
+      const body = (await listRes.json()) as { plugins: PluginListRow[] };
+      setPluginList(body.plugins);
+    }
+    if (prefsRes.ok) {
+      const body = (await prefsRes.json()) as { prefs: PluginPrefRow[] };
+      setPluginPrefs(body.prefs);
+    }
+  }, [id, envId]);
+
   useEffect(() => {
     load();
-  }, [load]);
+    loadPlugins();
+  }, [load, loadPlugins]);
 
   useEffect(() => {
     if (!env) return;
@@ -489,7 +524,7 @@ export default function EnvironmentDetailPage(
           />
         </div>
 
-        {activePanel && (
+        {(activePanel || activePluginId) && (
           <aside
             style={{ width: panelWidth }}
             className="shrink-0 relative flex flex-col rounded-md border bg-card overflow-hidden"
@@ -502,11 +537,17 @@ export default function EnvironmentDetailPage(
             />
             <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 bg-muted/30 shrink-0">
               <span className="text-xs font-mono font-medium capitalize">
-                {activePanel}
+                {activePluginId
+                  ? pluginList.find((p) => p.id === activePluginId)?.name ??
+                    activePluginId
+                  : activePanel}
               </span>
               <button
                 type="button"
-                onClick={() => setActivePanel(null)}
+                onClick={() => {
+                  setActivePanel(null);
+                  setActivePluginId(null);
+                }}
                 className="inline-flex items-center justify-center size-6 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
                 title="Close panel"
               >
@@ -544,6 +585,11 @@ export default function EnvironmentDetailPage(
                     containerPorts={env.containerPorts}
                     onOpenCompose={() => setComposeOpen(true)}
                     onUpdated={load}
+                    pluginPrefsCount={pluginPrefs.length}
+                    pluginsEnabledCount={
+                      pluginPrefs.filter((p) => p.enabled).length
+                    }
+                    onManagePlugins={() => setManageOpen(true)}
                   />
                 </div>
               )}
@@ -596,6 +642,14 @@ export default function EnvironmentDetailPage(
               )}
               {activePanel === "context" && (
                 <ContextPanel workspaceId={id} envId={envId} />
+              )}
+              {activePluginId && (
+                <PluginPanel
+                  workspaceId={id}
+                  envId={envId}
+                  pluginId={activePluginId}
+                  containerRunning={env.containerStatus === "running"}
+                />
               )}
             </div>
           </aside>
@@ -677,6 +731,19 @@ export default function EnvironmentDetailPage(
           >
             <Bot className="size-4" />
           </ActivityIcon>
+          {pluginList.length > 0 && (
+            <div className="my-1 mx-auto h-px w-6 bg-border" />
+          )}
+          {pluginList.map((p) => (
+            <ActivityIcon
+              key={p.id}
+              label={p.name}
+              active={activePluginId === p.id}
+              onClick={() => togglePlugin(p.id)}
+            >
+              <PluginIcon name={p.icon} className="size-4" />
+            </ActivityIcon>
+          ))}
         </nav>
       </div>
 
@@ -688,6 +755,15 @@ export default function EnvironmentDetailPage(
         initialValue={env.composeFile}
         initialAssets={env.assetFiles ?? []}
         onSaved={load}
+      />
+
+      <PluginManageDialog
+        open={manageOpen}
+        onOpenChange={setManageOpen}
+        workspaceId={id}
+        envId={envId}
+        initialPrefs={pluginPrefs}
+        onChanged={loadPlugins}
       />
 
       <ExportDialog

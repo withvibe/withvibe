@@ -24,6 +24,15 @@ const nextConfig: NextConfig = {
   output: "standalone",
   // Trace from the monorepo root so hoisted/workspace deps are picked up.
   outputFileTracingRoot: monorepoRoot,
+  // Disable Next.js's automatic trailing-slash redirect. Our sidecar
+  // reverse-proxy paths (`/api/db-viewer/view/<envId>/`,
+  // `/api/code-server/view/<envId>/`, `/api/plugins/view/<id>/<envId>/`)
+  // *require* the trailing slash so upstream apps emitting relative URLs
+  // resolve correctly. Without this flag, Next would 308-strip the slash,
+  // hit the rewrite, the api would 302-add it back (`needsSlash` path in
+  // SidecarProxy), Next would strip again — infinite loop in iframes.
+  // (db-viewer/code-server never hit this because they open in a new tab.)
+  skipTrailingSlashRedirect: true,
   turbopack: {
     root: monorepoRoot,
   },
@@ -56,6 +65,14 @@ const nextConfig: NextConfig = {
       {
         source: "/api/db-viewer/view/:path*",
         destination: `${apiBase}/api/db-viewer/view/:path*`,
+      },
+      // Plugin sidecar reverse proxy. Same pattern as db-viewer. Plugins
+      // that declare needsWebsocket=true will proxy their HTTP fine but
+      // the WS upgrade can't traverse Next rewrites — a known dev-only
+      // limitation to address when the first WS-needing plugin appears.
+      {
+        source: "/api/plugins/view/:path*",
+        destination: `${apiBase}/api/plugins/view/:path*`,
       },
     ];
   },

@@ -154,6 +154,7 @@ model Workspace {
   members     WorkspaceMember[]
   repos       Repo[]
   envs        Env[]
+  pluginInstances PluginInstance[]
   invitations Invitation[]
   agents      Agent[]
   memberMemories MemberMemory[]
@@ -391,6 +392,77 @@ model Env {
   knowledge     EnvKnowledge[]
   agentDisables EnvAgentDisabled[]
   humanQuestions HumanQuestion[]
+  pluginPrefs   EnvPluginPreference[]
+  pluginInstances PluginInstance[]
+}
+
+// Deployment-wide plugin registry. One row per admin-installed plugin.
+// `manifest` holds the full validated PluginManifest JSON (see
+// apps/api/src/plugins/manifest.ts). `image` is denormalized for query
+// convenience. `enabled=false` hides the plugin from envs without
+// uninstalling it. installedBy is a soft pointer to User.id (no FK so
+// deleting the admin user doesn't cascade plugins).
+model PluginDefinition {
+  id          String   @id              // PluginManifest.id, e.g. "withvibe.sample.hello"
+  name        String
+  version     String
+  image       String
+  manifest    Json
+  enabled     Boolean  @default(true)
+  // Per-env opt-in default. When true, new envs see the plugin in their
+  // sidebar automatically; when false, each env has to enable it explicitly
+  // via the sidebar gear. Mirrors PluginManifest.defaultEnabledInEnv but is
+  // a column so admins can flip it post-install without re-editing the YAML.
+  defaultEnabledInEnv Boolean @default(true)
+  installedAt DateTime @default(now())
+  installedBy String?
+  instances   PluginInstance[]
+  envPrefs    EnvPluginPreference[]
+}
+
+// Per-(scope, plugin) running container record. Scope follows the plugin
+// manifest: "env" → one per env, "workspace" → one per workspace shared
+// across envs, "global" → one per deployment. Exactly one of envId /
+// workspaceId is set for env/workspace scopes; both null for global.
+// scopeKey is the unique-constraint helper: envId / "ws:"+workspaceId /
+// "global". hostPort is null when the api runs in-container (sidecar-net
+// resolves via withvibe-network IP); set in dev where the host owns the
+// loopback. dbCredential is an AES-GCM-encrypted postgres password for
+// shared-postgres storage; dbSchema records the plugin's role/schema name.
+model PluginInstance {
+  id          String   @id @default(cuid())
+  plugin      PluginDefinition @relation(fields: [pluginId], references: [id], onDelete: Cascade)
+  pluginId    String
+  scopeKind   String                     // "env" | "workspace" | "global"
+  scopeKey    String                     // envId | "ws:"+workspaceId | "global"
+  env         Env?       @relation(fields: [envId], references: [id], onDelete: Cascade)
+  envId       String?
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String?
+  containerId String?
+  hostPort    Int?
+  status      String   @default("stopped")  // starting | running | stopped | error
+  error       String?
+  startedAt   DateTime?
+  // shared-postgres storage. Both null when storage.kind == "none".
+  dbCredential String?
+  dbSchema    String?
+  @@unique([pluginId, scopeKey])
+}
+
+// Per-env plugin visibility/enablement. A missing row means "fall back to
+// PluginDefinition.defaultEnabledInEnv". Disabling an env-scoped plugin
+// stops + removes that env's container (data is kept); disabling a shared
+// (workspace/global) plugin only hides it from this env's sidebar/MCP.
+model EnvPluginPreference {
+  id        String           @id @default(cuid())
+  env       Env              @relation(fields: [envId], references: [id], onDelete: Cascade)
+  envId     String
+  plugin    PluginDefinition @relation(fields: [pluginId], references: [id], onDelete: Cascade)
+  pluginId  String
+  enabled   Boolean
+  updatedAt DateTime         @updatedAt
+  @@unique([envId, pluginId])
 }
 
 model EnvKnowledge {

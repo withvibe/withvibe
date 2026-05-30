@@ -15,6 +15,7 @@ import {
   ComposeSecurityError,
 } from "./compose-security";
 import { DbViewerService } from "./db-viewer.service";
+import { PluginsService } from "../plugins/plugins.service";
 import { BrowserSidecarService } from "./browser-sidecar.service";
 import { PlaywrightMcpService } from "./playwright-mcp.service";
 import { CodeServerService } from "./code-server.service";
@@ -87,7 +88,8 @@ export class DockerService {
     private readonly qaBrowser: BrowserSidecarService,
     private readonly playwrightMcp: PlaywrightMcpService,
     private readonly codeServer: CodeServerService,
-    private readonly codeTunnel: CodeTunnelService
+    private readonly codeTunnel: CodeTunnelService,
+    private readonly plugins: PluginsService
   ) {}
 
   // ---------- log buffer (public API) --------------------------------------
@@ -716,6 +718,9 @@ export class DockerService {
     await this.playwrightMcp.closeForEnv(envId);
     await this.qaBrowser.stopQuiet(envId);
     await this.codeServer.stopQuiet(envId);
+    // Installed plugin containers join the same env network — same
+    // teardown-before-compose-down constraint.
+    await this.plugins.stopAllForEnv(envId).catch(() => {});
     // Per-user tunnel sidecars are long-lived (one per user, shared across
     // envs), so we don't kill them — just disconnect them from this env's
     // compose network so it can be removed cleanly. Their other envs (and
@@ -785,6 +790,7 @@ export class DockerService {
     await this.playwrightMcp.closeForEnv(envId);
     await this.qaBrowser.stopQuiet(envId);
     await this.codeServer.stopQuiet(envId);
+    await this.plugins.stopAllForEnv(envId).catch(() => {});
     await this.codeTunnel.stopAllForEnv(envId).catch(() => {});
     const proj = this.composeProjectName(envId);
     try {

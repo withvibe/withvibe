@@ -230,9 +230,17 @@ export class WorkspacesService {
       }),
       this.prisma.client.user.findUnique({
         where: { id: userId },
-        select: { id: true, name: true, email: true, defaultWorkspaceId: true },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          defaultWorkspaceId: true,
+        },
       }),
     ]);
+
+    // Deployment admin is derived from workspace memberships.
+    const isDeploymentAdmin = allMemberships.some((m) => m.role === "admin");
 
     return {
       version: await getAppVersion(),
@@ -242,6 +250,7 @@ export class WorkspacesService {
         id: currentUser?.id ?? userId,
         name: currentUser?.name ?? null,
         email: currentUser?.email ?? "",
+        isDeploymentAdmin,
       },
       workspaces: allMemberships
         .filter((m) => !m.workspace.deletedAt)

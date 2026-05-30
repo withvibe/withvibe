@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { ensureEnvDir } from "../common/repo-base-dir";
 import type {
   AgentDefinition,
+  McpHttpServerConfig,
   McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -25,6 +26,7 @@ import { ExternalContextMcpService } from "./external-context-mcp.service";
 import { PlaywrightMcpService } from "../docker/playwright-mcp.service";
 import { BrowserSidecarService } from "../docker/browser-sidecar.service";
 import { McpTokenService } from "../mcp-bridge/mcp-token.service";
+import { PluginMcpBridgeService } from "../plugins/plugin-mcp-bridge.service";
 import { SlackMcpService } from "../slack/slack-mcp.service";
 import type { DetectedDatabase } from "../docker/database-detection";
 import {
@@ -398,7 +400,10 @@ export type ChatContext = {
   cwd: string;
   additionalDirectories: string[];
   anthropicApiKey: string | null;
-  mcpServers: Record<string, McpSdkServerConfigWithInstance>;
+  mcpServers: Record<
+    string,
+    McpSdkServerConfigWithInstance | McpHttpServerConfig
+  >;
   extraAllowedTools: string[];
   disallowedTools: string[];
   /** Sub-agents available to the orchestrator (main chat without a bound agent). */
@@ -446,7 +451,8 @@ export class ChatContextService {
     private readonly playwrightMcp: PlaywrightMcpService,
     private readonly browserSidecar: BrowserSidecarService,
     private readonly mcpTokens: McpTokenService,
-    private readonly slackMcp: SlackMcpService
+    private readonly slackMcp: SlackMcpService,
+    private readonly pluginMcp: PluginMcpBridgeService
   ) {}
 
   async build(
@@ -755,6 +761,51 @@ export class ChatContextService {
         env.workspaceId
       );
       extraAllowedTools.push("mcp__withvibe-member__save_member_memory");
+    }
+
+    // Plugin MCP — any enabled plugin with mcp.enabled=true whose scoped
+    // instance is running for this chat context. The SDK's HTTP MCP config
+    // makes the api forward JSON-RPC into the plugin container via the
+    // bridge route /api/mcp/plugin_<id>. Tools surface to the agent as
+    // mcp__plugin_<id>__<tool> after the SDK's standard prefixing.
+    try {
+      const pluginServers = await phase("plugin-mcp-discovery", () =>
+        this.pluginMcp.listMcpServersForContext({
+          workspaceId: env.workspaceId,
+          envId,
+        })
+      );
+      if (pluginServers.length > 0) {
+        const pluginBridgeToken = this.mcpTokens.sign({
+          workspaceId: env.workspaceId,
+          envId,
+          userId: speakerUserId,
+          sessionId,
+          agentId: agentConfig?.agentId ?? null,
+        });
+        const apiBase =
+          process.env.API_SELF_MCP_BASE_URL ||
+          `http://localhost:${process.env.API_PORT || 4000}/api/mcp`;
+        for (const ps of pluginServers) {
+          mcpServers[ps.serverName] = {
+            type: "http",
+            url: `${apiBase}/${ps.serverName}`,
+            headers: {
+              Authorization: `Bearer ${pluginBridgeToken}`,
+            },
+          };
+          // Allow the tools without a per-tool name list — we don't know
+          // them ahead of time (plugin owns the tool catalog).
+          extraAllowedTools.push(`mcp__${ps.serverName}`);
+        }
+        this.logger.info(
+          `[chat-context] attached ${pluginServers.length} plugin MCP server(s) for env=${envId}: ${pluginServers.map((p) => p.serverName).join(", ")}`
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[chat-context] plugin MCP discovery failed (env=${envId}): ${err instanceof Error ? err.message : String(err)}`
+      );
     }
 
     // Orchestrator mode (no agent binding): expose workspace agents as

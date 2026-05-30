@@ -6,7 +6,12 @@ type Bootstrap = {
   version: string;
   workspace: { id: string; name: string };
   role: "admin" | "member";
-  user: { id: string; name: string | null; email: string };
+  user: {
+    id: string;
+    name: string | null;
+    email: string;
+    isDeploymentAdmin: boolean;
+  };
   workspaces: Array<{ id: string; name: string }>;
   defaultWorkspaceId: string | null;
   integrations: { anthropic: boolean; github: boolean };
@@ -40,7 +45,11 @@ export default async function WorkspaceLayout({
       version={res.version}
       workspace={res.workspace}
       role={res.role}
-      user={{ name: res.user.name, email: res.user.email }}
+      user={{
+        name: res.user.name,
+        email: res.user.email,
+        isDeploymentAdmin: res.user.isDeploymentAdmin,
+      }}
       workspaces={res.workspaces}
       defaultWorkspaceId={res.defaultWorkspaceId}
       integrations={res.integrations}

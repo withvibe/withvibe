@@ -6,6 +6,7 @@ import {
   FileCode,
   GitBranch,
   Loader2,
+  Package,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -182,6 +183,9 @@ export function EnvPanel({
   containerPorts,
   onOpenCompose,
   onUpdated,
+  pluginPrefsCount,
+  pluginsEnabledCount,
+  onManagePlugins,
 }: {
   workspaceId: string;
   envId: string;
@@ -198,6 +202,11 @@ export function EnvPanel({
   containerPorts: Record<string, number> | null;
   onOpenCompose: () => void;
   onUpdated: () => void | Promise<void>;
+  /** Total plugins installed deployment-wide. 0 hides the Plugins section. */
+  pluginPrefsCount: number;
+  /** Subset of pluginPrefsCount currently enabled for this env. */
+  pluginsEnabledCount: number;
+  onManagePlugins: () => void;
 }) {
   const [savingEngine, setSavingEngine] = useState<ChatEngine | null>(null);
   const [savingQaMode, setSavingQaMode] = useState<QaBrowserMode | null>(null);
@@ -718,6 +727,32 @@ export function EnvPanel({
           pinned <strong>DevOps</strong>&nbsp;agent in chat — that&apos;s what it&apos;s for.
         </p>
       </section>
+
+      {pluginPrefsCount > 0 && (
+        <section className="space-y-2">
+          <h3 className="text-xs font-mono font-semibold uppercase tracking-wide text-muted-foreground">
+            Plugins
+          </h3>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onManagePlugins}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border bg-card hover:border-primary/40 text-xs font-mono transition-smooth"
+            >
+              <Package className="size-3.5" />
+              Manage:{" "}
+              <span className="text-foreground">
+                {pluginsEnabledCount} / {pluginPrefsCount} enabled
+              </span>
+            </button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Pick which plugins show up in this env&apos;s activity bar.
+            Disabling an env-scoped plugin also stops its container; its data
+            is kept for next time.
+          </p>
+        </section>
+      )}
     </div>
   );
 }

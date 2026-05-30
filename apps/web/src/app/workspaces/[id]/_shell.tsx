@@ -12,6 +12,7 @@ import {
   Inbox,
   ListChecks,
   LogOut,
+  Package,
   Plus,
   Star,
   UserRound,
@@ -61,7 +62,7 @@ export function WorkspaceShell({
   version: string;
   workspace: { id: string; name: string };
   role: "admin" | "member";
-  user: { name: string | null; email: string };
+  user: { name: string | null; email: string; isDeploymentAdmin: boolean };
   workspaces: { id: string; name: string }[];
   defaultWorkspaceId: string | null;
   integrations: { anthropic: boolean; github: boolean };
@@ -284,6 +285,33 @@ export function WorkspaceShell({
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
+          {/* Deployment-wide admin tools. Routes here are global (not
+              workspace-scoped) so they sit in their own group. Visible only
+              to users who are admin in at least one workspace. */}
+          {user.isDeploymentAdmin && (
+            <SidebarGroup>
+              <SidebarGroupLabel>Admin</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton
+                      render={
+                        <Link
+                          href={`/workspaces/${workspace.id}/admin/plugins`}
+                        />
+                      }
+                      isActive={pathname.startsWith(
+                        `/workspaces/${workspace.id}/admin/plugins`
+                      )}
+                    >
+                      <Package />
+                      <span>Plugins</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          )}
         </SidebarContent>
 
         <SidebarFooter>

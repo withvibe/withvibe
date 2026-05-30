@@ -12,10 +12,35 @@ import { SESSION_COOKIE_NAME } from "../auth/auth.service";
 import type { BridgeJwtPayload } from "../auth/jwt.strategy";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
-type Route = {
-  prefix: string; // e.g. "/api/code-server/view/"
-  ws: boolean; // code-server needs WebSocket upgrades; Adminer doesn't
-  target: (envId: string) => Promise<string | null>; // "host:port" or null
+export type Route = {
+  prefix: string; // e.g. "/api/code-server/view/" or "/api/plugins/view/<pluginId>/<scope>/"
+  ws: boolean; // true when the underlying app speaks WebSocket
+  // `scopeIdSegment` is the URL segment after the prefix — envId for env-
+  // scoped routes, workspaceId for workspace-scoped, "_" (sentinel) for
+  // global-scoped. The target maps it to a running upstream host:port.
+  target: (scopeIdSegment: string) => Promise<string | null>;
+  /**
+   * Optional access check. When provided, replaces the built-in env
+   * membership check used for /api/code-server/ and /api/db-viewer/.
+   * Used by plugin routes so workspace-scoped and global-scoped plugins
+   * are gated on the right authority (workspace membership / any auth'd
+   * user respectively).
+   */
+  membershipCheck?: (
+    scopeIdSegment: string,
+    userId: string
+  ) => Promise<boolean>;
+  // When true, requests for the bare `<prefix><scopeIdSegment>` (no
+  // trailing slash) are served directly from the upstream root instead of
+  // 302-redirected to the with-trailing-slash form. Set this for plugin
+  // routes: Next.js's default `trailingSlash: false` would 308-strip the
+  // slash on the way in, and the api 302-add-it-back creates an infinite
+  // loop in iframes. The cost is that plugin authors must use absolute
+  // paths (or `<base href>`) for asset URLs — relative paths would resolve
+  // one segment too high when the browser is parked at the no-slash URL.
+  // Built-in code-server and db-viewer keep `needsSlash` because they open
+  // in new tabs (the single redirect roundtrip is invisible to the user).
+  skipTrailingSlashRedirect?: boolean;
 };
 
 // Connection-level headers that must not be forwarded across a proxy hop.
@@ -52,7 +77,11 @@ const HOP_BY_HOP = new Set([
 @Injectable()
 export class SidecarProxy {
   private readonly wss = new WebSocketServer({ noServer: true });
-  private readonly routes: Route[];
+  private readonly builtinRoutes: Route[];
+  // Routes added at runtime — PluginsModule populates this on boot for
+  // each installed plugin; Phase-2 admin install will append at install
+  // time so a freshly-installed plugin starts routing without a restart.
+  private readonly dynamicRoutes: Route[] = [];
 
   constructor(
     @InjectPinoLogger(SidecarProxy.name)
@@ -62,7 +91,7 @@ export class SidecarProxy {
     private readonly codeServer: CodeServerService,
     private readonly dbViewer: DbViewerService
   ) {
-    this.routes = [
+    this.builtinRoutes = [
       {
         prefix: "/api/code-server/view/",
         ws: true,
@@ -76,11 +105,30 @@ export class SidecarProxy {
     ];
   }
 
+  addRoute(r: Route): void {
+    // Replace an existing entry with the same prefix (admin re-install or
+    // toggle re-enable) — first-match-wins routing means stale entries
+    // would shadow the new one.
+    this.removeRoute(r.prefix);
+    this.dynamicRoutes.push(r);
+  }
+
+  removeRoute(prefix: string): boolean {
+    const i = this.dynamicRoutes.findIndex((r) => r.prefix === prefix);
+    if (i === -1) return false;
+    this.dynamicRoutes.splice(i, 1);
+    return true;
+  }
+
+  private allRoutes(): Route[] {
+    return [...this.builtinRoutes, ...this.dynamicRoutes];
+  }
+
   // ── HTTP ──────────────────────────────────────────────────────────────
 
   middleware(): RequestHandler {
     return (req, res, next) => {
-      const route = this.routes.find((r) => req.path.startsWith(r.prefix));
+      const route = this.allRoutes().find((r) => req.path.startsWith(r.prefix));
       if (!route) return next();
       void this.handleHttp(route, req, res).catch((err) => {
         this.logger.error(`proxy error ${req.path}: ${err}`);
@@ -102,7 +150,12 @@ export class SidecarProxy {
     const { envId, rest, needsSlash } = parsed;
 
     const userId = this.authUserId(this.bearerOrCookie(req));
-    if (!userId || !(await this.isMember(envId, userId))) {
+    const allowed =
+      userId &&
+      (await (route.membershipCheck
+        ? route.membershipCheck(envId, userId)
+        : this.isMember(envId, userId)));
+    if (!allowed) {
       res.status(userId ? 403 : 401).send(userId ? "Forbidden" : "Unauthorized");
       return;
     }
@@ -185,7 +238,9 @@ export class SidecarProxy {
   attach(server: Server): void {
     server.on("upgrade", (req, socket, head) => {
       const url = req.url || "";
-      const route = this.routes.find((r) => r.ws && url.startsWith(r.prefix));
+      const route = this.allRoutes().find(
+        (r) => r.ws && url.startsWith(r.prefix)
+      );
       if (!route) return;
       void this.handleUpgrade(route, req, socket as Duplex, head).catch(
         (err) => {
@@ -214,7 +269,12 @@ export class SidecarProxy {
     // Same-origin upgrade — the browser sends the session cookie itself.
     const cookieToken = this.cookieFromHeader(req.headers.cookie);
     const userId = this.authUserId(cookieToken);
-    if (!userId || !(await this.isMember(envId, userId))) {
+    const allowed =
+      userId &&
+      (await (route.membershipCheck
+        ? route.membershipCheck(envId, userId)
+        : this.isMember(envId, userId)));
+    if (!allowed) {
       this.rejectWs(socket, userId ? 403 : 401, "Unauthorized");
       return;
     }
@@ -297,7 +357,14 @@ export class SidecarProxy {
     const slash = tail.indexOf("/");
     if (slash === -1) {
       const envId = decodeURIComponent(tail);
-      return envId ? { envId, rest: "", needsSlash: true } : null;
+      if (!envId) return null;
+      // Plugin routes opt out of the needsSlash 302 — see Route type above.
+      // We serve the upstream root directly and let the upstream worry
+      // about absolute-path asset URLs.
+      if (route.skipTrailingSlashRedirect) {
+        return { envId, rest: "/", needsSlash: false };
+      }
+      return { envId, rest: "", needsSlash: true };
     }
     const envId = decodeURIComponent(tail.slice(0, slash));
     if (!envId) return null;
