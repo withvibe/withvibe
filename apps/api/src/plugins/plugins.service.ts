@@ -7,7 +7,7 @@ import {
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { ZodError } from "zod";
 import { PrismaService } from "../prisma/prisma.service";
 import { composeProjectName } from "../docker/compose-naming";
@@ -25,10 +25,12 @@ import { PluginPostgresService } from "./plugin-postgres.service";
 
 const exec = promisify(execFile);
 
-export type SpawnContext = {
-  ENV_ID: string;
-  WORKSPACE_ID: string;
-};
+// Runtime conventions every plugin agrees on. These are intentionally NOT
+// in the manifest — see manifest.ts for the rationale (description vs.
+// configuration). When you change one of these, it's a platform-wide
+// breaking change for every existing plugin.
+const PLUGIN_LISTEN_PORT = 8080;
+const PLUGIN_HEALTH_PATH = "/";
 
 export type PluginViewRow = {
   id: string;
@@ -90,7 +92,7 @@ export class PluginsService {
   ) {}
 
   parseManifest(raw: unknown): PluginManifestT {
-    return PluginManifest.parse(raw);
+    return PluginManifest.parse(normalizeLegacyManifest(raw));
   }
 
   // ── scope helpers ──────────────────────────────────────────────────────
@@ -124,7 +126,7 @@ export class PluginsService {
   private buildViewerUrl(
     pluginId: string,
     identity: ScopeIdentity,
-    iframePath: string = "/"
+    uiPath: string = "/"
   ): string {
     let base: string;
     switch (identity.kind) {
@@ -138,14 +140,14 @@ export class PluginsService {
         base = `/api/plugins/view/${pluginId}/global/_`;
         break;
     }
-    // Append the manifest's iframePath so the browser loads the plugin's
-    // actual entry point. iframePath="/" → no suffix (proxy forwards /
+    // Append the manifest's uiPath so the browser loads the plugin's
+    // actual entry point. uiPath="/" → no suffix (proxy forwards /
     // to upstream); anything else gets appended verbatim so plugin authors
     // can route their iframe load at a non-root path (/ui, /admin, …).
-    // The trailing slash on iframePath is intentionally NOT preserved —
+    // The trailing slash on uiPath is intentionally NOT preserved —
     // see SidecarProxy's skipTrailingSlashRedirect note.
-    if (iframePath && iframePath !== "/") {
-      const normalized = iframePath.startsWith("/") ? iframePath : `/${iframePath}`;
+    if (uiPath && uiPath !== "/") {
+      const normalized = uiPath.startsWith("/") ? uiPath : `/${uiPath}`;
       return base + normalized.replace(/\/+$/, "");
     }
     return base;
@@ -177,7 +179,8 @@ export class PluginsService {
 
   async install(
     manifestText: string,
-    installedBy: string | null
+    installedBy: string | null,
+    opts: { forcePull?: boolean } = {}
   ): Promise<PluginAdminRow> {
     if (!manifestText || !manifestText.trim()) {
       throw new BadRequestException("Manifest is empty");
@@ -203,9 +206,11 @@ export class PluginsService {
       }
       throw err;
     }
-    // Skip pull when the image is already present locally — covers the
-    // dev-loop case (`docker build -t local/...`) and any image already in
-    // the daemon's cache. Only when truly absent do we go to the registry.
+    // Image acquisition strategy:
+    //   - fresh install: skip pull if already local (dev-loop friendly), else pull.
+    //   - update (forcePull): always try pull so a moving tag (e.g. :latest)
+    //     refreshes; if pull fails (e.g. local/* dev image with no registry),
+    //     tolerate it as long as the image exists locally.
     const alreadyLocal = await exec("docker", [
       "image",
       "inspect",
@@ -213,7 +218,23 @@ export class PluginsService {
     ])
       .then(() => true)
       .catch(() => false);
-    if (!alreadyLocal) {
+    if (opts.forcePull) {
+      try {
+        await exec("docker", ["pull", manifest.image], {
+          timeout: 5 * 60 * 1000,
+        });
+      } catch (err) {
+        if (!alreadyLocal) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new BadRequestException(
+            `Failed to pull image ${manifest.image}: ${msg.split("\n").slice(0, 3).join(" ")}`
+          );
+        }
+        this.logger.info(
+          `Pull failed for ${manifest.image} but image exists locally; continuing (dev-loop path)`
+        );
+      }
+    } else if (!alreadyLocal) {
       try {
         await exec("docker", ["pull", manifest.image], {
           timeout: 5 * 60 * 1000,
@@ -234,7 +255,9 @@ export class PluginsService {
         image: manifest.image,
         manifest,
         enabled: true,
-        defaultEnabledInEnv: manifest.defaultEnabledInEnv,
+        // defaultEnabledInEnv defaults to true via the Prisma column default.
+        // It's an admin preference, not a manifest field — preserve whatever
+        // the admin set on subsequent re-installs (covered by update below).
         installedBy,
       },
       update: {
@@ -242,7 +265,6 @@ export class PluginsService {
         version: manifest.version,
         image: manifest.image,
         manifest,
-        defaultEnabledInEnv: manifest.defaultEnabledInEnv,
       },
     });
     this.registerRoute(manifest);
@@ -265,16 +287,71 @@ export class PluginsService {
         image: manifest.image,
         manifest,
         enabled: true,
-        defaultEnabledInEnv: manifest.defaultEnabledInEnv,
       },
       update: {
         name: manifest.name,
         version: manifest.version,
         image: manifest.image,
         manifest,
-        defaultEnabledInEnv: manifest.defaultEnabledInEnv,
       },
     });
+  }
+
+  // ── admin: update existing plugin manifest / image ─────────────────────
+
+  /**
+   * Re-install a plugin with a new manifest. The plugin id in the manifest
+   * must match the URL param — changing the id is "install a new plugin"
+   * (and would orphan instances of the original). Stops running instances
+   * before swapping the definition so the next start picks up the new image
+   * cleanly; the operator restarts envs from their plugin panels.
+   */
+  async update(
+    pluginId: string,
+    manifestText: string,
+    installedBy: string | null
+  ): Promise<PluginAdminRow> {
+    const existing = await this.prisma.client.pluginDefinition.findUnique({
+      where: { id: pluginId },
+    });
+    if (!existing) {
+      throw new NotFoundException(`Plugin ${pluginId} not installed`);
+    }
+    // Pre-parse to catch id mismatch before we touch any state. The full
+    // install() call below re-validates and is the source of truth.
+    let parsed: unknown;
+    try {
+      parsed = parseYaml(manifestText);
+    } catch (err) {
+      throw new BadRequestException(
+        `Manifest is not valid YAML/JSON: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    const probe = PluginManifest.safeParse(parsed);
+    if (probe.success && probe.data.id !== pluginId) {
+      throw new BadRequestException(
+        `Manifest id "${probe.data.id}" does not match URL plugin id "${pluginId}". Changing the id is an install, not an update — uninstall the old plugin first.`
+      );
+    }
+    await this.stopAllInstancesOfPlugin(pluginId);
+    return this.install(manifestText, installedBy, { forcePull: true });
+  }
+
+  /**
+   * Return the stored manifest as YAML text so the admin editor can preload
+   * it. We round-trip through `yaml` so the output keeps the editor's
+   * native format even though we store JSON in Prisma.
+   */
+  async getManifestText(pluginId: string): Promise<{ manifestText: string }> {
+    const plugin = await this.prisma.client.pluginDefinition.findUnique({
+      where: { id: pluginId },
+      select: { manifest: true },
+    });
+    if (!plugin) {
+      throw new NotFoundException(`Plugin ${pluginId} not installed`);
+    }
+    const yamlText = stringifyYaml(plugin.manifest, { indent: 2 });
+    return { manifestText: yamlText };
   }
 
   async uninstall(pluginId: string): Promise<{ ok: true }> {
@@ -368,10 +445,19 @@ export class PluginsService {
       select: { id: true, manifest: true },
       orderBy: { installedAt: "asc" },
     });
-    return rows.map((r) => ({
-      id: r.id,
-      manifest: this.parseManifest(r.manifest),
-    }));
+    const out: { id: string; manifest: PluginManifestT }[] = [];
+    for (const r of rows) {
+      try {
+        out.push({ id: r.id, manifest: this.parseManifest(r.manifest) });
+      } catch (err) {
+        // Don't let one broken row poison boot. Logs so the admin can fix it
+        // by re-installing the plugin via /admin/plugins/new.
+        this.logger.warn(
+          `Skipping plugin ${r.id} — stored manifest doesn't validate: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+    return out;
   }
 
   // ── per-env-page feed (all scopes, contextualized to this env) ─────────
@@ -418,7 +504,7 @@ export class PluginsService {
         error: inst?.error ?? null,
         viewerUrl:
           status === "running"
-            ? this.buildViewerUrl(p.id, identity, manifest.ui.iframePath)
+            ? this.buildViewerUrl(p.id, identity, manifest.ui.path)
             : null,
         enabled: true,
       });
@@ -591,7 +677,7 @@ export class PluginsService {
           viewerUrl: this.buildViewerUrl(
             pluginId,
             identity,
-            manifest.ui.iframePath
+            manifest.ui.path
           ),
         };
       }
@@ -658,7 +744,6 @@ export class PluginsService {
     }
 
     try {
-      const ctx: SpawnContext = { ENV_ID: envId, WORKSPACE_ID: workspaceId };
       const args: string[] = ["run", "--rm", "-d"];
       if (network) {
         args.push("--network", network);
@@ -676,14 +761,17 @@ export class PluginsService {
       } else if (manifest.scope === "workspace") {
         args.push("--label", `com.withvibe.workspace=${workspaceId}`);
       }
-      for (const [k, v] of Object.entries(manifest.launch.env)) {
-        args.push("-e", `${k}=${this.interpolate(v, ctx)}`);
-      }
+      // System-managed env injection. Plugins receive these unconditionally;
+      // anything else they need is the plugin author's responsibility (their
+      // own auth UI, their own secret storage). DATABASE_URL + PGSCHEMA are
+      // only set when the plugin declared `storage: { kind: shared-postgres }`.
+      args.push("-e", `ENV_ID=${envId}`);
+      args.push("-e", `WORKSPACE_ID=${workspaceId}`);
       if (databaseUrl) {
         args.push("-e", `DATABASE_URL=${databaseUrl}`);
         if (dbSchema) args.push("-e", `PGSCHEMA=${dbSchema}`);
       }
-      args.push("-p", `127.0.0.1:0:${manifest.launch.port}`);
+      args.push("-p", `127.0.0.1:0:${PLUGIN_LISTEN_PORT}`);
       args.push(manifest.image);
 
       const { stdout: cidRaw } = await exec("docker", args, {
@@ -697,7 +785,7 @@ export class PluginsService {
       await attachToWithvibe(containerId);
       const port = await this.resolvePublishedPort(
         containerId,
-        manifest.launch.port
+        PLUGIN_LISTEN_PORT
       );
       if (!port) {
         await this.hardStop(containerId).catch(() => {});
@@ -708,7 +796,7 @@ export class PluginsService {
 
       await this.pollHealth(
         `127.0.0.1:${port}`,
-        manifest.launch.healthPath
+        PLUGIN_HEALTH_PATH
       ).catch((err) => {
         this.logger.warn(
           `Health check did not pass within window for ${pluginId} (scope ${scopeKey}): ${err instanceof Error ? err.message : String(err)}`
@@ -871,7 +959,7 @@ export class PluginsService {
       containerId: inst.containerId,
       status: inst.status,
       publishedPort: inst.hostPort,
-      internalPort: manifest.launch.port,
+      internalPort: PLUGIN_LISTEN_PORT,
     });
   }
 
@@ -881,7 +969,7 @@ export class PluginsService {
     const prefix = `/api/plugins/view/${manifest.id}/${manifest.scope === "global" ? "global" : manifest.scope === "workspace" ? "ws" : "env"}/`;
     this.sidecarProxy.addRoute({
       prefix,
-      ws: manifest.ui.needsWebsocket,
+      ws: manifest.ui.websocket,
       target: (scopeIdSegment) =>
         this.getProxyTarget(manifest.id, manifest.scope, scopeIdSegment),
       membershipCheck: (scopeIdSegment, userId) =>
@@ -944,12 +1032,6 @@ export class PluginsService {
   }
 
   // ── helpers ────────────────────────────────────────────────────────────
-
-  private interpolate(value: string, ctx: SpawnContext): string {
-    return value.replace(/\{\{([A-Z][A-Z0-9_]*)\}\}/g, (m, key: string) => {
-      return key in ctx ? ctx[key as keyof SpawnContext] : m;
-    });
-  }
 
   private async upsertInstance(
     identity: ScopeIdentity,
@@ -1070,4 +1152,44 @@ export class PluginsService {
       ? lastErr
       : new Error("health check timeout");
   }
+}
+
+// Tolerate plugin definitions written under the pre-simplification manifest
+// schema (had `launch`, `ui.iframePath`, `ui.needsWebsocket`, `mcp.endpoint`,
+// `defaultEnabledInEnv`, no `description`). The old fields are stripped /
+// remapped before the strict zod parse runs. New submissions never go through
+// this path — only stored DB rows do.
+function normalizeLegacyManifest(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object") return raw;
+  const m = { ...(raw as Record<string, unknown>) };
+  if (m.launch !== undefined) delete m.launch;
+  if (m.permissions !== undefined) delete m.permissions;
+  if (m.defaultEnabledInEnv !== undefined) delete m.defaultEnabledInEnv;
+  if (typeof m.description !== "string" || !m.description.trim()) {
+    // Synthesize a placeholder description from the name so the strict schema
+    // accepts the row. Publishers can fix it on next install.
+    m.description =
+      typeof m.name === "string" ? m.name : "(legacy plugin — no description)";
+  }
+  if (m.ui && typeof m.ui === "object") {
+    const ui = { ...(m.ui as Record<string, unknown>) };
+    if (ui.path === undefined && typeof ui.iframePath === "string") {
+      ui.path = ui.iframePath;
+    }
+    if (ui.websocket === undefined && typeof ui.needsWebsocket === "boolean") {
+      ui.websocket = ui.needsWebsocket;
+    }
+    delete ui.iframePath;
+    delete ui.needsWebsocket;
+    m.ui = ui;
+  }
+  if (m.mcp && typeof m.mcp === "object") {
+    const mcp = { ...(m.mcp as Record<string, unknown>) };
+    if (mcp.path === undefined && typeof mcp.endpoint === "string") {
+      mcp.path = mcp.endpoint;
+    }
+    delete mcp.endpoint;
+    m.mcp = mcp;
+  }
+  return m;
 }

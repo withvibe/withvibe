@@ -108,7 +108,7 @@ export class PluginMcpBridgeService {
     // Forward the request. Plugin MCP servers are HTTP/JSON-RPC (or SSE
     // for streaming); we forward both headers and body verbatim so the
     // plugin sees its native protocol shape.
-    const url = `http://${target}${manifest.mcp.endpoint.startsWith("/") ? "" : "/"}${manifest.mcp.endpoint}`;
+    const url = `http://${target}${manifest.mcp.path.startsWith("/") ? "" : "/"}${manifest.mcp.path}`;
     const forwardHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(args.headers)) {
       if (v === undefined) continue;

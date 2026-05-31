@@ -2,7 +2,16 @@
 
 import { use, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Package, Plus, Power, Trash2 } from "lucide-react";
+import {
+  Link2,
+  Loader2,
+  Package,
+  Pencil,
+  Plus,
+  Power,
+  Store,
+  Trash2,
+} from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -42,6 +51,9 @@ export default function AdminPluginsPage(
   const [deleteOpen, setDeleteOpen] = useState<AdminPluginRow | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [fromUrlOpen, setFromUrlOpen] = useState(false);
+  const [manifestUrl, setManifestUrl] = useState("");
+  const [installingFromUrl, setInstallingFromUrl] = useState(false);
 
   const load = useCallback(async () => {
     const res = await fetch("/api/admin/plugins");
@@ -120,6 +132,30 @@ export default function AdminPluginsPage(
     }
   }
 
+  async function installFromUrl() {
+    const url = manifestUrl.trim();
+    if (!url) return;
+    setInstallingFromUrl(true);
+    try {
+      const res = await fetch("/api/admin/plugins/install-from-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ manifestUrl: url }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        toast.error(parseError(text) || `Install failed (HTTP ${res.status})`);
+        return;
+      }
+      toast.success("Plugin installed");
+      setFromUrlOpen(false);
+      setManifestUrl("");
+      await load();
+    } finally {
+      setInstallingFromUrl(false);
+    }
+  }
+
   async function uninstall() {
     if (!deleteOpen) return;
     setDeleting(true);
@@ -155,13 +191,28 @@ export default function AdminPluginsPage(
             envs.
           </p>
         </div>
-        <Button
-          onClick={() =>
-            router.push(`/workspaces/${workspaceId}/admin/plugins/new`)
-          }
-        >
-          <Plus className="size-4" /> Install plugin
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() =>
+              router.push(
+                `/workspaces/${workspaceId}/admin/plugins/marketplace`
+              )
+            }
+          >
+            <Store className="size-4" /> Browse marketplace
+          </Button>
+          <Button variant="outline" onClick={() => setFromUrlOpen(true)}>
+            <Link2 className="size-4" /> From URL
+          </Button>
+          <Button
+            onClick={() =>
+              router.push(`/workspaces/${workspaceId}/admin/plugins/new`)
+            }
+          >
+            <Plus className="size-4" /> Install plugin
+          </Button>
+        </div>
       </header>
 
       {plugins === null ? (
@@ -230,6 +281,20 @@ export default function AdminPluginsPage(
               <Button
                 size="sm"
                 variant="outline"
+                onClick={() =>
+                  router.push(
+                    `/workspaces/${workspaceId}/admin/plugins/${encodeURIComponent(p.id)}/edit`
+                  )
+                }
+                disabled={actingId === p.id}
+                title="Edit manifest and push a new image"
+              >
+                <Pencil className="size-4" />
+                Update
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
                 onClick={() => toggleEnabled(p)}
                 disabled={actingId === p.id}
                 title={p.enabled ? "Disable plugin" : "Enable plugin"}
@@ -256,6 +321,72 @@ export default function AdminPluginsPage(
           ))}
         </ul>
       )}
+
+      <Dialog
+        open={fromUrlOpen}
+        onOpenChange={(o) => {
+          if (!o && !installingFromUrl) {
+            setFromUrlOpen(false);
+            setManifestUrl("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Install from URL</DialogTitle>
+            <DialogDescription>
+              Paste the HTTPS URL of a plugin manifest (
+              <code className="font-mono">manifest.yaml</code>). Useful for
+              private mirrors, self-hosted catalogs, or sharing a plugin
+              before it&apos;s published.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void installFromUrl();
+            }}
+            className="space-y-2"
+          >
+            <Label htmlFor="manifest-url" className="text-xs font-mono">
+              Manifest URL
+            </Label>
+            <Input
+              id="manifest-url"
+              type="url"
+              required
+              autoFocus
+              autoComplete="off"
+              placeholder="https://example.com/plugins/foo/manifest.yaml"
+              value={manifestUrl}
+              onChange={(e) => setManifestUrl(e.target.value)}
+              disabled={installingFromUrl}
+            />
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setFromUrlOpen(false);
+                  setManifestUrl("");
+                }}
+                disabled={installingFromUrl}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={installingFromUrl || !manifestUrl.trim()}
+              >
+                {installingFromUrl && (
+                  <Loader2 className="size-4 animate-spin" />
+                )}
+                {installingFromUrl ? "Pulling image…" : "Install"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={Boolean(deleteOpen)}

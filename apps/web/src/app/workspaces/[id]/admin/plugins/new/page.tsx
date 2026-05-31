@@ -22,30 +22,33 @@ const MonacoEditor = dynamic(
 const MANIFEST_FILENAME = "manifest.yaml";
 
 const SAMPLE_MANIFEST = `# WithVibe plugin manifest.
-# The image is pulled at install time — set it to something docker can resolve
-# (public registry or one you've already \`docker login\`ed into on the api host).
+# The image is pulled at install time — set it to something docker can
+# resolve (public registry or one you've already \`docker login\`ed into).
 id: acme.taskboard
 name: Task Board
+description: Workspace task management for AI teams.
 version: 1.0.0
 icon: list-todo
 image: ghcr.io/acme/withvibe-taskboard:1.0.0
 
-launch:
-  port: 8080
-  healthPath: /health
-  env:
-    ENV_ID: "{{ENV_ID}}"
-    WORKSPACE_ID: "{{WORKSPACE_ID}}"
+# Scope: one container per env / per workspace / per deployment.
+scope: workspace
 
+# Storage: 'none' for stateless; 'shared-postgres' to receive a dedicated
+# DB schema + DATABASE_URL env var (isolated from withvibe's own DB).
+storage:
+  kind: shared-postgres
+
+# UI: where the iframe loads inside the container, and whether the proxy
+# needs to handle WebSocket upgrades.
 ui:
-  iframePath: /ui
-  needsWebsocket: false
+  path: /ui
+  websocket: false
 
-# Per-env opt-in default. true = appears in every env's sidebar
-# automatically; false = each env must enable it via the env Settings
-# panel. Useful for resource-heavy or rarely-used plugins. Admins can flip
-# this later from the Plugins admin page without re-installing.
-defaultEnabledInEnv: true
+# Optional MCP server exposed to the agent.
+mcp:
+  enabled: true
+  path: /mcp
 `;
 
 export default function NewPluginPage(
@@ -192,21 +195,32 @@ export default function NewPluginPage(
           <Section title="Required fields">
             <Field name="id" desc="Reverse-DNS-ish: lowercase alnum + dot/dash. Becomes URL + tool prefix." />
             <Field name="name" desc="Display name in the activity bar." />
+            <Field name="description" desc="One-line summary shown in the marketplace listing." />
             <Field name="version" desc="Free-form, e.g. 1.0.0." />
             <Field name="image" desc="Full OCI ref, e.g. ghcr.io/acme/foo:1.0." />
-            <Field name="launch.port" desc="Port the container listens on inside." />
-            <Field name="ui.iframePath" desc="Path the iframe loads (relative to upstream root)." />
           </Section>
 
           <Section title="Optional">
             <Field name="icon" desc="Lucide icon name (list-todo, database, globe, …)." />
-            <Field name="launch.healthPath" desc="Defaults to '/'. Polled until 2xx after spawn." />
-            <Field name="launch.env" desc="Static env vars; {{ENV_ID}} / {{WORKSPACE_ID}} substituted." />
-            <Field name="ui.needsWebsocket" desc="Set true if upstream uses WS (code-server-style)." />
-            <Field
-              name="defaultEnabledInEnv"
-              desc="Default per-env state. true (default) = shown in every env automatically; false = each env opts in via env Settings."
-            />
+            <Field name="scope" desc="env (default) | workspace | global. Drives how many containers run + who shares state." />
+            <Field name="storage.kind" desc="none (default) | shared-postgres. Set shared-postgres to get DATABASE_URL + isolated schema." />
+            <Field name="ui.path" desc="Path the iframe loads (default '/'). Use '/ui' to keep UI off the API root." />
+            <Field name="ui.websocket" desc="Set true if upstream uses WS (code-server-style). Default false." />
+            <Field name="mcp.enabled" desc="Expose an MCP server so the agent picks up your tools automatically." />
+            <Field name="mcp.path" desc="Path of the MCP endpoint inside the container (default '/mcp')." />
+          </Section>
+
+          <Section title="Runtime conventions (no manifest field)">
+            <p className="text-muted-foreground leading-relaxed">
+              Plugins agree to a few rules so the manifest stays a
+              description, not configuration:
+            </p>
+            <ul className="space-y-1 text-muted-foreground list-disc list-inside">
+              <li>HTTP server listens on port <code className="font-mono">8080</code>.</li>
+              <li>Health probe is <code className="font-mono">GET /</code> returning non-5xx within 15s (a redirect to /ui is fine).</li>
+              <li>System injects <code className="font-mono">ENV_ID</code> + <code className="font-mono">WORKSPACE_ID</code> always; <code className="font-mono">DATABASE_URL</code> + <code className="font-mono">PGSCHEMA</code> when storage=shared-postgres.</li>
+              <li>Plugins handle their own user auth + external API keys (e.g. via their own UI).</li>
+            </ul>
           </Section>
 
           <Section title="What install does">
