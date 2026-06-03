@@ -48,8 +48,9 @@ config drives both `withvibe-code-server` and `withvibe-code-tunnel` builds.
 docker build -t withvibe-code-tunnel apps/api/code-tunnel-image
 ```
 
-Or via the bundle / install pipeline — this image is enumerated in
-`packages/cli/src/install/images.ts` and built by `scripts/build-bundle.sh`.
+Or via the bundle / install pipeline — this image is enumerated by the
+[`withvibe` CLI](https://github.com/withvibe/withvibe-cli) (`src/install/images.ts`)
+and built by `scripts/build-bundle.sh`.
 
 ## Runtime contract
 

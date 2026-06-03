@@ -2,12 +2,18 @@
 # Build a withvibe release: CLI npm tarball + Docker image bundle, packaged
 # together so a target machine can install everything with one script.
 #
+# The CLI is fetched from npm (its source lives at
+# https://github.com/withvibe/withvibe-cli, Apache 2.0). Override the CLI
+# version with CLI_VERSION=... if you need to pin to something other than
+# the server's $VERSION.
+#
 #   ./scripts/build-release.sh
 #   VERSION=0.1.0 ./scripts/build-release.sh
+#   CLI_VERSION=0.2.5 VERSION=0.1.0 ./scripts/build-release.sh
 #   SKIP_SIDECARS=1 SKIP_TRAEFIK=1 ./scripts/build-release.sh
 #
 # Output: dist/withvibe-release-<version>/
-#   - withvibe-<version>.tgz             # the CLI (npm pack output)
+#   - withvibe-<cli-version>.tgz         # the CLI (downloaded from npm)
 #   - withvibe-deploy-<version>.tar.gz   # the Docker image bundle
 #   - install-release.sh                 # target-side installer (copy from scripts/)
 #   - README.txt                         # one-liner pointing at install-release.sh
@@ -20,6 +26,7 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
 VERSION="${VERSION:-0.1.0}"
+CLI_VERSION="${CLI_VERSION:-latest}"
 RELEASE_DIR="dist/withvibe-release-${VERSION}"
 RELEASE_TAR="dist/withvibe-release-${VERSION}.tar.gz"
 
@@ -27,32 +34,13 @@ echo "==> Cleaning $RELEASE_DIR"
 rm -rf "$RELEASE_DIR" "$RELEASE_TAR"
 mkdir -p "$RELEASE_DIR"
 
-echo "==> Setting CLI package version to $VERSION"
-# Keep package.json version in sync with the release version so the npm
-# tarball lands as withvibe-<version>.tgz.
-node -e "
-  const fs = require('fs');
-  const p = 'packages/cli/package.json';
-  const json = JSON.parse(fs.readFileSync(p, 'utf8'));
-  if (json.version !== '$VERSION') {
-    json.version = '$VERSION';
-    fs.writeFileSync(p, JSON.stringify(json, null, 2) + '\n');
-    console.log('  updated package.json version → $VERSION');
-  } else {
-    console.log('  version already $VERSION');
-  }
-"
-
-echo "==> Building CLI (tsc)"
-pnpm --filter withvibe build
-
-echo "==> Packing CLI npm tarball"
+echo "==> Fetching withvibe CLI from npm (version: $CLI_VERSION)"
+# `npm pack <spec>` downloads the registry tarball without installing — the
+# resulting file is named withvibe-<actual-version>.tgz.
 (
-  cd packages/cli
-  rm -f withvibe-*.tgz
-  npm pack --silent
+  cd "$RELEASE_DIR"
+  npm pack "withvibe@${CLI_VERSION}" --silent
 )
-cp "packages/cli/withvibe-${VERSION}.tgz" "$RELEASE_DIR/"
 
 echo "==> Building image bundle (delegating to build-bundle.sh)"
 VERSION="$VERSION" \

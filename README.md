@@ -137,16 +137,17 @@ server forwards the user's session cookie to NestJS over a same-origin path.
 
 ## CLI
 
-The [`withvibe`](packages/cli) CLI lets a team member set up an environment on
-their own machine — clone repos, boot Docker Compose, open VSCode.
+The [`withvibe`](https://github.com/withvibe/withvibe-cli) CLI (Apache 2.0,
+separate repo) lets a team member set up an environment on their own machine
+— clone repos, boot Docker Compose, open VSCode.
 
 ```bash
-pnpm --filter withvibe build
-node packages/cli/dist/index.js login
-node packages/cli/dist/index.js env <envId>
+npm install -g withvibe
+withvibe login
+withvibe env <envId>
 ```
 
-See [packages/cli/README.md](packages/cli/README.md) for details.
+See the [withvibe-cli repo](https://github.com/withvibe/withvibe-cli) for details.
 
 ## Links
 

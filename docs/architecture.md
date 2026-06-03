@@ -10,8 +10,11 @@ context and setup, start with the root [README](../README.md).
 | `apps/web` | `@withvibe/web` | Next.js | Browser UI + API route proxies |
 | `apps/api` | `@withvibe/api` | NestJS | Core backend, orchestration, agent runtime |
 | `packages/db` | `@withvibe/db` | Prisma / Postgres | Schema + generated client |
-| `packages/cli` | `withvibe` | Node | Install/run the stack locally (npm-published) |
 | `apps/qa-browser-extension` | `@withvibe/qa-browser-extension` | Chrome MV3 | QA agent drives a real browser |
+
+The `withvibe` CLI (Apache 2.0) installs and runs the stack locally and is
+maintained in a separate repository:
+[withvibe/withvibe-cli](https://github.com/withvibe/withvibe-cli).
 
 ## Request flow
 

@@ -27,8 +27,10 @@ pnpm lint
 | --- | --- |
 | [apps/web](apps/web) | Next.js 16 frontend, NextAuth, REST proxy to the API |
 | [apps/api](apps/api) | NestJS backend, Docker orchestration, terminal WebSocket |
-| [packages/cli](packages/cli) | The `withvibe` CLI that runs an env locally |
 | [packages/db](packages/db) | Prisma schema + generated client (shared) |
+
+The `withvibe` CLI lives in its own repo:
+[withvibe/withvibe-cli](https://github.com/withvibe/withvibe-cli) (Apache 2.0).
 
 ## Coding standards
 

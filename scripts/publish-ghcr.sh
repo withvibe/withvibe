@@ -4,12 +4,12 @@
 # `curl | bash` installer) pulls from.
 #
 #   docker login ghcr.io -u <gh-user>            # do this FIRST (not in here)
-#   ./scripts/publish-ghcr.sh                     # version = packages/cli/package.json
+#   ./scripts/publish-ghcr.sh                     # version = apps/api/package.json
 #   VERSION=0.1.9 ./scripts/publish-ghcr.sh       # explicit version
 #   REGISTRY=ghcr.io/withvibe PLATFORMS=linux/amd64,linux/arm64 ./scripts/publish-ghcr.sh
 #
 # Env overrides:
-#   VERSION         image tag (default: packages/cli/package.json version)
+#   VERSION         image tag (default: apps/api/package.json version)
 #   REGISTRY        namespace (default: ghcr.io/withvibe)
 #   PLATFORMS       buildx platforms (default: linux/amd64,linux/arm64)
 #   PUSH_LATEST     also tag/push :latest (default: 1)
@@ -17,13 +17,14 @@
 #                   set 1 on a machine that can't yet build the other arch,
 #                   e.g. an Apple-Silicon Mac building linux/amd64)
 #
-# Image names mirror packages/cli/src/install/images.ts (registryName()):
-# the api pulls exactly these on a from-registry install — keep in sync.
+# Image names mirror the withvibe CLI's install/images.ts
+# (https://github.com/withvibe/withvibe-cli): the api pulls exactly these on a
+# from-registry install — keep in sync.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="${VERSION:-$(node -e "console.log(require('./packages/cli/package.json').version)")}"
+VERSION="${VERSION:-$(node -e "console.log(require('./apps/api/package.json').version)")}"
 REGISTRY="${REGISTRY:-ghcr.io/withvibe}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 PUSH_LATEST="${PUSH_LATEST:-1}"

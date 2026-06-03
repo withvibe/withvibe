@@ -10,9 +10,8 @@ let cached: string | null = null;
  *
  * Precedence:
  *   1. WITHVIBE_VERSION env var, when it's a real version (not "latest"/"dev").
- *      The CLI sets this from packages/cli/package.json during `withvibe init`.
+ *      The CLI sets this from its own package.json during `withvibe init`.
  *   2. apps/api/package.json on disk (baked into the container at build time).
- *      Keep apps/api/package.json's "version" in sync with the CLI's at release.
  *   3. The literal string "dev" as a last-resort label.
  *
  * Resolved once per process; subsequent calls return the cached value.

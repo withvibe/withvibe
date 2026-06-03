@@ -5,9 +5,9 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> Note: the `withvibe` CLI (`packages/cli`) is published to npm and versioned
-> independently of the monorepo. CLI releases are noted under their own
-> heading below.
+> Note: the `withvibe` CLI lives in its own repository
+> ([withvibe/withvibe-cli](https://github.com/withvibe/withvibe-cli), Apache 2.0)
+> and is published to npm independently of the monorepo.
 
 ## [Unreleased]
 
