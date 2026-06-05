@@ -2050,11 +2050,11 @@ const MessageBubble = memo(function MessageBubble({
   if (isUser) {
     return (
       <div className="flex justify-end">
-        <div className="flex flex-col items-end gap-2 max-w-[85%]">
+        <div className="flex flex-col items-end gap-2 max-w-[85%] min-w-0">
           {message.content && (
             <div
               dir="auto"
-              className="rounded-md px-4 py-3 text-sm whitespace-pre-wrap bg-primary text-primary-foreground"
+              className="rounded-md px-4 py-3 text-sm whitespace-pre-wrap break-words bg-primary text-primary-foreground"
             >
               {message.content}
             </div>
@@ -2075,10 +2075,10 @@ const MessageBubble = memo(function MessageBubble({
 
   return (
     <div className="flex justify-start">
-      <div className="flex flex-col items-start gap-1 max-w-[85%]">
+      <div className="flex flex-col items-start gap-1 max-w-[85%] min-w-0">
         <div
           className={cn(
-            "rounded-md px-4 py-3 text-sm",
+            "rounded-md px-4 py-3 text-sm w-full min-w-0 max-w-full overflow-hidden",
             "bg-muted/50 text-foreground border border-border/60"
           )}
         >
@@ -2698,11 +2698,13 @@ function ToolCardShell({
 }) {
   return (
     <div className="text-xs text-muted-foreground">
-      <div className="flex items-center gap-1.5 font-mono">
+      <div className="flex items-center gap-1.5 font-mono min-w-0">
         <Wrench className="size-3 shrink-0" />
-        <span className="font-semibold text-foreground/80">{label}</span>
+        <span className="font-semibold text-foreground/80 shrink-0">
+          {label}
+        </span>
         {target && (
-          <span className="opacity-80 truncate">
+          <span className="opacity-80 truncate min-w-0">
             {target.startsWith("/") ? shortPath(target) : target}
           </span>
         )}
