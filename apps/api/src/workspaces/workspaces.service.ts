@@ -45,16 +45,32 @@ type DemoTemplateSpec = {
   }>;
 };
 
+// Dev-style compose: the aquarium runs the Next.js dev server with the repo
+// source bind-mounted, so the Orchestrator agent's code edits hot-reload in the
+// running container (HMR ~seconds) instead of needing a full image rebuild +
+// container restart. Deps install once into a named volume (persists across
+// restarts; ~2 min on a fresh env, then cached). better-sqlite3 installs from a
+// prebuilt binary, so no compiler is needed at runtime. Verified end-to-end
+// (boot, /api/state sqlite route, and a live HMR edit) before shipping.
 const VIBE_AQUARIUM_COMPOSE = `services:
   aquarium:
-    build:
-      context: ./vibe-aquarium
+    image: node:20
+    working_dir: /app
+    command: sh -c "npm install --include=dev && npm run dev -- -H 0.0.0.0 -p 3000"
     ports:
       - "3000:3000"
     environment:
-      NODE_ENV: production
+      NODE_ENV: development
       DB_PATH: /app/data/aquarium.db
+      NEXT_TELEMETRY_DISABLED: "1"
+      # File-watch across the Docker bind mount (robust on macOS/overlay hosts).
+      WATCHPACK_POLLING: "true"
     volumes:
+      # Bind the cloned repo source so edits are visible to the dev server.
+      - ./vibe-aquarium:/app
+      # Anonymous-style named volume keeps the container's installed deps from
+      # being shadowed by the bind mount, and persists them across restarts.
+      - aquarium-node-modules:/app/node_modules
       - aquarium-data:/app/data
     restart: unless-stopped
     # Demo hardening (defense-in-depth). The web terminal / VS Code tunnel give
@@ -62,16 +78,19 @@ const VIBE_AQUARIUM_COMPOSE = `services:
     # docker.sock / host mount / privilege (compose-security enforces that), so
     # it can't reach the host — these limits cap blast radius and abuse (DoS /
     # mining) on top of that. All allowed by compose-security (cap_add and
-    # no-new-privileges:false would be rejected; these are not).
+    # no-new-privileges:false would be rejected; these are not). Memory is a bit
+    # higher than the prod build needed because the dev server compiles on the
+    # fly (three.js is heavy).
     security_opt:
       - "no-new-privileges:true"
     cap_drop:
       - ALL
-    pids_limit: 256
-    mem_limit: 512m
-    cpus: 1.0
+    pids_limit: 512
+    mem_limit: 1024m
+    cpus: 1.5
 
 volumes:
+  aquarium-node-modules:
   aquarium-data:
 `;
 
