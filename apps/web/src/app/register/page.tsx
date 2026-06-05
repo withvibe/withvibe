@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,6 @@ import {
 import { PositionSelect } from "@/components/profile/position-select";
 
 function RegisterForm() {
-  const router = useRouter();
   const params = useSearchParams();
   const invite = params.get("invite");
   const [name, setName] = useState("");
@@ -46,8 +45,17 @@ function RegisterForm() {
         return;
       }
 
-      const next = invite ? `/login?invite=${invite}` : "/login?registered=true";
-      router.push(next);
+      // Registration already established a session (the API set the cookie),
+      // so go straight into the app instead of forcing a second login. Invite
+      // flows still route through /login so the invite is attached on sign-in.
+      // Hard navigation (not router.push) so server components re-evaluate auth
+      // with the freshly-set cookie — mirrors the login page's approach.
+      if (invite) {
+        window.location.assign(`/login?invite=${invite}`);
+      } else {
+        window.location.assign("/");
+      }
+      return;
     } catch {
       setError("Network error — please try again");
     } finally {

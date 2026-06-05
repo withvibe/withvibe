@@ -36,6 +36,16 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: monorepoRoot,
   },
+  async redirects() {
+    return [
+      // `/signup` isn't a route (registration lives at `/register`). People
+      // guess it, and the auth middleware would otherwise bounce it to
+      // `/login?next=/signup`, trapping them on a 404 after login. Send it
+      // straight to /register instead.
+      { source: "/signup", destination: "/register", permanent: true },
+      { source: "/sign-up", destination: "/register", permanent: true },
+    ];
+  },
   async rewrites() {
     return [
       { source: "/api/auth/:path*", destination: `${apiBase}/api/auth/:path*` },
