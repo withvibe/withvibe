@@ -563,6 +563,46 @@ export class EnvsService {
       });
     }
 
+    // Demo mode: seed an Orchestrator session (no bound agent) LAST so it is
+    // the default-selected tab (sessions are ordered createdAt desc). The
+    // Orchestrator can change application code, so a visitor who lands here and
+    // says "add a feature" / "change the design" gets it built — instead of
+    // landing on DevOps, which refuses code changes and tells them to switch
+    // agents. The specialized agents (DevOps/QA/Security) remain available in
+    // the sidebar.
+    if (this.demo.enabled) {
+      const orchestratorGreeting =
+        `👋 Hi! I'm your build assistant for **${title}**.\n\n` +
+        `Your environment is **already up and running**, so you can start ` +
+        `right away. Tell me what you'd like to build or change — describe it ` +
+        `in your own words (any language works) and I'll make it happen. ` +
+        `Watch the live app update in the **preview** (👁 on the right).`;
+      const orchestratorSession = await this.prisma.client.chatSession.create({
+        data: {
+          envId: env.id,
+          userId,
+          agentId: null,
+          title: "Build",
+        },
+      });
+      await this.prisma.client.message.create({
+        data: {
+          envId: env.id,
+          userId,
+          sessionId: orchestratorSession.id,
+          role: "assistant",
+          content: orchestratorGreeting,
+          metadata: {
+            suggestions: [
+              "Add a new feature",
+              "Change how it looks",
+              "Fix something",
+            ],
+          },
+        },
+      });
+    }
+
     // Materialize the custom compose on disk so the DevOps agent can read
     // it immediately. Asset files (schemas, configs) are uploaded via the
     // separate multipart endpoint and materialized under envDir/assets/.

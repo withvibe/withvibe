@@ -1490,10 +1490,13 @@ export function EnvironmentChat({
         {(() => {
           if (hasSeenOnboarding) return null;
           if (!sessions || sessions.length === 0) return null;
-          const devopsSession = sessions.find(
-            (s) => s.agent?.slug === "devops"
-          );
-          if (!devopsSession || active !== devopsSession.id) return null;
+          // In demo the env auto-starts and the default tab is the seeded
+          // Orchestrator ("Build") session — a no-agent session — so anchor the
+          // hint there. Otherwise anchor it to the DevOps start prompt.
+          const targetSession = demoMode
+            ? sessions.find((s) => !s.agent)
+            : sessions.find((s) => s.agent?.slug === "devops");
+          if (!targetSession || active !== targetSession.id) return null;
           const noActivityYet = sessions.every((s) => s.messageCount <= 1);
           if (!noActivityYet) return null;
           if (live) return null;
