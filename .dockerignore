@@ -8,9 +8,14 @@
 .DS_Store
 *.log
 **/*.tsbuildinfo
-.env
-.env.*
-!.env.example
+# Exclude env files at EVERY level, not just the context root — a bare `.env`
+# only matches the root, so a nested dev override like `apps/api/.env` would
+# otherwise be COPY'd into the image and loaded by ConfigModule in production
+# (this leaked WITHVIBE_MARKETPLACE_BASE_URL=http://localhost:3001 and 500'd
+# the plugin marketplace).
+**/.env
+**/.env.*
+!**/.env.example
 apps/api/qa-browser-image
 apps/api/runner
 packages/db/generated

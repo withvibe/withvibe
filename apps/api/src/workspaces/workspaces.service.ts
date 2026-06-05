@@ -154,6 +154,11 @@ export class WorkspacesService {
       data: {
         name: input.name,
         description: input.description ?? null,
+        // Default new workspaces to Sonnet 4.6 rather than the schema's "auto"
+        // (which per-turn routes and can escalate to Opus). A concrete model id
+        // makes the model-router short-circuit, so every session in the
+        // workspace uses Sonnet 4.6 unless an admin changes it in Settings.
+        defaultModel: "claude-sonnet-4-6",
         members: {
           create: {
             userId,
