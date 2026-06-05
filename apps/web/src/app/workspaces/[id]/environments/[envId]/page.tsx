@@ -70,6 +70,7 @@ type Environment = {
   title: string;
   description: string | null;
   containerStatus: ContainerStatus;
+  serviceReady: boolean;
   containerPorts: Record<string, number> | null;
   serviceUrls: Record<string, string> | null;
   containerError: string | null;
@@ -274,13 +275,24 @@ export default function EnvironmentDetailPage(
       "stopping",
       "building",
     ].includes(env.containerStatus);
+    // Keep polling while the container is up but the service inside is still
+    // booting (healthcheck "starting"), so serviceReady flips without a manual
+    // refresh and the "Service starting…" indicator clears on its own.
+    const serviceBooting =
+      env.containerStatus === "running" && !env.serviceReady;
     const reposCreating = env.repos.some(
       (r) => r.envCloneStatus === "pending" || r.envCloneStatus === "creating"
     );
     // Agent activity is a third trigger: while a turn is running, the agent
     // can mutate container state (docker-mcp's start_env/stop_env/rebuild)
     // and we won't otherwise know until the user navigates away and back.
-    if (!containerTransitioning && !reposCreating && !agentRunning) return;
+    if (
+      !containerTransitioning &&
+      !reposCreating &&
+      !agentRunning &&
+      !serviceBooting
+    )
+      return;
     const t = setInterval(load, 2000);
     return () => clearInterval(t);
   }, [env, load, agentRunning]);
@@ -406,6 +418,15 @@ export default function EnvironmentDetailPage(
                 <span className={cn("size-1.5 rounded-full", badge.dot)} />
                 {badge.label}
               </span>
+              {isRunning && !env.serviceReady && (
+                <span
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400 text-[11px] font-mono"
+                  title="The container is up, but the service inside is still booting (installing deps / first compile). The preview will be ready shortly."
+                >
+                  <span className="size-1.5 rounded-full bg-amber-500 animate-pulse" />
+                  Service starting…
+                </span>
+              )}
               <h1 className="text-xl font-mono font-bold tracking-tight break-words">
                 {env.title}
               </h1>
@@ -558,6 +579,7 @@ export default function EnvironmentDetailPage(
               {activePanel === "preview" && (
                 <PreviewPanel
                   containerStatus={env.containerStatus}
+                  serviceReady={env.serviceReady}
                   containerPorts={env.containerPorts}
                   serviceUrls={env.serviceUrls}
                 />

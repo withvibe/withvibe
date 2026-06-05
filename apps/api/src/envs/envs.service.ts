@@ -141,12 +141,27 @@ export class EnvsService {
         ? await this.runner.uiStatus(envId).catch(() => "stopped" as const)
         : null;
 
+    // Service readiness: the container can be "running" while the service
+    // inside is still booting (e.g. a dev server doing npm install + first
+    // compile). Derived from container healthchecks — false while any is still
+    // "health: starting". Only probed when running (one cheap `docker ps`), and
+    // defaults to true on error / for envs with no healthcheck so the preview
+    // is never blocked. Lets the UI show "Service starting…".
+    const serviceReady =
+      env.containerStatus === "running"
+        ? await this.docker
+            .listEnvContainers(envId)
+            .then((r) => r.serviceReady)
+            .catch(() => true)
+        : false;
+
     return {
       id: env.id,
       title: env.title,
       description: env.description,
       status: env.status,
       containerStatus: env.containerStatus,
+      serviceReady,
       containerPorts: env.containerPorts,
       serviceUrls: env.serviceUrls,
       containerError: env.containerError,

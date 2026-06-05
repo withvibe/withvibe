@@ -56,10 +56,15 @@ function branchUrlFor(repoUrl: string, branch: string): string {
 
 export function PreviewPanel({
   containerStatus,
+  serviceReady = true,
   containerPorts,
   serviceUrls,
 }: {
   containerStatus: ContainerStatus;
+  /** False while the container is up but the service inside is still booting
+   * (healthcheck "starting"). Defaults to true so envs with no healthcheck
+   * behave exactly as before. */
+  serviceReady?: boolean;
   containerPorts: Record<string, number> | null;
   serviceUrls: Record<string, string> | null;
 }) {
@@ -160,11 +165,27 @@ export function PreviewPanel({
           <ExternalLink className="size-3" />
         </a>
       </div>
-      <iframe
-        src={primaryUrl}
-        className="w-full flex-1 bg-white"
-        title="Environment preview"
-      />
+      <div className="relative flex-1 min-h-0">
+        <iframe
+          src={primaryUrl}
+          className="w-full h-full bg-white"
+          title="Environment preview"
+        />
+        {running && !serviceReady && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/85 backdrop-blur-sm text-center px-6">
+            <Loader2 className="size-6 animate-spin text-primary" />
+            <div>
+              <p className="font-mono text-sm font-medium">Service starting…</p>
+              <p className="text-xs text-muted-foreground mt-1 max-w-xs">
+                The container is up, but the app inside is still booting
+                (installing dependencies / first compile). This can take a
+                minute or two on first start — the preview loads automatically
+                when it’s ready.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
