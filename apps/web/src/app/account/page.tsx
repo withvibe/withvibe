@@ -28,6 +28,8 @@ type Account = {
   name: string | null;
   positions: string[];
   bio: string | null;
+  anthropicKeySet?: boolean;
+  anthropicKeyHint?: string | null;
 };
 
 export default function AccountPage() {
@@ -38,6 +40,8 @@ export default function AccountPage() {
   const [positions, setPositions] = useState<string[]>([]);
   const [bio, setBio] = useState("");
   const [saving, setSaving] = useState(false);
+  const [apiKey, setApiKey] = useState("");
+  const [savingKey, setSavingKey] = useState(false);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -71,6 +75,24 @@ export default function AccountPage() {
       toast.success("Account updated");
     } else {
       toast.error("Failed to save");
+    }
+  }
+
+  async function saveKey(value: string | null) {
+    setSavingKey(true);
+    const res = await fetch("/api/account", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ anthropicApiKey: value }),
+    });
+    setSavingKey(false);
+    if (res.ok) {
+      const updated = await res.json();
+      setAccount(updated);
+      setApiKey("");
+      toast.success(value ? "API key saved" : "API key removed");
+    } else {
+      toast.error("Failed to save key");
     }
   }
 
@@ -151,6 +173,69 @@ export default function AccountPage() {
                   <Button onClick={save} disabled={saving}>
                     {saving ? "Saving…" : "Save"}
                   </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="font-mono text-base">
+                  Anthropic API key
+                </CardTitle>
+                <CardDescription>
+                  Use your own Anthropic key for your chat sessions. When set,
+                  your sessions use this key in preference to the workspace key
+                  (it falls back to the workspace key if you don’t set one).
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {account.anthropicKeySet ? (
+                  <div className="flex items-center justify-between rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+                    <span className="font-mono text-sm">
+                      Key set —{" "}
+                      <span className="text-muted-foreground">
+                        sk-…{account.anthropicKeyHint?.replace(/^…/, "")}
+                      </span>
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={savingKey}
+                      onClick={() => saveKey(null)}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    No personal key set — your sessions use the workspace key.
+                  </p>
+                )}
+                <div className="space-y-2">
+                  <Label htmlFor="anthropicKey">
+                    {account.anthropicKeySet ? "Replace key" : "Add key"}
+                  </Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="anthropicKey"
+                      type="password"
+                      autoComplete="off"
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder="sk-ant-…"
+                      className="font-mono"
+                    />
+                    <Button
+                      onClick={() => saveKey(apiKey.trim())}
+                      disabled={savingKey || !apiKey.trim()}
+                    >
+                      {savingKey ? "Saving…" : "Save"}
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Stored securely and never shown again. Accepts a standard
+                    key (sk-ant-api…) or an OAuth token (sk-ant-oat…).
+                  </p>
                 </div>
               </CardContent>
             </Card>

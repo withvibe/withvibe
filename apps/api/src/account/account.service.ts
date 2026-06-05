@@ -21,13 +21,24 @@ export class AccountService {
         bio: true,
         createdAt: true,
         defaultWorkspaceId: true,
+        anthropicApiKey: true,
       },
     });
     if (!user) throw new NotFoundException("User not found");
     const adminMemberships = await this.prisma.client.workspaceMember.count({
       where: { userId, role: "admin" },
     });
-    return { ...user, isDeploymentAdmin: adminMemberships > 0 };
+    // Never return the raw personal key — only whether it's set and a masked
+    // hint (last 4 chars) so the UI can show "sk-…abcd" without exposing it.
+    const { anthropicApiKey, ...safe } = user;
+    return {
+      ...safe,
+      isDeploymentAdmin: adminMemberships > 0,
+      anthropicKeySet: Boolean(anthropicApiKey),
+      anthropicKeyHint: anthropicApiKey
+        ? `…${anthropicApiKey.slice(-4)}`
+        : null,
+    };
   }
 
   async update(
@@ -37,6 +48,7 @@ export class AccountService {
       positions?: unknown;
       bio?: unknown;
       defaultWorkspaceId?: unknown;
+      anthropicApiKey?: unknown;
     }
   ) {
     const data: {
@@ -44,11 +56,24 @@ export class AccountService {
       positions?: string[];
       bio?: string | null;
       defaultWorkspaceId?: string | null;
+      anthropicApiKey?: string | null;
     } = {};
 
     if (typeof body.name === "string") {
       const trimmed = body.name.trim();
       data.name = trimmed || null;
+    }
+
+    // Personal Anthropic key: a non-empty string sets it, an empty string or
+    // null clears it. We don't validate the format here — Anthropic rejects a
+    // bad key at request time and the chat surfaces that error.
+    if (body.anthropicApiKey !== undefined) {
+      if (body.anthropicApiKey === null) {
+        data.anthropicApiKey = null;
+      } else if (typeof body.anthropicApiKey === "string") {
+        const trimmed = body.anthropicApiKey.trim();
+        data.anthropicApiKey = trimmed || null;
+      }
     }
 
     Object.assign(data, parseUserProfileInput(body));
@@ -72,7 +97,7 @@ export class AccountService {
       }
     }
 
-    return this.prisma.client.user.update({
+    const updated = await this.prisma.client.user.update({
       where: { id: userId },
       data,
       select: {
@@ -82,7 +107,14 @@ export class AccountService {
         positions: true,
         bio: true,
         defaultWorkspaceId: true,
+        anthropicApiKey: true,
       },
     });
+    const { anthropicApiKey, ...safe } = updated;
+    return {
+      ...safe,
+      anthropicKeySet: Boolean(anthropicApiKey),
+      anthropicKeyHint: anthropicApiKey ? `…${anthropicApiKey.slice(-4)}` : null,
+    };
   }
 }

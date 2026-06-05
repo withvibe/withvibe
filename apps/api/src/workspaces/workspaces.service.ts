@@ -72,6 +72,22 @@ const VIBE_AQUARIUM_COMPOSE = `services:
       # being shadowed by the bind mount, and persists them across restarts.
       - aquarium-node-modules:/app/node_modules
       - aquarium-data:/app/data
+    # HTTP readiness probe (Docker runs it inside the container). The container
+    # is "running" the moment it starts, but the dev server isn't reachable
+    # until npm install + the first compile finish (~1-2 min on a fresh env).
+    # This flips the container to (healthy) only once :3000 actually answers, so
+    # the UI can show "Service starting…" instead of a blank/erroring preview.
+    # node is always present in node:20; exec form avoids shell-quoting.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000').then(()=>process.exit(0)).catch(()=>process.exit(1))"
+      interval: 5s
+      timeout: 8s
+      retries: 60
+      start_period: 30s
     restart: unless-stopped
     # Demo hardening (defense-in-depth). The web terminal / VS Code tunnel give
     # an in-container shell to anonymous public visitors; this container has no

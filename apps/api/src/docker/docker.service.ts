@@ -1071,6 +1071,18 @@ export class DockerService {
     }
   }
 
+  /** Classify a `docker ps` status string by its embedded healthcheck state.
+   * "Up 2m (healthy)" → healthy; "Up 5s (health: starting)" → starting;
+   * "(unhealthy)" → unhealthy; "Up 2m" (no healthcheck) → none. */
+  private parseHealth(
+    status: string
+  ): "healthy" | "starting" | "unhealthy" | "none" {
+    if (/\(healthy\)/.test(status)) return "healthy";
+    if (/\(health: starting\)/.test(status)) return "starting";
+    if (/\(unhealthy\)/.test(status)) return "unhealthy";
+    return "none";
+  }
+
   async listEnvContainers(
     envId: string
   ): Promise<{
@@ -1080,7 +1092,14 @@ export class DockerService {
       service: string;
       status: string;
       image: string;
+      health: "healthy" | "starting" | "unhealthy" | "none";
     }[];
+    /** True once every running container is past its healthcheck (or has none).
+     * False while any container is still "health: starting" — i.e. the service
+     * inside is booting even though the container is "up". Lets the UI show
+     * "Service starting…" instead of a broken preview. Envs without any
+     * healthcheck report true as soon as they're running (no regression). */
+    serviceReady: boolean;
   }> {
     const project = this.composeProjectName(envId);
     try {
@@ -1106,11 +1125,24 @@ export class DockerService {
         .filter(Boolean)
         .map((line) => {
           const [idPart, name, service, status, image] = line.split("\t");
-          return { id: idPart, name, service: service || name, status, image };
+          return {
+            id: idPart,
+            name,
+            service: service || name,
+            status,
+            image,
+            health: this.parseHealth(status),
+          };
         });
-      return { containers };
+      // Ready when at least one container is up and none is still mid-
+      // healthcheck. "unhealthy" is an error state, not "starting", so it
+      // doesn't hold readiness back forever — the preview surfaces the failure.
+      const serviceReady =
+        containers.length > 0 &&
+        !containers.some((c) => c.health === "starting");
+      return { containers, serviceReady };
     } catch {
-      return { containers: [] };
+      return { containers: [], serviceReady: false };
     }
   }
 

@@ -22,12 +22,22 @@ export class TitleGeneratorService {
     workspaceId: string;
   }): Promise<void> {
     try {
-      const workspace = await this.prisma.client.workspace.findUnique({
-        where: { id: opts.workspaceId },
-        select: { anthropicApiKey: true },
-      });
+      // Resolution order matches the chat path: the session owner's personal
+      // key (set on /account) wins, then the workspace key, then the server env.
+      const [session, workspace] = await Promise.all([
+        this.prisma.client.chatSession.findUnique({
+          where: { id: opts.sessionId },
+          select: { user: { select: { anthropicApiKey: true } } },
+        }),
+        this.prisma.client.workspace.findUnique({
+          where: { id: opts.workspaceId },
+          select: { anthropicApiKey: true },
+        }),
+      ]);
       const apiKey =
-        workspace?.anthropicApiKey || process.env.ANTHROPIC_API_KEY;
+        session?.user?.anthropicApiKey?.trim() ||
+        workspace?.anthropicApiKey ||
+        process.env.ANTHROPIC_API_KEY;
       if (!apiKey) return;
       // OAuth tokens aren't supported by the raw SDK — skip silently.
       if (apiKey.startsWith("sk-ant-oat")) return;

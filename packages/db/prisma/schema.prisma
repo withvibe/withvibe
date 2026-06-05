@@ -52,6 +52,11 @@ model User {
   // cached value is fine until the user joins a second Slack-connected
   // workspace (out of scope for now).
   slackUserId         String?
+  // Optional personal Anthropic API key. When set, the user's own chat sessions
+  // use this key in preference to the workspace key (resolution order:
+  // user → workspace → server ANTHROPIC_API_KEY). Set on the /account page,
+  // never in workspace settings. Stored as-is, mirroring Workspace.anthropicApiKey.
+  anthropicApiKey     String?
   createdAt           DateTime          @default(now())
 
   memberships     WorkspaceMember[]

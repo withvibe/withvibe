@@ -501,6 +501,7 @@ export class ChatContextService {
               email: true,
               positions: true,
               bio: true,
+              anthropicApiKey: true,
             },
           },
         },
@@ -523,8 +524,18 @@ export class ChatContextService {
     // History across turns is now owned by the Agent SDK via `resume:`. We no
     // longer flatten the transcript into the system prompt or maintain our own
     // summary rows — the SDK's built-in compaction handles long sessions.
-    const workspaceApiKey =
-      env.workspace.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY ?? null;
+    // Anthropic key resolution: the speaker's personal key (set on /account)
+    // wins, then the workspace key, then the server env. This lets a member
+    // spend their own credits while the workspace key remains the shared
+    // fallback. (Exhaustion auto-fallback — retry on the workspace key when the
+    // personal key hits a quota/credit error — is a planned follow-up.)
+    const speakerApiKey =
+      speakerMember?.user.anthropicApiKey?.trim() || null;
+    const resolvedApiKey =
+      speakerApiKey ??
+      env.workspace.anthropicApiKey ??
+      process.env.ANTHROPIC_API_KEY ??
+      null;
 
     const envDir = this.envClones.envDir(env.workspaceId, env.id);
     await phase("mkdir-env-dir", () => ensureEnvDir(envDir));
@@ -1290,7 +1301,7 @@ A read-only markdown mirror of everything above (workspace + env knowledge, memb
         ...readyRepos.map((r) => r.localPath),
         ...extraContext.map((c) => c.localPath),
       ],
-      anthropicApiKey: env.workspace.anthropicApiKey ?? null,
+      anthropicApiKey: resolvedApiKey,
       mcpServers,
       extraAllowedTools,
       disallowedTools,

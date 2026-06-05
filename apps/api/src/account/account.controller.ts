@@ -23,6 +23,7 @@ export class AccountController {
       positions?: unknown;
       bio?: unknown;
       defaultWorkspaceId?: unknown;
+      anthropicApiKey?: unknown;
     }
   ) {
     return this.account.update(user.id, body);
