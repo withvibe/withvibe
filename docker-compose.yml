@@ -136,6 +136,16 @@ services:
       IS_SANDBOX: ${IS_SANDBOX:-1}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       WITHVIBE_VERSION: ${WITHVIBE_VERSION:-latest}
+      # Public demo mode (OFF by default). When "true": every visitor is
+      # auto-provisioned their own isolated workspace running one cloned
+      # vibe-aquarium env, and all other env/template/repo creation is blocked
+      # server-side. Pairs with NEXT_PUBLIC_DEMO_MODE on the web service (which
+      # is cosmetic only — this server flag is the security boundary).
+      DEMO_MODE: ${DEMO_MODE:-}
+      # Comma-separated repo URLs auto-seeded as env templates into every new
+      # workspace. In DEMO_MODE the api falls back to the vibe-aquarium repo
+      # when this is empty, so the demo works with zero extra config.
+      DEMO_TEMPLATE_REPOS: ${DEMO_TEMPLATE_REPOS:-}
       NODE_ENV: production
       PORT: "4000"
     ports:
@@ -184,6 +194,10 @@ services:
       # /api/cli-auth/* at this URL. Inside the compose network the api
       # service is reachable as `api:4000`.
       API_BASE_URL: http://api:4000
+      # Cosmetic mirror of the api's DEMO_MODE for pages that render before the
+      # bootstrap payload is available (e.g. /workspaces/new). UI gating only —
+      # never a security boundary. Keep in sync with the api's DEMO_MODE.
+      NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-}
       NODE_ENV: production
       PORT: "3000"
     ports:

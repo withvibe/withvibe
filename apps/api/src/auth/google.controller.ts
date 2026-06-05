@@ -11,6 +11,7 @@ import { AuthGuard } from "@nestjs/passport";
 import type { Request, Response } from "express";
 import { AuthService } from "./auth.service";
 import type { GoogleUser } from "./google.strategy";
+import { DemoProvisionService } from "../demo/demo-provision.service";
 
 @Controller("auth/google")
 export class GoogleAuthController {
@@ -18,6 +19,7 @@ export class GoogleAuthController {
 
   constructor(
     private readonly auth: AuthService,
+    private readonly demoProvision: DemoProvisionService,
     config: ConfigService
   ) {
     this.webBaseUrl =
@@ -42,6 +44,9 @@ export class GoogleAuthController {
       profile.email,
       profile.name
     );
+    // Demo mode: provision the visitor's workspace + aquarium env on first
+    // sign-in (idempotent — existing users with a workspace are skipped).
+    await this.demoProvision.provisionDemoWorkspace(user.id);
     const token = this.auth.signSessionToken(user);
     this.auth.setSessionCookie(res, token);
     res.redirect(`${this.webBaseUrl.replace(/\/$/, "")}/`);

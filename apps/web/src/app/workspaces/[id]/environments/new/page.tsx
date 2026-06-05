@@ -29,6 +29,7 @@ import {
   type SectionStatus,
 } from "./_components/sidebar-nav";
 import { AiPanelStub } from "./_components/ai-panel-stub";
+import { useDemoMode } from "../../_demo-mode";
 
 type Repo = {
   id: string;
@@ -82,6 +83,7 @@ export default function NewEnvironmentPage(
 ) {
   const { id } = use(props.params);
   const router = useRouter();
+  const demoMode = useDemoMode();
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -311,6 +313,15 @@ export default function NewEnvironmentPage(
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // Demo mode: let visitors explore the whole create flow, but block the
+    // actual save (the API also rejects it). Surfaces the capability without
+    // letting anonymous visitors spin up arbitrary environments.
+    if (demoMode) {
+      setError(
+        "This is a live demo — you can explore how environments are created, but saving is disabled. Your workspace already has the vibe-aquarium environment to play with."
+      );
+      return;
+    }
     setSubmitting(true);
     setError("");
 
@@ -396,7 +407,9 @@ export default function NewEnvironmentPage(
             <div className="flex-1 min-w-0">
               <div className="text-sm font-mono font-medium">New environment</div>
               <div className="text-xs text-muted-foreground truncate">
-                A self-contained piece of work — a feature, a fix, an experiment.
+                {demoMode
+                  ? "Demo — explore how environments are created (saving is disabled)."
+                  : "A self-contained piece of work — a feature, a fix, an experiment."}
               </div>
             </div>
             <Button
@@ -407,7 +420,11 @@ export default function NewEnvironmentPage(
             >
               Cancel
             </Button>
-            <Button type="submit" size="sm" disabled={submitting || !canSubmit}>
+            <Button
+              type="submit"
+              size="sm"
+              disabled={submitting || (!canSubmit && !demoMode)}
+            >
               {submitting && <Loader2 className="size-4 animate-spin" />}
               {submitting ? "Creating…" : "Create environment"}
             </Button>

@@ -8,9 +8,11 @@ import { CliTokenStrategy } from "./cli-token.strategy";
 import { GoogleAuthController } from "./google.controller";
 import { GoogleStrategy } from "./google.strategy";
 import { JwtStrategy } from "./jwt.strategy";
+import { DemoModule } from "../demo/demo.module";
 
 @Module({
   imports: [
+    DemoModule,
     PassportModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],

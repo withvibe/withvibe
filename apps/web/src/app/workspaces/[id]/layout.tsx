@@ -14,6 +14,7 @@ type Bootstrap = {
   };
   workspaces: Array<{ id: string; name: string }>;
   defaultWorkspaceId: string | null;
+  demoMode: boolean;
   integrations: { anthropic: boolean; github: boolean };
 };
 
@@ -52,6 +53,7 @@ export default async function WorkspaceLayout({
       }}
       workspaces={res.workspaces}
       defaultWorkspaceId={res.defaultWorkspaceId}
+      demoMode={res.demoMode}
       integrations={res.integrations}
     >
       {children}

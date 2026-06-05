@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   HttpCode,
   Param,
@@ -14,6 +15,7 @@ import {
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { CurrentUser } from "../auth/current-user.decorator";
 import type { AuthUser } from "../auth/jwt.strategy";
+import { DemoModeService } from "../common/demo-mode.service";
 import { WorkspacesService } from "./workspaces.service";
 import { SecretsService } from "./secrets.service";
 
@@ -22,8 +24,18 @@ import { SecretsService } from "./secrets.service";
 export class WorkspacesController {
   constructor(
     private readonly workspaces: WorkspacesService,
-    private readonly secrets: SecretsService
+    private readonly secrets: SecretsService,
+    private readonly demo: DemoModeService
   ) {}
+
+  /** Settings are read-only for public demo visitors. */
+  private assertNotDemo() {
+    if (this.demo.enabled) {
+      throw new ForbiddenException(
+        "Settings are read-only in demo mode"
+      );
+    }
+  }
 
   @Post()
   @HttpCode(201)
@@ -83,6 +95,7 @@ export class WorkspacesController {
       sandboxBypass?: boolean | null;
     }
   ) {
+    this.assertNotDemo();
     return this.workspaces.updateIntegrations(user.id, id, body);
   }
 
@@ -106,6 +119,7 @@ export class WorkspacesController {
       s3SecretAccessKey?: string | null;
     }
   ) {
+    this.assertNotDemo();
     return this.workspaces.updateStorage(user.id, id, body);
   }
 
@@ -118,6 +132,7 @@ export class WorkspacesController {
   @Post(":id/settings/storage/migrate")
   @HttpCode(200)
   migrateStorage(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    this.assertNotDemo();
     return this.workspaces.migrateEnvsToConfiguredStorage(user.id, id);
   }
 
@@ -133,6 +148,7 @@ export class WorkspacesController {
     @Param("id") id: string,
     @Body() body: { name?: unknown; value?: unknown }
   ) {
+    this.assertNotDemo();
     return this.secrets.upsert(user.id, id, body);
   }
 
@@ -143,6 +159,7 @@ export class WorkspacesController {
     @Param("name") name: string,
     @Body() body: { value?: unknown }
   ) {
+    this.assertNotDemo();
     return this.secrets.update(user.id, id, name, body);
   }
 
@@ -152,6 +169,7 @@ export class WorkspacesController {
     @Param("id") id: string,
     @Param("name") name: string
   ) {
+    this.assertNotDemo();
     return this.secrets.delete(user.id, id, name);
   }
 }

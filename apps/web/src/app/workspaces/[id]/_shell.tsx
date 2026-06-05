@@ -48,6 +48,7 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Brand } from "@/components/brand";
 import { ActiveRunsProvider } from "./_active-runs";
+import { DemoModeProvider } from "./_demo-mode";
 
 export function WorkspaceShell({
   version,
@@ -56,6 +57,7 @@ export function WorkspaceShell({
   user,
   workspaces,
   defaultWorkspaceId,
+  demoMode,
   integrations,
   children,
 }: {
@@ -65,6 +67,7 @@ export function WorkspaceShell({
   user: { name: string | null; email: string; isDeploymentAdmin: boolean };
   workspaces: { id: string; name: string }[];
   defaultWorkspaceId: string | null;
+  demoMode: boolean;
   integrations: { anthropic: boolean; github: boolean };
   children: React.ReactNode;
 }) {
@@ -113,6 +116,7 @@ export function WorkspaceShell({
   }
 
   return (
+    <DemoModeProvider demoMode={demoMode}>
     <ActiveRunsProvider workspaceId={workspace.id}>
     <SidebarProvider open={sidebarOpen} onOpenChange={setSidebarOpen}>
       <Sidebar collapsible="icon">
@@ -179,11 +183,17 @@ export function WorkspaceShell({
                   );
                 })}
               </DropdownMenuGroup>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => router.push("/workspaces/new")}>
-                <Plus className="size-4" />
-                New workspace
-              </DropdownMenuItem>
+              {!demoMode && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => router.push("/workspaces/new")}
+                  >
+                    <Plus className="size-4" />
+                    New workspace
+                  </DropdownMenuItem>
+                </>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </SidebarHeader>
@@ -387,6 +397,7 @@ export function WorkspaceShell({
       </SidebarInset>
     </SidebarProvider>
     </ActiveRunsProvider>
+    </DemoModeProvider>
   );
 }
 

@@ -15,6 +15,8 @@ import {
   Square,
 } from "lucide-react";
 import { useActiveRuns } from "./_active-runs";
+import { useDemoMode } from "./_demo-mode";
+import { DemoOnboarding } from "./_demo-onboarding";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -117,6 +119,7 @@ export default function WorkspaceHomePage(
   props: PageProps<"/workspaces/[id]">
 ) {
   const { id } = use(props.params);
+  const demoMode = useDemoMode();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [envs, setEnvs] = useState<Environment[] | null>(null);
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
@@ -220,6 +223,7 @@ export default function WorkspaceHomePage(
 
   return (
     <div className="max-w-6xl mx-auto p-6 sm:p-8 space-y-8">
+      <DemoOnboarding />
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="text-xl font-mono font-bold tracking-tight">
@@ -231,8 +235,12 @@ export default function WorkspaceHomePage(
             </p>
           )}
         </div>
+        {/* In demo mode we still SHOW "New environment" / "Manage templates"
+            so visitors see the product can create them — but the create forms
+            block saving (and the api rejects it server-side). Invite is hidden
+            (per-visitor demo workspaces have no teammates to invite). */}
         <div className="flex gap-2 shrink-0">
-          {workspace.role === "admin" && (
+          {workspace.role === "admin" && !demoMode && (
             <Button
               variant="outline"
               onClick={createInvite}
@@ -285,7 +293,7 @@ export default function WorkspaceHomePage(
         </Card>
       )}
 
-      {setupTodo && (
+      {!demoMode && setupTodo && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Get set up</CardTitle>

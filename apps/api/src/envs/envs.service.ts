@@ -16,6 +16,7 @@ import {
 } from "@withvibe/db";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
+import { DemoModeService } from "../common/demo-mode.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { AgentSeedService } from "../agents/agent-seed.service";
 import { DockerService } from "../docker/docker.service";
@@ -70,6 +71,7 @@ export class EnvsService {
     private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
+    private readonly demo: DemoModeService,
     private readonly envClones: EnvCloneService,
     private readonly agentSeed: AgentSeedService,
     private readonly docker: DockerService,
@@ -239,6 +241,33 @@ export class EnvsService {
         "Provide either a template or a custom compose file, not both"
       );
     }
+
+    // Demo mode: the ONLY env a visitor may create is one from the
+    // vibe-aquarium template, and at most one per workspace. Custom compose
+    // files and any other template are rejected here (server-side boundary —
+    // the UI gate in Phase 5 is cosmetic). The slug check is enforced below
+    // once the template is resolved.
+    if (this.demo.enabled) {
+      if (userComposeFile) {
+        throw new ForbiddenException(
+          "Custom environments are disabled in demo mode"
+        );
+      }
+      if (!templateId) {
+        throw new ForbiddenException(
+          "Only the vibe-aquarium demo environment can be created in demo mode"
+        );
+      }
+      const liveCount = await this.prisma.client.env.count({
+        where: { workspaceId, deletedAt: null },
+      });
+      if (liveCount >= 1) {
+        throw new ForbiddenException(
+          "This demo workspace already has its environment"
+        );
+      }
+    }
+
     if (userComposeFile) this.assertComposeOrBadRequest(userComposeFile);
     const templateVars = this.parseTemplateVars(body.templateVars);
 
@@ -267,6 +296,14 @@ export class EnvsService {
       });
       if (!tpl || tpl.workspaceId !== workspaceId) {
         throw new BadRequestException("Template not found in this workspace");
+      }
+      // Demo mode: only the vibe-aquarium template is permitted. Combined with
+      // the workspace-scoping check above, this prevents pointing at any other
+      // (or another workspace's) template.
+      if (this.demo.enabled && tpl.slug !== this.demo.templateSlug) {
+        throw new ForbiddenException(
+          "Only the vibe-aquarium demo environment can be created in demo mode"
+        );
       }
       // A template with an empty composeFile MUST attach exactly one repo —
       // the materializer will read that repo's own docker-compose.yml from
@@ -600,15 +637,75 @@ export class EnvsService {
         `Scheduling env-clone setup for ${envRepoIds.length} repo(s) in env ${env.id}`
       );
     }
+    const autoStart = this.demo.enabled;
     setImmediate(() => {
-      for (const id of envRepoIds) {
-        void this.envClones.ensureEnvClone(id).catch((err) => {
-          this.logger.error(`ensureEnvClone(${id}) failed: ${err}`);
-        });
-      }
+      void (async () => {
+        try {
+          if (!autoStart) {
+            // Non-demo: fire-and-forget clone setup (the UI's Start handles the
+            // build once clones are ready), preserving prior behavior.
+            for (const id of envRepoIds) {
+              void this.envClones.ensureEnvClone(id).catch((err) => {
+                this.logger.error(`ensureEnvClone(${id}) failed: ${err}`);
+              });
+            }
+            return;
+          }
+          // Demo mode: build + start the env automatically so a visitor can
+          // start prompting immediately, without asking the DevOps agent to
+          // bring it up. The env clone copies from the workspace repo, which is
+          // still cloning in the background (workspaces.create → repos.add), so
+          // ensureEnvClone returns { error: "not ready" } until that lands —
+          // retry until every env clone is ready, THEN build + start.
+          for (const id of envRepoIds) {
+            const ok = await this.ensureEnvCloneReady(id, env.id);
+            if (!ok) {
+              this.logger.error(
+                `Demo auto-start aborted: env clone ${id} not ready in time for env ${env.id}`
+              );
+              return;
+            }
+          }
+          this.logger.info(`Demo auto-start: building + starting env ${env.id}`);
+          await this.docker.startEnvironment(env.id);
+        } catch (err) {
+          this.logger.error(`env ${env.id} setup/auto-start failed: ${err}`);
+        }
+      })();
     });
 
     return { id: env.id };
+  }
+
+  /**
+   * Poll ensureEnvClone until the env clone is fully materialized (its source
+   * workspace repo finished its background clone). Returns false if it never
+   * becomes ready within the budget. Used by demo auto-start so we don't kick
+   * `docker compose up --build` before the build context exists.
+   */
+  private async ensureEnvCloneReady(
+    envRepoId: string,
+    envId: string,
+    attempts = 60,
+    delayMs = 3000
+  ): Promise<boolean> {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const res = await this.envClones.ensureEnvClone(envRepoId);
+        if (res && "localPath" in res) return true;
+        if (i === 0 || i % 5 === 0) {
+          this.logger.info(
+            `Waiting on env clone ${envRepoId} for env ${envId}: ${
+              "error" in res ? res.error : "pending"
+            } (attempt ${i + 1}/${attempts})`
+          );
+        }
+      } catch (err) {
+        this.logger.warn(`ensureEnvClone(${envRepoId}) threw: ${err}`);
+      }
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return false;
   }
 
   async update(
@@ -633,6 +730,15 @@ export class EnvsService {
     });
     if (!existing || existing.workspaceId !== workspaceId || existing.deletedAt) {
       throw new NotFoundException("Env not found");
+    }
+
+    // Demo mode: block compose edits so a visitor can't swap the aquarium's
+    // compose for arbitrary content after creation. Other edits (title,
+    // description, status) remain allowed.
+    if (this.demo.enabled && body.composeFile !== undefined) {
+      throw new ForbiddenException(
+        "Editing the environment compose is disabled in demo mode"
+      );
     }
 
     const data: {

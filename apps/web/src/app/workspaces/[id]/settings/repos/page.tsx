@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { useDemoMode } from "../../_demo-mode";
 
 // Inline GitHub brand icon (lucide doesn't ship one).
 function GithubIcon(props: React.SVGProps<SVGSVGElement>) {
@@ -197,6 +198,7 @@ export default function WorkspaceReposPage(
   }
 
   const isAdmin = role === "admin";
+  const demoMode = useDemoMode();
   const connectedUrls = useMemo(
     () => new Set((repos || []).map((r) => r.url.toLowerCase())),
     [repos]
@@ -214,7 +216,7 @@ export default function WorkspaceReposPage(
         </p>
       </div>
 
-      {isAdmin && (
+      {isAdmin && !demoMode && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base font-mono">

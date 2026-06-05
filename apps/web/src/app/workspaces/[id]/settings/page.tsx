@@ -25,6 +25,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { MODEL_OPTIONS, type ModelChoice } from "@/lib/models";
+import { useDemoMode } from "../_demo-mode";
 
 function GithubIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
@@ -64,6 +65,7 @@ export default function SettingsPage(
   props: PageProps<"/workspaces/[id]/settings">
 ) {
   const { id } = use(props.params);
+  const demoMode = useDemoMode();
   const [data, setData] = useState<Integrations | null>(null);
   const [role, setRole] = useState<Role>(null);
 
@@ -98,6 +100,15 @@ export default function SettingsPage(
             change these values.
           </p>
         )}
+        {demoMode && (
+          <div className="mt-3 rounded-md border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
+            <span className="font-medium">Demo mode — settings are read-only.</span>{" "}
+            <span className="text-muted-foreground">
+              Look around to see what&apos;s configurable, but changes can&apos;t
+              be saved here.
+            </span>
+          </div>
+        )}
       </header>
 
       {data === null ? (
@@ -112,6 +123,21 @@ export default function SettingsPage(
             title="AI"
             description="Claude powers the chat agents and commit-message suggestions."
           >
+            {demoMode ? (
+              <div className="rounded-md border border-border/60 bg-muted/30 px-4 py-3 text-sm">
+                <div className="flex items-center gap-2 font-medium">
+                  <Sparkles className="size-4" />
+                  Anthropic API key
+                  <Badge variant="outline" className="ml-1">
+                    {data.anthropic?.connected ? "Connected" : "Not configured"}
+                  </Badge>
+                </div>
+                <p className="mt-1.5 text-muted-foreground">
+                  Managed by the demo operator (set at install via
+                  ANTHROPIC_API_KEY). It can&apos;t be changed here in demo mode.
+                </p>
+              </div>
+            ) : (
             <SecretField
               id={id}
               isAdmin={isAdmin}
@@ -154,6 +180,7 @@ export default function SettingsPage(
               envLabel="ANTHROPIC_API_KEY"
               onChange={load}
             />
+            )}
 
             <Divider />
 

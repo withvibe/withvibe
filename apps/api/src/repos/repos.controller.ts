@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   HttpCode,
   Param,
@@ -13,12 +14,16 @@ import {
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { CurrentUser } from "../auth/current-user.decorator";
 import type { AuthUser } from "../auth/jwt.strategy";
+import { DemoModeService } from "../common/demo-mode.service";
 import { ReposService } from "./repos.service";
 
 @Controller("workspaces/:workspaceId/repos")
 @UseGuards(JwtAuthGuard)
 export class ReposController {
-  constructor(private readonly repos: ReposService) {}
+  constructor(
+    private readonly repos: ReposService,
+    private readonly demo: DemoModeService
+  ) {}
 
   @Get()
   list(
@@ -35,6 +40,9 @@ export class ReposController {
     @Param("workspaceId") workspaceId: string,
     @Body() body: { url?: unknown; branch?: unknown }
   ) {
+    if (this.demo.enabled) {
+      throw new ForbiddenException("Adding repositories is disabled in demo mode");
+    }
     const url = typeof body.url === "string" ? body.url.trim() : "";
     if (!url) throw new BadRequestException("URL is required");
     const branch =

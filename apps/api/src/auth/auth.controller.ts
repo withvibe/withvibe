@@ -17,12 +17,14 @@ import { JwtAuthGuard } from "./jwt-auth.guard";
 import { AuthService } from "./auth.service";
 import { LoginDto, RegisterDto } from "./dto/auth.dto";
 import { PrismaService } from "../prisma/prisma.service";
+import { DemoProvisionService } from "../demo/demo-provision.service";
 
 @Controller("auth")
 export class AuthController {
   constructor(
     private readonly auth: AuthService,
-    private readonly prisma: PrismaService
+    private readonly prisma: PrismaService,
+    private readonly demoProvision: DemoProvisionService
   ) {}
 
   @Post("register")
@@ -33,6 +35,11 @@ export class AuthController {
   ) {
     const input = parse(RegisterDto, body);
     const user = await this.auth.register(input);
+    // Demo mode: spin up the visitor's isolated workspace + aquarium env now
+    // (no-op otherwise). Awaited so the post-register redirect lands them in
+    // the new workspace; the env clone/build continues asynchronously. The
+    // call is best-effort and never throws.
+    await this.demoProvision.provisionDemoWorkspace(user.id);
     const token = this.auth.signSessionToken(user);
     this.auth.setSessionCookie(res, token);
     return { id: user.id, email: user.email };

@@ -25,6 +25,14 @@ export default function NewWorkspacePage() {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
 
+  // Demo mode: visitors are auto-provisioned a single workspace and can't
+  // create more (the api enforces this). Best-effort UI redirect to home;
+  // NEXT_PUBLIC_DEMO_MODE is build-time-inlined, so the server 403 below is the
+  // authoritative guard for from-registry images.
+  useEffect(() => {
+    if (process.env.NEXT_PUBLIC_DEMO_MODE === "true") router.replace("/");
+  }, [router]);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);

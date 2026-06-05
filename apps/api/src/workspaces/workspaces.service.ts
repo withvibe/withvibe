@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 import {
   S3Client,
@@ -10,6 +15,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
+import { DemoModeService } from "../common/demo-mode.service";
 import { AgentSeedService } from "../agents/agent-seed.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { StorageService } from "../storage/storage.service";
@@ -51,6 +57,19 @@ const VIBE_AQUARIUM_COMPOSE = `services:
     volumes:
       - aquarium-data:/app/data
     restart: unless-stopped
+    # Demo hardening (defense-in-depth). The web terminal / VS Code tunnel give
+    # an in-container shell to anonymous public visitors; this container has no
+    # docker.sock / host mount / privilege (compose-security enforces that), so
+    # it can't reach the host — these limits cap blast radius and abuse (DoS /
+    # mining) on top of that. All allowed by compose-security (cap_add and
+    # no-new-privileges:false would be rejected; these are not).
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 512m
+    cpus: 1.0
 
 volumes:
   aquarium-data:
@@ -87,6 +106,7 @@ export class WorkspacesService {
     private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
+    private readonly demo: DemoModeService,
     private readonly agentSeed: AgentSeedService,
     private readonly envClones: EnvCloneService,
     private readonly storage: StorageService,
@@ -96,6 +116,21 @@ export class WorkspacesService {
   ) {}
 
   async create(userId: string, input: CreateWorkspaceInput) {
+    // Demo mode: one workspace per visitor. The auto-provisioner calls this
+    // for the first (membership count 0); any later attempt — direct API call
+    // or stray UI — is rejected so a single account can't spin up unbounded
+    // demo workspaces.
+    if (this.demo.enabled) {
+      const existing = await this.prisma.client.workspaceMember.count({
+        where: { userId },
+      });
+      if (existing > 0) {
+        throw new ForbiddenException(
+          "Creating additional workspaces is disabled in demo mode"
+        );
+      }
+    }
+
     const workspace = await this.prisma.client.workspace.create({
       data: {
         name: input.name,
@@ -112,10 +147,17 @@ export class WorkspacesService {
     await this.agentSeed.ensureQaAgent(workspace.id);
     await this.agentSeed.ensureSecurityAgent(workspace.id);
 
-    const demoUrls = (process.env.DEMO_TEMPLATE_REPOS ?? "")
+    // In demo mode the aquarium template MUST be seeded (it's the only env a
+    // visitor can spin up). Fall back to the canonical vibe-aquarium repo when
+    // the operator hasn't set DEMO_TEMPLATE_REPOS explicitly.
+    const configuredDemoRepos = (process.env.DEMO_TEMPLATE_REPOS ?? "")
       .split(",")
       .map((u) => u.trim())
       .filter(Boolean);
+    const demoUrls =
+      configuredDemoRepos.length === 0 && this.demo.enabled
+        ? [DEMO_TEMPLATE_SPECS[0]!.matchRepoUrl]
+        : configuredDemoRepos;
     for (const url of demoUrls) {
       try {
         const { id: repoId } = await this.repos.add(userId, workspace.id, url);
@@ -256,6 +298,7 @@ export class WorkspacesService {
         .filter((m) => !m.workspace.deletedAt)
         .map((m) => ({ id: m.workspace.id, name: m.workspace.name })),
       defaultWorkspaceId: currentUser?.defaultWorkspaceId ?? null,
+      demoMode: this.demo.enabled,
       integrations: {
         anthropic: Boolean(
           workspace.anthropicApiKey || process.env.ANTHROPIC_API_KEY
@@ -359,6 +402,14 @@ export class WorkspacesService {
     }
   ) {
     await this.access.admin(userId, workspaceId);
+    // Demo mode: the operator supplies the Anthropic key at install time via
+    // the deployment-wide ANTHROPIC_API_KEY; public visitors must not be able
+    // to change (or replace) it from their workspace settings.
+    if (this.demo.enabled && body.anthropicApiKey !== undefined) {
+      throw new ForbiddenException(
+        "Changing the Anthropic API key is disabled in demo mode"
+      );
+    }
     const data: {
       anthropicApiKey?: string | null;
       githubToken?: string | null;

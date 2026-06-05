@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   HttpCode,
   Param,
@@ -14,6 +15,7 @@ import type { Response } from "express";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { CurrentUser } from "../auth/current-user.decorator";
 import type { AuthUser } from "../auth/jwt.strategy";
+import { DemoModeService } from "../common/demo-mode.service";
 import { TemplatesService } from "./templates.service";
 import {
   TemplateAssistService,
@@ -25,8 +27,18 @@ import {
 export class TemplatesController {
   constructor(
     private readonly templates: TemplatesService,
-    private readonly assist: TemplateAssistService
+    private readonly assist: TemplateAssistService,
+    private readonly demo: DemoModeService
   ) {}
+
+  /** Template authoring is disabled for demo visitors. */
+  private assertNotDemo() {
+    if (this.demo.enabled) {
+      throw new ForbiddenException(
+        "Template authoring is disabled in demo mode"
+      );
+    }
+  }
 
   @Get()
   list(
@@ -52,6 +64,7 @@ export class TemplatesController {
     @Param("workspaceId") workspaceId: string,
     @Body() body: Record<string, unknown>
   ) {
+    this.assertNotDemo();
     return this.templates.create(user.id, workspaceId, body);
   }
 
@@ -62,6 +75,7 @@ export class TemplatesController {
     @Param("templateId") templateId: string,
     @Body() body: Record<string, unknown>
   ) {
+    this.assertNotDemo();
     return this.templates.update(user.id, workspaceId, templateId, body);
   }
 
@@ -71,6 +85,7 @@ export class TemplatesController {
     @Param("workspaceId") workspaceId: string,
     @Param("templateId") templateId: string
   ) {
+    this.assertNotDemo();
     return this.templates.delete(user.id, workspaceId, templateId);
   }
 
@@ -87,6 +102,7 @@ export class TemplatesController {
     @Body() body: AssistRequest,
     @Res() res: Response
   ) {
+    this.assertNotDemo();
     let stream: ReadableStream<Uint8Array>;
     try {
       stream = await this.assist.assist(user.id, workspaceId, body);

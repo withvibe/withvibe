@@ -1,15 +1,31 @@
 # WithVibe
 
-[![License: ELv2](https://img.shields.io/badge/License-Elastic%202.0-005571.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
-[![pnpm](https://img.shields.io/badge/pnpm-%3E%3D9-orange.svg)](https://pnpm.io)
+**A self-hosted, shared AI environment for R&D teams.**
+A teammate spins up an isolated env with one click, vibe-codes with AI,
+shares it with the team, and ships once automated agent checks and human
+review pass.
+
+🌐 **[withvibe.dev](https://withvibe.dev)** &nbsp;·&nbsp;
+📦 **[CLI on npm](https://www.npmjs.com/package/withvibe)** &nbsp;·&nbsp;
+📖 **[Docs](https://withvibe.dev/docs)** &nbsp;·&nbsp;
+✉️ **[Contact](https://withvibe.dev/contact)**
+
+[![License: ELv2](https://img.shields.io/badge/license-Elastic%202.0-005571.svg)](LICENSE)
+[![CLI: Apache 2.0](https://img.shields.io/badge/CLI-Apache%202.0-blue.svg)](https://github.com/withvibe/withvibe-cli)
+[![Node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](https://nodejs.org)
+[![pnpm](https://img.shields.io/badge/pnpm-%E2%89%A59-orange.svg)](https://pnpm.io)
 [![Website](https://img.shields.io/badge/website-withvibe.dev-7c3aed.svg)](https://withvibe.dev)
 
-> **Website & docs:** [withvibe.dev](https://withvibe.dev)
+## Try it in 30 seconds
 
-A shared AI environment for R&D teams. A team member spins up an isolated env
-with one click, vibe-codes with AI, shares it with the team, and ships to
-production once automated agent checks and human review pass.
+```bash
+npm install -g withvibe       # Node 20+, Docker 24+ required
+withvibe doctor               # sanity-check your machine
+withvibe init -y              # one-click install + start
+```
+
+When `init` finishes, it prints the URL — open it, sign in, you're running.
+For options and details, see the [CLI README](https://github.com/withvibe/withvibe-cli).
 
 ## Flow
 
@@ -47,7 +63,8 @@ flowchart TD
 
 ## Repository layout
 
-This is a pnpm monorepo.
+This is the **server-stack monorepo** (pnpm). The CLI that installs and runs
+the stack lives in a [separate, Apache-2.0 repo](https://github.com/withvibe/withvibe-cli).
 
 ```
 .
@@ -56,12 +73,20 @@ This is a pnpm monorepo.
 │   ├── api/        # NestJS backend, Docker orchestration, terminal WS (@withvibe/api)
 │   └── qa-browser-extension/  # Chrome MV3 ext for the QA agent (@withvibe/qa-browser-extension)
 ├── packages/
-│   ├── cli/        # `withvibe` CLI — install the stack and run envs locally (withvibe)
 │   └── db/         # Prisma schema + generated client (@withvibe/db)
+├── docs/           # architecture and operator notes
+├── scripts/        # release + GHCR publishing
 └── LICENSE         # Elastic License 2.0
 ```
 
-## Prerequisites
+## Develop the codebase
+
+> Just want to **run** WithVibe? Use the
+> [withvibe CLI](https://github.com/withvibe/withvibe-cli) — see the
+> [Try it in 30 seconds](#try-it-in-30-seconds) section above. This section
+> is for contributors working on the server stack itself.
+
+### Prerequisites
 
 - **Node.js** ≥ 20
 - **pnpm** ≥ 9
@@ -69,7 +94,7 @@ This is a pnpm monorepo.
 - **Docker** + **Docker Compose** (for environment containers)
 - **`gh` CLI** (recommended; used by `withvibe env` for repo cloning)
 
-## Quick start
+### Local dev setup
 
 ```bash
 # 1. Install
@@ -135,26 +160,20 @@ server forwards the user's session cookie to NestJS over a same-origin path.
 | `COOKIE_SECURE` | `true` to mark the session cookie `Secure` (auto in production) |
 | `COOKIE_DOMAIN` | Set when API + Web are on different subdomains |
 
-## CLI
+## Related repositories
 
-The [`withvibe`](https://github.com/withvibe/withvibe-cli) CLI (Apache 2.0,
-separate repo) lets a team member set up an environment on their own machine
-— clone repos, boot Docker Compose, open VSCode.
-
-```bash
-npm install -g withvibe
-withvibe login
-withvibe env <envId>
-```
-
-See the [withvibe-cli repo](https://github.com/withvibe/withvibe-cli) for details.
+| Repo | License | What it is |
+| --- | --- | --- |
+| **[withvibe/withvibe](https://github.com/withvibe/withvibe)** (this repo) | Elastic 2.0 | The server stack — api, web, db, QA-browser extension |
+| **[withvibe/withvibe-cli](https://github.com/withvibe/withvibe-cli)** | Apache 2.0 | The `withvibe` CLI — installs and manages the stack, runs envs locally |
+| **[withvibe/withvibe-skills](https://github.com/withvibe/withvibe-skills)** | Apache 2.0 | Claude Code skills — first-time installer guide + plugin scaffolder |
 
 ## Links
 
-- **Website / product:** <https://withvibe.dev>
-- **Documentation:** <https://withvibe.dev/docs>
-- **Architecture overview:** [docs/architecture.md](docs/architecture.md)
-- **Source:** <https://github.com/withvibe/withvibe>
+- 🌐 **Website / product:** <https://withvibe.dev>
+- 📖 **Documentation:** <https://withvibe.dev/docs>
+- 🏛️ **Architecture overview:** [docs/architecture.md](docs/architecture.md)
+- ✉️ **Contact / commercial licensing:** <https://withvibe.dev/contact>
 
 ## Contributing
 
@@ -186,13 +205,12 @@ licensor notices.
 
 ### Need a different license?
 
-If you want to use withvibe for purposes that ELv2 doesn't permit
-— for example, offering it as a SaaS product, embedding it in a commercial
-offering you sell to customers, or any other public/commercial distribution
-beyond internal organizational use — please reach out and we'll work out a
-**separate commercial license agreement**.
+If you want to use WithVibe for purposes ELv2 doesn't permit — offering it as
+a SaaS product, embedding it in a commercial offering, or any other
+public/commercial distribution beyond internal organizational use — reach out
+and we'll work out a **commercial license agreement**:
+[withvibe.dev/contact](https://withvibe.dev/contact).
 
-📧 **Commercial licensing & contact:** <https://withvibe.dev/contact>
-🌐 **Website:** <https://withvibe.dev>
+---
 
-Copyright © 2026 WithVibe.
+Copyright © 2026 WithVibe · [withvibe.dev](https://withvibe.dev)

@@ -34,6 +34,7 @@ import {
 } from "./_components/sidebar-nav";
 import { SidebarFiles, COMPOSE_PATH } from "./_components/sidebar-files";
 import { FileTabs } from "./_components/file-tabs";
+import { useDemoMode } from "../../_demo-mode";
 
 // Monaco loads its own worker bundle in the browser; avoid SSR.
 const MonacoEditor = dynamic(
@@ -172,6 +173,7 @@ export function TemplateEditor({
   templateId?: string;
 }) {
   const router = useRouter();
+  const demoMode = useDemoMode();
   const [state, setState] = useState<TemplateEditorState>(initial);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -545,6 +547,14 @@ export function TemplateEditor({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    // Demo mode: let visitors explore the template editor, but block saving
+    // (the api rejects it too).
+    if (demoMode) {
+      setError(
+        "This is a live demo — you can explore the template editor, but saving is disabled."
+      );
+      return;
+    }
     setError("");
     setSubmitting(true);
 

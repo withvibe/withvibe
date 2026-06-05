@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
+import { useDemoMode } from "../../_demo-mode";
 
 type TemplateRow = {
   id: string;
@@ -22,6 +23,7 @@ export default function TemplatesListPage(
   props: PageProps<"/workspaces/[id]/settings/templates">
 ) {
   const { id } = use(props.params);
+  const demoMode = useDemoMode();
   const [rows, setRows] = useState<TemplateRow[] | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
 
@@ -119,15 +121,17 @@ export default function TemplatesListPage(
                     </p>
                   )}
                 </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  disabled={deleting === t.id}
-                  onClick={() => onDelete(t.id, t.name)}
-                  aria-label="Delete template"
-                >
-                  <Trash2 className="size-4 text-destructive" />
-                </Button>
+                {!demoMode && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    disabled={deleting === t.id}
+                    onClick={() => onDelete(t.id, t.name)}
+                    aria-label="Delete template"
+                  >
+                    <Trash2 className="size-4 text-destructive" />
+                  </Button>
+                )}
               </div>
             );
           })}
