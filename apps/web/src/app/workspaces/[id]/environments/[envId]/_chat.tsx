@@ -248,11 +248,16 @@ function emptySessionState(): SessionState {
 export function EnvironmentChat({
   workspaceId,
   envId,
+  envBuilt = false,
   prefill,
   onRunSecurityScan,
 }: {
   workspaceId: string;
   envId: string;
+  /** True once the env container is running. In demo, a built env defaults to
+   *  the Orchestrator ("Build") chat rather than DevOps, since there's nothing
+   *  to start — the user is here to build. */
+  envBuilt?: boolean;
   prefill?: { text: string; id: number } | null;
   /** Opens the Security scan panel + kicks off a fresh scan. Shown as a
    *  quick action when the active session is the Security agent. */
@@ -399,6 +404,9 @@ export function EnvironmentChat({
   // the effect runs.
   const [hasSeenOnboarding, setHasSeenOnboarding] = useState(true);
   const demoMode = useDemoMode();
+  // Guards the one-time auto-creation of the Orchestrator ("Build") session for
+  // a built demo env, so re-running loadSessions can't spawn duplicates.
+  const autoOrchestratorRef = useRef(false);
   useEffect(() => {
     const key = `withvibe.onboarding.seen:${envId}`;
     try {
@@ -438,13 +446,48 @@ export function EnvironmentChat({
     setSessions(data.sessions);
     setLegacyCount(data.legacyCount);
 
+    // Demo + built env: land on the Orchestrator ("Build") chat instead of
+    // DevOps. The env creator gets a seeded orchestrator session, but invited
+    // members don't — so prefer any existing no-agent session, and create one
+    // if there's none (once, guarded). DevOps stays available in the sidebar.
+    const orchestrator = data.sessions.find((s) => !s.agent);
+    if (demoMode && envBuilt) {
+      if (orchestrator) {
+        setActive((prev) => prev ?? orchestrator.id);
+        return;
+      }
+      if (!autoOrchestratorRef.current) {
+        autoOrchestratorRef.current = true;
+        const res2 = await fetch(
+          `/api/workspaces/${workspaceId}/envs/${envId}/sessions`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: "Build" }),
+          }
+        );
+        if (res2.ok) {
+          const s = (await res2.json()) as Session;
+          setSessions((prev) => [s, ...(prev || [])]);
+          setSessionStates((prev) => ({
+            ...prev,
+            [s.id]: { ...emptySessionState(), messagesLoaded: true },
+          }));
+          setActive((prev) => prev ?? s.id);
+          return;
+        }
+        // Creation failed — fall through to the default selection below.
+        autoOrchestratorRef.current = false;
+      }
+    }
+
     setActive((prev) => {
       if (prev) return prev;
       if (data.sessions.length > 0) return data.sessions[0].id;
       if (data.legacyCount > 0) return "legacy";
       return null;
     });
-  }, [workspaceId, envId]);
+  }, [workspaceId, envId, demoMode, envBuilt]);
 
   useEffect(() => {
     loadSessions();

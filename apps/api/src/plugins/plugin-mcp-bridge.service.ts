@@ -195,7 +195,14 @@ export class PluginMcpBridgeService {
   async listMcpServersForContext(ctx: {
     workspaceId: string;
     envId: string;
-  }): Promise<{ pluginId: string; serverName: string }[]> {
+  }): Promise<
+    {
+      pluginId: string;
+      serverName: string;
+      name: string;
+      agentInstructions: string | null;
+    }[]
+  > {
     const plugins = await this.prisma.client.pluginDefinition.findMany({
       where: { enabled: true },
     });
@@ -206,7 +213,12 @@ export class PluginMcpBridgeService {
     const prefByPluginId = new Map(
       prefs.map((p) => [p.pluginId, p.enabled] as const)
     );
-    const out: { pluginId: string; serverName: string }[] = [];
+    const out: {
+      pluginId: string;
+      serverName: string;
+      name: string;
+      agentInstructions: string | null;
+    }[] = [];
     for (const p of plugins) {
       const manifest = this.plugins.parseManifest(p.manifest);
       if (!manifest.mcp.enabled) continue;
@@ -234,6 +246,8 @@ export class PluginMcpBridgeService {
         out.push({
           pluginId: p.id,
           serverName: `plugin_${sanitizeServerName(p.id)}`,
+          name: manifest.name,
+          agentInstructions: manifest.agentInstructions ?? null,
         });
       }
     }

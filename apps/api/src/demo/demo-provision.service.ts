@@ -38,8 +38,20 @@ export class DemoProvisionService {
       });
       if (memberships > 0) return;
 
+      // Personalize the workspace name so an invited member doesn't end up with
+      // two identically-named "Demo — vibe-aquarium" workspaces (their own +
+      // the one they were invited to). Falls back to the email local-part, then
+      // a short id suffix, so it's always distinct.
+      const user = await this.prisma.client.user.findUnique({
+        where: { id: userId },
+        select: { name: true, email: true },
+      });
+      const owner =
+        user?.name?.trim() ||
+        user?.email?.split("@")[0]?.trim() ||
+        `user-${userId.slice(-4)}`;
       const { id: workspaceId } = await this.workspaces.create(userId, {
-        name: "Demo — vibe-aquarium",
+        name: `${owner}'s aquarium`,
       });
 
       const template = await this.prisma.client.envTemplate.findUnique({

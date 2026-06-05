@@ -574,6 +574,10 @@ export class ChatContextService {
       "mcp__withvibe-docker__get_env_service_logs",
       "mcp__withvibe-external-context__render_pdf",
     ];
+    // Per-plugin usage rules (manifest `agentInstructions`) collected during
+    // plugin MCP discovery and folded into the system prompt below, so the
+    // agent knows when/how to use each enabled plugin's tools.
+    const pluginInstructionBlocks: string[] = [];
 
     // Slack: attach only when the workspace has a bot token connected. Keeping
     // the tool absent (vs. surfacing a "not connected" error) means the agent
@@ -808,6 +812,14 @@ export class ChatContextService {
           // Allow the tools without a per-tool name list — we don't know
           // them ahead of time (plugin owns the tool catalog).
           extraAllowedTools.push(`mcp__${ps.serverName}`);
+          // Surface the plugin's own usage rules to the agent. Without this the
+          // agent sees the MCP tools but not WHEN it must use them (e.g. "open a
+          // team vote before changing the project"), so it skips them.
+          if (ps.agentInstructions?.trim()) {
+            pluginInstructionBlocks.push(
+              `### ${ps.name} (tools: \`mcp__${ps.serverName}__*\`)\n${ps.agentInstructions.trim()}`
+            );
+          }
         }
         this.logger.info(
           `[chat-context] attached ${pluginServers.length} plugin MCP server(s) for env=${envId}: ${pluginServers.map((p) => p.serverName).join(", ")}`
@@ -1201,6 +1213,18 @@ ${agentBlock}
 
 A read-only markdown mirror of everything above (workspace + env knowledge, member profiles & memory, agent personas & skills) is materialized at \`.withvibe/memory/\` in your cwd. Use \`Read\` / \`Grep\` / \`Glob\` to search specific entries when you need exact text; start at \`.withvibe/memory/INDEX.md\`. **Writing files there has no effect** — the mirror is regenerated every turn from the database. To persist anything, use the \`save_*\` MCP tools.`;
 
+    // Fold each enabled plugin's own usage rules into the system prompt. These
+    // are authored by the plugin (manifest `agentInstructions`) and are
+    // authoritative for that plugin's tools — e.g. "open a team vote before
+    // changing the project". Placed last so they're salient.
+    const pluginInstructionsSection =
+      pluginInstructionBlocks.length > 0
+        ? `\n\n## Plugin rules (MUST follow when the plugin's tools apply)\n\n` +
+          `The following plugins are enabled in this env. Treat each block as a ` +
+          `hard requirement for that plugin's tools — do not work around it.\n\n` +
+          pluginInstructionBlocks.join("\n\n")
+        : "";
+
     // Build the FS mirror for this turn. Always reflects the current workspace
     // + env; populates the speaker's memory and (for clone sessions) the
     // clone owner's memory as read-only.
@@ -1294,7 +1318,7 @@ A read-only markdown mirror of everything above (workspace + env knowledge, memb
     );
 
     return {
-      systemAppend,
+      systemAppend: systemAppend + pluginInstructionsSection,
       speakerHeader,
       cwd: envDir,
       additionalDirectories: [

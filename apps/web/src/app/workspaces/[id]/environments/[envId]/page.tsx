@@ -540,6 +540,7 @@ export default function EnvironmentDetailPage(
           <EnvironmentChat
             workspaceId={id}
             envId={envId}
+            envBuilt={isRunning}
             prefill={chatPrefill}
             onRunSecurityScan={openSecurityScan}
           />

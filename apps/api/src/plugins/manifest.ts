@@ -74,6 +74,12 @@ export const PluginManifest = z.object({
       path: z.string().min(1).default("/mcp"),
     })
     .default({ enabled: false, path: "/mcp" }),
+  // Optional guidance injected into the env-chat agent's system prompt whenever
+  // this plugin is enabled in the env. Use it to tell the agent WHAT the plugin
+  // is and WHEN to use its tools — otherwise the agent sees the MCP tools but
+  // doesn't know the rules around them (e.g. "open a team vote before changing
+  // the project"). Kept short; it's prepended verbatim to the system prompt.
+  agentInstructions: z.string().max(2000).optional(),
 });
 
 export type PluginManifestT = z.infer<typeof PluginManifest>;
