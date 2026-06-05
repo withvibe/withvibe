@@ -31,26 +31,34 @@ For options and details, see the [CLI README](https://github.com/withvibe/withvi
 
 ```mermaid
 flowchart TD
-    A[Team member has an idea] --> B[One click: create isolated environment]
-    B --> C[Vibecode with AI]
-    C --> D[Share environment with team]
-    D --> E[Team members review & interact with the shared AI]
+    A([💡 Team member has an idea]) --> B[🖱️ One click — spin up an isolated env]
+    B --> C[🤖 Vibe-code with AI]
+    C --> D[👥 Share the env with the team]
+    D --> E[Teammates join the same AI session & review]
     E --> F{Human approval?}
-    F -->|No| C
-    F -->|Yes| G[Pre-production agent checks]
+    F -->|Needs work| C
+    F -->|Approved| G[Pre-production agent gate]
 
-    G --> H[Security review agent]
-    G --> I[Code review agent]
-    G --> J[Test & quality agent]
-    G --> K[Policy / compliance agent]
+    subgraph GATE [🛡️ Automated agent gate]
+        direction LR
+        H[🔒 Security review]
+        I[🔍 Code review]
+        J[🧪 Test & quality]
+        K[📋 Policy / compliance]
+    end
 
-    H --> L{All checks pass?}
-    I --> L
-    J --> L
-    K --> L
+    G --> H & I & J & K
+    H & I & J & K --> L{All checks pass?}
 
-    L -->|No| C
-    L -->|Yes| M[Deploy to main / production]
+    L -->|Flagged| C
+    L -->|Clean pass| M([🚀 Deploy to production])
+
+    classDef start fill:#1e90ff,stroke:#0a0a0a,color:#ffffff;
+    classDef ship fill:#22c55e,stroke:#0a0a0a,color:#ffffff;
+    classDef decision fill:#f59e0b,stroke:#0a0a0a,color:#0a0a0a;
+    class A start;
+    class M ship;
+    class F,L decision;
 ```
 
 ## The idea
@@ -167,6 +175,9 @@ server forwards the user's session cookie to NestJS over a same-origin path.
 | **[withvibe/withvibe](https://github.com/withvibe/withvibe)** (this repo) | Elastic 2.0 | The server stack — api, web, db, QA-browser extension |
 | **[withvibe/withvibe-cli](https://github.com/withvibe/withvibe-cli)** | Apache 2.0 | The `withvibe` CLI — installs and manages the stack, runs envs locally |
 | **[withvibe/withvibe-skills](https://github.com/withvibe/withvibe-skills)** | Apache 2.0 | Claude Code skills — first-time installer guide + plugin scaffolder |
+| **[withvibe/withvibe-roadmap](https://github.com/withvibe/withvibe-roadmap)** | Apache 2.0 | Roadmap plugin — a per-env implementation board (Postgres-backed) with an MCP server the AI orchestrator drives |
+| **[withvibe/withvibe-aquascape](https://github.com/withvibe/withvibe-aquascape)** | Apache 2.0 | Example plugin — turns an env into a team-voted vibecoding game: the AI opens proposals the team votes on before they're built |
+| **[withvibe/vibe-aquarium](https://github.com/withvibe/vibe-aquarium)** | Apache 2.0 | Demo app — a minimal 3D aquarium you reshape live by chatting with the running app |
 
 ## Links
 
