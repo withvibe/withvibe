@@ -5,6 +5,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import {
   DEVOPS_AGENT,
   DEVOPS_GREETING_SUGGESTIONS,
+  DEVOPS_GREETING_DEMO_SUGGESTIONS,
   QA_AGENT,
   QA_GREETING_SUGGESTIONS,
   SECURITY_AGENT,
@@ -295,7 +296,22 @@ export class AgentSeedService {
     userProvidedCompose?: boolean;
     /** Paths (relative to `<envDir>/assets/`) of user-uploaded files. */
     assetPaths?: string[];
+    /**
+     * Demo mode: the env is auto-started right after provisioning, so greet
+     * with a "your env is already running" message (no Yes/No start prompt).
+     */
+    demoReady?: boolean;
   }): Promise<{ content: string; suggestions: string[] }> {
+    if (vars.demoReady) {
+      const content = renderDevOpsGreeting({
+        envTitle: vars.envTitle,
+        envDescription: vars.envDescription,
+        repos: vars.repos.map((r) => r.name),
+        compose: { found: false },
+        demoReady: true,
+      });
+      return { content, suggestions: DEVOPS_GREETING_DEMO_SUGGESTIONS };
+    }
     const assetHasCompose = (vars.assetPaths ?? []).some((p) => {
       const name = p.split("/").pop() ?? "";
       return COMPOSE_FILENAMES.includes(name);

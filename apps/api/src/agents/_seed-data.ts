@@ -83,6 +83,16 @@ const DEVOPS_GREETING_NO_COMPOSE = `Hey! I'm the DevOps agent for **{envTitle}**
 
 {envContext}I scanned your repos ({repoList}) and don't see a \`docker-compose\` file. Want me to build one from scratch? I'll aim for a dev-style setup — source bind-mounted, dev server with HMR — so edits go live without rebuilding the container.`;
 
+// Demo mode: the env is started automatically right after provisioning, so the
+// visitor never has to ask DevOps to bring it up. This greeting reflects that —
+// no "Shall I start?" prompt, just a nudge to open the preview and start
+// building. Rendered when `demoReady` is passed to renderDevOpsGreeting.
+const DEVOPS_GREETING_DEMO_READY = `Hey! I'm the DevOps agent for **{envTitle}**.
+
+{envContext}Good news — this environment is **already up and running**, so there's nothing for you to start. ✅
+
+To begin, open the **preview** (the 👁 icon on the right) to see the live app, then just tell an agent what you'd like to build or change — describe it in your own words, any language works. I'll keep the environment healthy in the background.`;
+
 type SeedSkill = {
   slug: string;
   name: string;
@@ -1095,18 +1105,30 @@ export type ComposeDetection =
 
 export const DEVOPS_GREETING_SUGGESTIONS = ["Yes", "No", "Other…"];
 
+// Demo greeting has nothing to confirm — the env is already running — so no
+// Yes/No suggestion chips.
+export const DEVOPS_GREETING_DEMO_SUGGESTIONS: string[] = [];
+
 export function renderDevOpsGreeting(vars: {
   envTitle: string;
   envDescription: string | null;
   repos: string[];
   compose: ComposeDetection;
   assetPaths?: string[];
+  /** Demo mode: env is auto-started, so greet with a "ready" message. */
+  demoReady?: boolean;
 }): string {
   const envContext = vars.envDescription
     ? `Your description of it: "${vars.envDescription}"\n\n`
     : "";
   const repoList =
     vars.repos.length > 0 ? vars.repos.join(", ") : "(none attached)";
+  if (vars.demoReady) {
+    return DEVOPS_GREETING_DEMO_READY.replaceAll(
+      "{envTitle}",
+      vars.envTitle
+    ).replaceAll("{envContext}", envContext);
+  }
   const template = !vars.compose.found
     ? DEVOPS_GREETING_NO_COMPOSE
     : vars.compose.source === "user-provided"

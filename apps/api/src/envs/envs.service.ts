@@ -538,6 +538,9 @@ export class EnvsService {
             cloneStatus: er.repo.clone?.cloneStatus ?? null,
           })),
           userProvidedCompose: !!userComposeFile || !!templateId,
+          // Demo envs auto-start after provisioning, so greet with a "ready"
+          // message instead of asking the visitor to start the env.
+          demoReady: this.demo.enabled,
         }
       );
       const session = await this.prisma.client.chatSession.create({

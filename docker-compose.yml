@@ -91,9 +91,12 @@ services:
       TRAEFIK_CERT_RESOLVER: ${TRAEFIK_CERT_RESOLVER:-letsencrypt}
       # Container name the platform `docker network connect`s to each env's
       # per-env edge network so Traefik can route it (Phase 2 isolation).
-      # Defaults to the platform Traefik (`withvibe-traefik`); override if
-      # your Traefik runs under a different name.
-      WITHVIBE_TRAEFIK_CONTAINER: ${WITHVIBE_TRAEFIK_CONTAINER:-withvibe-traefik}
+      # Leave EMPTY so the api auto-discovers the running Traefik by its
+      # Compose service label — Compose names the container with a `-1` replica
+      # suffix (`withvibe-traefik-1`), so a hardcoded `withvibe-traefik` would
+      # never match and every env would 504. Only set this when your Traefik
+      # runs under a non-standard name that discovery can't find.
+      WITHVIBE_TRAEFIK_CONTAINER: ${WITHVIBE_TRAEFIK_CONTAINER:-}
       # --- Cross-env shared infra (Phase 3, OFF by default) --------------
       # Opt-in only. WITHVIBE_SHARED_NET names a pre-existing Docker network
       # the operator owns (with their shared DB attached under a stable

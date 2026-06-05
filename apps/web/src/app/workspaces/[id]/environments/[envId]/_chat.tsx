@@ -50,6 +50,7 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
+import { useDemoMode } from "../../_demo-mode";
 
 type MessageSegment =
   | { type: "text"; text: string }
@@ -397,6 +398,7 @@ export function EnvironmentChat({
   // Default `true` keeps it hidden during SSR and the first render before
   // the effect runs.
   const [hasSeenOnboarding, setHasSeenOnboarding] = useState(true);
+  const demoMode = useDemoMode();
   useEffect(() => {
     const key = `withvibe.onboarding.seen:${envId}`;
     try {
@@ -1499,13 +1501,27 @@ export function EnvironmentChat({
             <div className="mx-4 mt-2 mb-1 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 flex items-start gap-2 text-sm">
               <Sparkles className="size-4 text-primary mt-0.5 shrink-0" />
               <div className="flex-1 min-w-0">
-                <p className="font-medium">
-                  Talk to DevOps below to start your environment
-                </p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Try “Start the env” or “Set up the database”. DevOps will
-                  walk you through what this env needs.
-                </p>
+                {demoMode ? (
+                  <>
+                    <p className="font-medium">
+                      Your environment is already running — start building
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Open the preview (👁) to see the live app, then tell an
+                      agent what you’d like to build or change. No setup needed.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="font-medium">
+                      Talk to DevOps below to start your environment
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Try “Start the env” or “Set up the database”. DevOps will
+                      walk you through what this env needs.
+                    </p>
+                  </>
+                )}
               </div>
               <button
                 type="button"
