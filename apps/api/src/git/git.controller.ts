@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   Post,
@@ -9,12 +10,31 @@ import {
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { CurrentUser } from "../auth/current-user.decorator";
 import type { AuthUser } from "../auth/jwt.strategy";
+import { DemoModeService } from "../common/demo-mode.service";
 import { GitService } from "./git.service";
 
 @Controller("workspaces/:workspaceId/envs/:envId/git")
 @UseGuards(JwtAuthGuard)
 export class GitController {
-  constructor(private readonly git: GitService) {}
+  constructor(
+    private readonly git: GitService,
+    private readonly demo: DemoModeService
+  ) {}
+
+  /**
+   * Git writes (commit / push / merge / PR) mutate the visitor's cloned repo
+   * and can reach GitHub — both are off-limits in the public demo. Reads
+   * (status/diff/history) and pull/recover stay open so the sandbox is still
+   * explorable. Enforced server-side because the demo is public and the client
+   * buttons alone can be bypassed.
+   */
+  private assertNotDemo(): void {
+    if (this.demo.enabled) {
+      throw new ForbiddenException(
+        "Committing and pushing are disabled in the demo"
+      );
+    }
+  }
 
   @Get("summary")
   summary(
@@ -63,6 +83,7 @@ export class GitController {
     @Param("envRepoId") envRepoId: string,
     @Body() body: { message?: string; paths?: string[] }
   ) {
+    this.assertNotDemo();
     return this.git.commit(
       user.id,
       workspaceId,
@@ -80,6 +101,7 @@ export class GitController {
     @Param("envId") envId: string,
     @Param("envRepoId") envRepoId: string
   ) {
+    this.assertNotDemo();
     return this.git.push(user.id, workspaceId, envId, envRepoId);
   }
 
@@ -90,6 +112,7 @@ export class GitController {
     @Param("envId") envId: string,
     @Param("envRepoId") envRepoId: string
   ) {
+    this.assertNotDemo();
     return this.git.mergeToBase(user.id, workspaceId, envId, envRepoId);
   }
 
@@ -101,6 +124,7 @@ export class GitController {
     @Param("envRepoId") envRepoId: string,
     @Body() body: { title?: string; body?: string }
   ) {
+    this.assertNotDemo();
     return this.git.createPullRequest(
       user.id,
       workspaceId,
@@ -132,6 +156,7 @@ export class GitController {
     @Param("envId") envId: string,
     @Body() body: { message?: string }
   ) {
+    this.assertNotDemo();
     return this.git.commitAll(
       user.id,
       workspaceId,
@@ -146,6 +171,7 @@ export class GitController {
     @Param("workspaceId") workspaceId: string,
     @Param("envId") envId: string
   ) {
+    this.assertNotDemo();
     return this.git.pushAll(user.id, workspaceId, envId);
   }
 

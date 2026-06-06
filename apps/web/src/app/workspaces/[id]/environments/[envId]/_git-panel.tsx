@@ -23,6 +23,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useDemoMode } from "../../_demo-mode";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import {
@@ -178,6 +179,9 @@ export function GitPanel({
   const [diffLoading, setDiffLoading] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  // In the public demo, git writes are blocked server-side; disable the
+  // buttons too so it's clear up front rather than failing on click.
+  const demoMode = useDemoMode();
   const [prTitle, setPrTitle] = useState("");
   const [prBody, setPrBody] = useState("");
   const [prOpen, setPrOpen] = useState(false);
@@ -970,7 +974,8 @@ export function GitPanel({
               size="sm"
               variant="outline"
               className="h-7 text-[11px]"
-              disabled={busy != null || !selectedRepo.dirty}
+              disabled={busy != null || !selectedRepo.dirty || demoMode}
+              title={demoMode ? "Disabled in the demo" : undefined}
               onClick={commitOne}
             >
               {busy === "commit" ? (
@@ -984,9 +989,13 @@ export function GitPanel({
               size="sm"
               variant="outline"
               className="h-7 text-[11px]"
-              disabled={busy != null || !selectedRepo.dirty}
+              disabled={busy != null || !selectedRepo.dirty || demoMode}
               onClick={commitAndPush}
-              title="Commit and push the selected files"
+              title={
+                demoMode
+                  ? "Disabled in the demo"
+                  : "Commit and push the selected files"
+              }
             >
               {busy === "commit-push" ? (
                 <Loader2 className="size-3 animate-spin" />
@@ -999,7 +1008,8 @@ export function GitPanel({
               size="sm"
               variant="outline"
               className="h-7 text-[11px]"
-              disabled={busy != null || selectedRepo.ahead === 0}
+              disabled={busy != null || selectedRepo.ahead === 0 || demoMode}
+              title={demoMode ? "Disabled in the demo" : undefined}
               onClick={pushOne}
             >
               {busy === "push" ? (
@@ -1028,7 +1038,8 @@ export function GitPanel({
               size="sm"
               variant="outline"
               className="h-7 text-[11px]"
-              disabled={busy != null}
+              disabled={busy != null || demoMode}
+              title={demoMode ? "Disabled in the demo" : undefined}
               onClick={() => {
                 setPrTitle(commitMsg.split("\n")[0] || "");
                 setPrBody(commitMsg.split("\n").slice(1).join("\n").trim());
@@ -1044,6 +1055,7 @@ export function GitPanel({
                 className="h-7 text-[11px] bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 hover:text-amber-200"
                 disabled={
                   busy != null ||
+                  demoMode ||
                   !selectedRepo.branch ||
                   !selectedRepo.baseBranch ||
                   selectedRepo.ahead > 0 ||
@@ -1051,11 +1063,13 @@ export function GitPanel({
                 }
                 onClick={() => setMergeOpen(true)}
                 title={
-                  selectedRepo.ahead > 0
-                    ? "Push your commits first"
-                    : selectedRepo.dirty
-                      ? "Commit your changes first"
-                      : `Merge ${selectedRepo.branch} directly into ${selectedRepo.baseBranch}`
+                  demoMode
+                    ? "Disabled in the demo"
+                    : selectedRepo.ahead > 0
+                      ? "Push your commits first"
+                      : selectedRepo.dirty
+                        ? "Commit your changes first"
+                        : `Merge ${selectedRepo.branch} directly into ${selectedRepo.baseBranch}`
                 }
               >
                 {busy === "merge" ? (
@@ -1094,6 +1108,7 @@ export function GitPanel({
               >
                 <DropdownMenuItem
                   onClick={commitAll}
+                  disabled={demoMode}
                   className="text-[11px] py-1 [&_svg]:size-3 focus:bg-primary/10 focus:text-primary! focus:**:text-primary!"
                 >
                   <GitCommit />
@@ -1101,6 +1116,7 @@ export function GitPanel({
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={pushAll}
+                  disabled={demoMode}
                   className="text-[11px] py-1 [&_svg]:size-3 focus:bg-primary/10 focus:text-primary! focus:**:text-primary!"
                 >
                   <ArrowUpFromLine />
@@ -1108,6 +1124,7 @@ export function GitPanel({
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={commitAndPushAll}
+                  disabled={demoMode}
                   className="text-[11px] py-1 [&_svg]:size-3 focus:bg-primary/10 focus:text-primary! focus:**:text-primary!"
                 >
                   <ArrowUpFromLine />
