@@ -13,7 +13,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.110",
     "@anthropic-ai/sdk": "^0.89.0",
-    "@base-ui/react": "^1.4.0",
+    "@base-ui/react": "^1.5.0",
     "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/typography": "^0.5.19",
     "@withvibe/db": "workspace:*",
