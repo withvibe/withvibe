@@ -16,6 +16,10 @@ review pass.
 [![pnpm](https://img.shields.io/badge/pnpm-%E2%89%A59-orange.svg)](https://pnpm.io)
 [![Website](https://img.shields.io/badge/website-withvibe.dev-7c3aed.svg)](https://withvibe.dev)
 
+<!-- HERO GIF — the core loop: type to the AI → file saves → live preview updates instantly ("live app, no deploy").
+     Record it, save as assets/hero-live-preview.gif, then uncomment the line below. See assets/README.md. -->
+<!-- ![WithVibe: type to the AI and the live preview updates instantly — no deploy](assets/hero-live-preview.gif) -->
+
 ## Try it in 30 seconds
 
 ```bash
@@ -61,6 +65,10 @@ flowchart TD
     class F,L decision;
 ```
 
+<!-- AGENT-GATE GIF/screenshot — the gate running: security / code review / tests / policy passing (the "safe" half).
+     Save as assets/agent-gate.gif, then uncomment the line below. See assets/README.md. -->
+<!-- ![The automated agent gate: security, code review, tests and policy checks running before production](assets/agent-gate.gif) -->
+
 ## The idea
 
 - **One click to start.** No infra setup — the team member gets an isolated env seeded with the existing code.
@@ -68,6 +76,10 @@ flowchart TD
 - **Share, don't fork.** The env is shared with the team; anyone can jump in and interact with the same AI session.
 - **Automated gate before prod.** Once humans approve, specialist agents (security, code review, tests, policy) run as a final gate. Anything flagged loops back to the env.
 - **Ship.** Clean pass → merge to main → production.
+
+<!-- WORKSPACE screenshot — one screen with chat + live preview + logs together ("one environment, every tool").
+     Save as assets/workspace.png, then uncomment the line below. See assets/README.md. -->
+<!-- ![The WithVibe environment: AI chat, live preview and logs in one screen](assets/workspace.png) -->
 
 ## Repository layout
 
