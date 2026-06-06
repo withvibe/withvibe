@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   HttpException,
   NotFoundException,
@@ -13,6 +14,7 @@ import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { CurrentUser } from "../auth/current-user.decorator";
 import type { AuthUser } from "../auth/jwt.strategy";
 import { PrismaService } from "../prisma/prisma.service";
+import { DemoModeService } from "../common/demo-mode.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { CodeTunnelService } from "./code-tunnel.service";
 
@@ -24,7 +26,8 @@ export class CodeTunnelController {
   constructor(
     private readonly tunnel: CodeTunnelService,
     private readonly prisma: PrismaService,
-    private readonly access: WorkspaceAccessService
+    private readonly access: WorkspaceAccessService,
+    private readonly demo: DemoModeService
   ) {}
 
   @Post()
@@ -43,6 +46,16 @@ export class CodeTunnelController {
     if (action === "stop") {
       await this.tunnel.stop(user.id, envId);
       return { ok: true };
+    }
+
+    // The desktop/vscode.dev tunnel sidecar bind-mounts the whole
+    // REPO_BASE_DIR (every workspace's clones), so it must never be
+    // startable on the shared demo deployment. `stop` stays allowed so any
+    // pre-existing tunnel can still be torn down.
+    if (this.demo.enabled) {
+      throw new ForbiddenException(
+        "Opening VS Code via tunnel is disabled in demo mode"
+      );
     }
 
     const result = await this.tunnel.start(user.id, envId);
