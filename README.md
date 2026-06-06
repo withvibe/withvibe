@@ -16,6 +16,9 @@ review pass.
 [![pnpm](https://img.shields.io/badge/pnpm-%E2%89%A59-orange.svg)](https://pnpm.io)
 [![Website](https://img.shields.io/badge/website-withvibe.dev-7c3aed.svg)](https://withvibe.dev)
 
+<!-- HERO GIF — the core loop: spin up an env → describe the feature → AI edits the code → live preview updates ("live app, no deploy"). -->
+![WithVibe: describe a feature and the live preview updates instantly — no deploy](assets/hero-live-preview.gif)
+
 ## Try it in 30 seconds
 
 ```bash
@@ -61,6 +64,9 @@ flowchart TD
     class F,L decision;
 ```
 
+<!-- AGENT-GATE GIF — the gate running: security / code review / tests / policy passing (the "safe" half). -->
+![The automated agent gate: security, QA and lint/typecheck checks passing before production](assets/agent-gate.gif)
+
 ## The idea
 
 - **One click to start.** No infra setup — the team member gets an isolated env seeded with the existing code.
@@ -68,6 +74,9 @@ flowchart TD
 - **Share, don't fork.** The env is shared with the team; anyone can jump in and interact with the same AI session.
 - **Automated gate before prod.** Once humans approve, specialist agents (security, code review, tests, policy) run as a final gate. Anything flagged loops back to the env.
 - **Ship.** Clean pass → merge to main → production.
+
+<!-- WORKSPACE screenshot — one screen: AI chat + live code diff + live preview ("one environment, every tool"). -->
+![The WithVibe environment: AI chat, a live code diff and the running app preview in one screen](assets/workspace.png)
 
 ## Repository layout
 
