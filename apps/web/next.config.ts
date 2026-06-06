@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 // Resolve this file's directory without relying on CJS __dirname — Next 16
@@ -10,6 +11,15 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 // resolve hoisted dependencies. Per Next 16 docs:
 // https://nextjs.org/docs/app/api-reference/config/next-config-js/turbopack#root-directory
 const monorepoRoot = path.resolve(here, "..", "..");
+
+// Surface the web app's package version to the client so pages (e.g. the
+// login/register footer) can display the running system version. Read at
+// build time and exposed as a NEXT_PUBLIC_* env so it inlines into the bundle.
+const appVersion = (
+  JSON.parse(readFileSync(path.join(here, "package.json"), "utf8")) as {
+    version?: string;
+  }
+).version ?? "";
 
 // In dev the web app and the NestJS API run on different ports. In
 // production they sit behind the same reverse proxy, so these rewrites are
@@ -22,6 +32,9 @@ const nextConfig: NextConfig = {
   // Self-contained build for the Docker runtime stage — Next emits
   // .next/standalone/server.js plus only the deps it actually traces.
   output: "standalone",
+  env: {
+    NEXT_PUBLIC_APP_VERSION: appVersion,
+  },
   // Trace from the monorepo root so hoisted/workspace deps are picked up.
   outputFileTracingRoot: monorepoRoot,
   // Disable Next.js's automatic trailing-slash redirect. Our sidecar

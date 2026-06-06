@@ -10,7 +10,6 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Brand } from "@/components/brand";
 import {
   AmbientBackground,
-  AppPreview,
   FeatureChips,
 } from "@/components/auth/app-preview";
 import { PositionSelect } from "@/components/profile/position-select";
@@ -80,13 +79,7 @@ function RegisterForm() {
       </header>
 
       <main className="relative z-10 flex-1 flex items-center justify-center px-4 py-8 sm:px-6 sm:py-12 lg:px-10 lg:py-10 xl:py-16">
-        <div className="mx-auto grid w-full max-w-6xl xl:max-w-7xl 2xl:max-w-[88rem] gap-8 lg:gap-12 xl:gap-24 lg:grid-cols-2 lg:items-center">
-          <div className="hidden lg:flex lg:justify-center">
-            <div className="w-full max-w-[26rem] xl:max-w-[34rem] 2xl:max-w-2xl">
-              <AppPreview />
-            </div>
-          </div>
-
+        <div className="mx-auto w-full max-w-md lg:max-w-lg xl:max-w-xl">
           <div>
             <div
               className="animate-fade-up mx-auto w-full max-w-md lg:max-w-lg xl:max-w-xl"
@@ -227,6 +220,10 @@ function RegisterForm() {
           </div>
         </div>
       </main>
+
+      <footer className="relative z-10 px-4 pb-6 text-center font-mono text-[11px] text-muted-foreground/70">
+        WithVibe v{process.env.NEXT_PUBLIC_APP_VERSION}
+      </footer>
     </div>
   );
 }
