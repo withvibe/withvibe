@@ -37,25 +37,53 @@ fi
 # user will see the real error there.
 #
 # Set SKIP_MIGRATE=1 to bypass the push entirely.
+#
+# Transient connectivity/auth errors are retried with backoff rather than
+# aborted: on a fresh install Postgres' first-boot window briefly refuses TCP
+# password auth (P1000) or isn't reachable yet (P1001), and a hard abort here
+# would crash-loop the container instead of simply waiting it out. Real schema
+# errors (and the already-in-sync / already-exists states) are NOT retried.
+# This mirrors the app's PrismaService connect-with-retry guard so the two
+# DB-touching boot paths behave consistently.
 if [ "${SKIP_MIGRATE:-}" != "1" ]; then
-  echo "[entrypoint] running prisma db push…"
-  push_log=$(mktemp)
-  rc=0
-  npx --yes prisma db push --schema /app/prisma/schema.prisma >"$push_log" 2>&1 || rc=$?
-  cat "$push_log"
-  if [ "$rc" != "0" ]; then
-    # Known-benign patterns: schema is effectively in sync, or tables existed
-    # before we got here from a previous bootstrap. Anything else is a real
-    # failure and we abort.
+  max_attempts="${MIGRATE_MAX_ATTEMPTS:-30}"
+  delay="${MIGRATE_RETRY_DELAY:-2}"
+  attempt=1
+  while :; do
+    echo "[entrypoint] running prisma db push… (attempt ${attempt}/${max_attempts})"
+    push_log=$(mktemp)
+    rc=0
+    npx --yes prisma db push --schema /app/prisma/schema.prisma >"$push_log" 2>&1 || rc=$?
+    cat "$push_log"
+    if [ "$rc" = "0" ]; then
+      rm -f "$push_log"
+      break
+    fi
+    # Known-benign: schema is effectively in sync, or tables existed before we
+    # got here from a previous bootstrap. Treat as success.
     if grep -qE "already in sync|already exists|relation .* already exists|P3005" "$push_log"; then
       echo "[entrypoint] schema appears to already exist — continuing despite non-zero exit."
-    else
-      echo "[entrypoint] prisma db push failed with rc=$rc — aborting." >&2
       rm -f "$push_log"
-      exit "$rc"
+      break
     fi
-  fi
-  rm -f "$push_log"
+    # Transient: DB not ready, auth not yet applied, or briefly unreachable —
+    # wait and retry rather than crash-looping the container.
+    if grep -qE "P1000|P1001|P1002|Authentication failed|Can't reach database server|Connection refused|the database system is starting up|server closed the connection" "$push_log"; then
+      rm -f "$push_log"
+      if [ "$attempt" -ge "$max_attempts" ]; then
+        echo "[entrypoint] database still not ready after ${max_attempts} attempts — aborting." >&2
+        exit "$rc"
+      fi
+      echo "[entrypoint] database not ready yet (transient) — retrying in ${delay}s…" >&2
+      attempt=$((attempt + 1))
+      sleep "$delay"
+      continue
+    fi
+    # Anything else is a real schema failure — abort immediately.
+    echo "[entrypoint] prisma db push failed with rc=$rc — aborting." >&2
+    rm -f "$push_log"
+    exit "$rc"
+  done
 fi
 
 exec "$@"
