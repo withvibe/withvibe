@@ -449,6 +449,17 @@ export default function NewEnvironmentPage(
         ai={<AiPanelStub />}
         center={
           <div className="max-w-3xl mx-auto p-6 sm:p-8 space-y-6">
+            {demoMode && (
+              <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
+                <span className="font-medium">
+                  Demo version — creating environments is disabled.
+                </span>{" "}
+                <span className="text-muted-foreground">
+                  Explore the form to see how it works, then try the ready-made
+                  environment already in your workspace.
+                </span>
+              </div>
+            )}
             {error && (
               <Alert variant="destructive">
                 <AlertDescription>{error}</AlertDescription>

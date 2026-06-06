@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/sidebar";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Brand } from "@/components/brand";
+import { Badge } from "@/components/ui/badge";
 import { ActiveRunsProvider } from "./_active-runs";
 import { DemoModeProvider } from "./_demo-mode";
 
@@ -123,6 +124,14 @@ export function WorkspaceShell({
         <SidebarHeader>
           <div className="flex items-center gap-2 px-1 py-1 overflow-hidden group-data-[collapsible=icon]:hidden">
             <Brand className="text-sm" />
+            {demoMode && (
+              <Badge
+                variant="outline"
+                className="border-primary/40 text-primary px-1.5 py-0 text-[10px] uppercase tracking-wide"
+              >
+                Demo version
+              </Badge>
+            )}
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger render={<SidebarMenuButton size="lg" />}>
