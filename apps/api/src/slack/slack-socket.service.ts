@@ -1,7 +1,7 @@
 import {
   Injectable,
+  OnApplicationBootstrap,
   OnModuleDestroy,
-  OnModuleInit,
 } from "@nestjs/common";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 import { SocketModeClient } from "@slack/socket-mode";
@@ -14,16 +14,28 @@ import {
 /**
  * Owns one Socket Mode connection per workspace with both Slack tokens set
  * (`slackBotToken` + `slackAppToken`). Boots all configured workspaces on
- * module init; `reconnectWorkspace(id)` is called by WorkspacesService when
- * a token changes (add / replace / clear) so the connection set stays in
- * sync with DB state without a process restart.
+ * application bootstrap; `reconnectWorkspace(id)` is called by
+ * WorkspacesService when a token changes (add / replace / clear) so the
+ * connection set stays in sync with DB state without a process restart.
+ *
+ * We boot on `onApplicationBootstrap` (not `onModuleInit`) deliberately:
+ * Nest runs all providers' `onModuleInit` hooks concurrently, so an eager
+ * DB query here would race PrismaService's connect-with-retry guard. On a
+ * fresh install, Postgres' first-boot window briefly rejects auth, that
+ * query throws, and the unhandled rejection crash-loops the container until
+ * Postgres settles. `onApplicationBootstrap` only fires after every
+ * `onModuleInit` resolves — i.e. after PrismaService has connected — so the
+ * DB is guaranteed ready. The try/catch below is belt-and-suspenders: a DB
+ * hiccup must never take the whole API process down.
  *
  * The SocketModeClient retries internally on transient disconnects — we
  * only own start/stop and the per-event routing into
  * SlackEventHandlerService.
  */
 @Injectable()
-export class SlackSocketService implements OnModuleInit, OnModuleDestroy {
+export class SlackSocketService
+  implements OnApplicationBootstrap, OnModuleDestroy
+{
   // workspaceId → live client. Absence means "not connected" — either no
   // tokens, or the start() call hasn't returned yet.
   private clients = new Map<string, SocketModeClient>();
@@ -35,15 +47,28 @@ export class SlackSocketService implements OnModuleInit, OnModuleDestroy {
     private readonly handler: SlackEventHandlerService
   ) {}
 
-  async onModuleInit(): Promise<void> {
-    const workspaces = await this.prisma.client.workspace.findMany({
-      where: {
-        slackBotToken: { not: null },
-        slackAppToken: { not: null },
-        deletedAt: null,
-      },
-      select: { id: true, slackAppToken: true, name: true },
-    });
+  async onApplicationBootstrap(): Promise<void> {
+    let workspaces: { id: string; slackAppToken: string | null }[];
+    try {
+      workspaces = await this.prisma.client.workspace.findMany({
+        where: {
+          slackBotToken: { not: null },
+          slackAppToken: { not: null },
+          deletedAt: null,
+        },
+        select: { id: true, slackAppToken: true, name: true },
+      });
+    } catch (err) {
+      // Never let a boot-time DB error crash the process — Slack connections
+      // are non-critical and `reconnectWorkspace` will re-establish them when
+      // tokens are next touched.
+      this.logger.warn(
+        `Skipping Slack socket boot — DB query failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+      return;
+    }
     for (const ws of workspaces) {
       if (!ws.slackAppToken) continue;
       try {
