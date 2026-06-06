@@ -1,4 +1,4 @@
-import { parseDocument, YAMLMap, YAMLSeq, Scalar, isMap, isSeq } from "yaml";
+import { parseDocument, YAMLMap, Scalar, isMap, isSeq } from "yaml";
 
 export type RewriteInput = {
   composeYaml: string;

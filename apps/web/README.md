@@ -32,12 +32,15 @@ src/app/
 ```
 
 The web app does **not** talk to the database directly. All state changes go
-through the NestJS API at `${API_BASE_URL}` via a server-signed JWT bridge.
+through the NestJS API at `${API_BASE_URL}`; the web server forwards the
+user's session cookie on each request (same-origin in production).
 
 ## Auth
 
-NextAuth (credentials + Google OAuth + Prisma adapter). Sessions are issued
-per-user and rotated when the user invalidates their CLI tokens.
+Custom session-cookie auth (credentials + optional Google OAuth) — no NextAuth.
+NestJS signs a per-user JWT and the web app stores it in an httpOnly
+`withvibe_session` cookie, which it forwards to the API. Sessions are rotated
+when the user invalidates their CLI tokens.
 
 ## Styling
 

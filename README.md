@@ -176,7 +176,7 @@ server forwards the user's session cookie to NestJS over a same-origin path.
 | **[withvibe/withvibe-cli](https://github.com/withvibe/withvibe-cli)** | Apache 2.0 | The `withvibe` CLI — installs and manages the stack, runs envs locally |
 | **[withvibe/withvibe-skills](https://github.com/withvibe/withvibe-skills)** | Apache 2.0 | Claude Code skills — first-time installer guide + plugin scaffolder |
 | **[withvibe/withvibe-roadmap](https://github.com/withvibe/withvibe-roadmap)** | Apache 2.0 | Roadmap plugin — a per-env implementation board (Postgres-backed) with an MCP server the AI orchestrator drives |
-| **[withvibe/withvibe-aquascape](https://github.com/withvibe/withvibe-aquascape)** | Apache 2.0 | Example plugin — turns an env into a team-voted vibecoding game: the AI opens proposals the team votes on before they're built |
+| **[withvibe/withvibe-voter](https://github.com/withvibe/withvibe-voter)** | Apache 2.0 | Example plugin — turns any env into a team-voted workspace: the AI opens proposals the team votes on before they're built |
 | **[withvibe/vibe-aquarium](https://github.com/withvibe/vibe-aquarium)** | Apache 2.0 | Demo app — a minimal 3D aquarium you reshape live by chatting with the running app |
 
 ## Links

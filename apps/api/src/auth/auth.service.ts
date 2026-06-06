@@ -18,6 +18,14 @@ const SESSION_COOKIE = "withvibe_session";
 // doesn't change across the migration.
 const SESSION_TTL_SECONDS = 8 * 60 * 60;
 
+/**
+ * Short-lived cookie holding the OAuth `state` nonce while the user is away at
+ * Google's consent screen. Read back on the callback to defeat login-CSRF /
+ * authorization-response replay (see GoogleOAuthGuard).
+ */
+export const OAUTH_STATE_COOKIE = "withvibe_oauth_state";
+const OAUTH_STATE_TTL_SECONDS = 10 * 60;
+
 export type SessionUser = { id: string; email: string };
 
 @Injectable()
@@ -158,6 +166,30 @@ export class AuthService {
 
   clearSessionCookie(res: Response): void {
     res.clearCookie(SESSION_COOKIE, {
+      httpOnly: true,
+      secure: this.cookieSecure,
+      sameSite: "lax",
+      path: "/",
+      domain: this.cookieDomain,
+    });
+  }
+
+  // `sameSite: lax` (not strict) is deliberate: the OAuth callback is a
+  // top-level GET navigation arriving cross-site from accounts.google.com, and
+  // lax is the strictest policy that still sends the cookie on that hop.
+  setOAuthStateCookie(res: Response, state: string): void {
+    res.cookie(OAUTH_STATE_COOKIE, state, {
+      httpOnly: true,
+      secure: this.cookieSecure,
+      sameSite: "lax",
+      maxAge: OAUTH_STATE_TTL_SECONDS * 1000,
+      path: "/",
+      domain: this.cookieDomain,
+    });
+  }
+
+  clearOAuthStateCookie(res: Response): void {
+    res.clearCookie(OAUTH_STATE_COOKIE, {
       httpOnly: true,
       secure: this.cookieSecure,
       sameSite: "lax",

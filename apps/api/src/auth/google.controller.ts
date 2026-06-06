@@ -7,9 +7,9 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { AuthGuard } from "@nestjs/passport";
 import type { Request, Response } from "express";
 import { AuthService } from "./auth.service";
+import { GoogleOAuthGuard } from "./google-oauth.guard";
 import type { GoogleUser } from "./google.strategy";
 import { DemoProvisionService } from "../demo/demo-provision.service";
 
@@ -28,13 +28,13 @@ export class GoogleAuthController {
 
   /** Kicks off the Google OAuth flow. Passport handles the redirect. */
   @Get()
-  @UseGuards(AuthGuard("google"))
+  @UseGuards(GoogleOAuthGuard)
   start(): void {
     // No-op — AuthGuard("google") issues the redirect to Google.
   }
 
   @Get("callback")
-  @UseGuards(AuthGuard("google"))
+  @UseGuards(GoogleOAuthGuard)
   async callback(@Req() req: Request, @Res() res: Response): Promise<void> {
     const profile = req.user as GoogleUser | undefined;
     if (!profile?.email) {

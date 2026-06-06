@@ -9,7 +9,6 @@ import { promisify } from "util";
 
 const execGit = promisify(execFile);
 import {
-  Prisma,
   type EnvStatus,
   type ChatEngine,
   type QaBrowserMode,

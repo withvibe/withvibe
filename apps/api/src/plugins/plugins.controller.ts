@@ -66,7 +66,7 @@ export class PluginsController {
     @CurrentUser() user: AuthUser
   ) {
     await this.access.member(user.id, workspaceId);
-    const prefs = await this.plugins.listPrefsForEnv(envId);
+    const prefs = await this.plugins.listPrefsForEnv(envId, workspaceId);
     return { prefs };
   }
 

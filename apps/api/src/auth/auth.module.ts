@@ -6,6 +6,7 @@ import { AuthController } from "./auth.controller";
 import { AuthService } from "./auth.service";
 import { CliTokenStrategy } from "./cli-token.strategy";
 import { GoogleAuthController } from "./google.controller";
+import { GoogleOAuthGuard } from "./google-oauth.guard";
 import { GoogleStrategy } from "./google.strategy";
 import { JwtStrategy } from "./jwt.strategy";
 import { DemoModule } from "../demo/demo.module";
@@ -29,7 +30,13 @@ import { DemoModule } from "../demo/demo.module";
     }),
   ],
   controllers: [AuthController, GoogleAuthController],
-  providers: [AuthService, JwtStrategy, GoogleStrategy, CliTokenStrategy],
+  providers: [
+    AuthService,
+    JwtStrategy,
+    GoogleStrategy,
+    GoogleOAuthGuard,
+    CliTokenStrategy,
+  ],
   exports: [PassportModule, JwtModule, AuthService],
 })
 export class AuthModule {}

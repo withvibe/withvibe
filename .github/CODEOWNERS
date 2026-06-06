@@ -10,5 +10,4 @@
 # Area owners (uncomment / adjust as the team grows).
 # /apps/api/            @withvibe/backend
 # /apps/web/            @withvibe/frontend
-# /packages/cli/        @withvibe/maintainers
 # /packages/db/         @withvibe/backend

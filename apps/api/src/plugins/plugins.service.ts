@@ -462,10 +462,31 @@ export class PluginsService {
 
   // ── per-env-page feed (all scopes, contextualized to this env) ─────────
 
+  /**
+   * Bind an env id to the workspace the caller was authorized against. The
+   * controller checks workspace *membership*, but env-scoped plugin state is
+   * keyed purely by envId — without this a member of workspace A could pass
+   * another workspace's envId and read/toggle/stop its plugins. Mirrors the
+   * inline guard in start().
+   */
+  private async assertEnvInWorkspace(
+    envId: string,
+    workspaceId: string
+  ): Promise<void> {
+    const env = await this.prisma.client.env.findUnique({
+      where: { id: envId },
+      select: { workspaceId: true, deletedAt: true },
+    });
+    if (!env || env.deletedAt || env.workspaceId !== workspaceId) {
+      throw new NotFoundException("Env not found");
+    }
+  }
+
   async listForEnv(
     envId: string,
     workspaceId: string
   ): Promise<PluginViewRow[]> {
+    await this.assertEnvInWorkspace(envId, workspaceId);
     const enabled = await this.prisma.client.pluginDefinition.findMany({
       where: { enabled: true },
       orderBy: { installedAt: "asc" },
@@ -518,7 +539,11 @@ export class PluginsService {
    * disabled plugins so the user can flip them; admin-disabled plugins
    * (PluginDefinition.enabled=false) are excluded entirely.
    */
-  async listPrefsForEnv(envId: string): Promise<EnvPluginPrefRow[]> {
+  async listPrefsForEnv(
+    envId: string,
+    workspaceId: string
+  ): Promise<EnvPluginPrefRow[]> {
+    await this.assertEnvInWorkspace(envId, workspaceId);
     const defs = await this.prisma.client.pluginDefinition.findMany({
       where: { enabled: true },
       orderBy: { installedAt: "asc" },
@@ -555,6 +580,7 @@ export class PluginsService {
     pluginId: string,
     enabled: boolean
   ): Promise<EnvPluginPrefRow> {
+    await this.assertEnvInWorkspace(envId, workspaceId);
     const plugin = await this.prisma.client.pluginDefinition.findUnique({
       where: { id: pluginId },
       select: { id: true, manifest: true, enabled: true },
@@ -869,6 +895,7 @@ export class PluginsService {
     envId: string,
     workspaceId: string
   ): Promise<{ ok: true }> {
+    await this.assertEnvInWorkspace(envId, workspaceId);
     const plugin = await this.prisma.client.pluginDefinition.findUnique({
       where: { id: pluginId },
       select: { manifest: true },

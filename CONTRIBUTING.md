@@ -13,7 +13,7 @@ work is licensed under the same terms.
 
 ## Development setup
 
-See the [Quick start](README.md#quick-start) in the root README.
+See [Local dev setup](README.md#local-dev-setup) in the root README.
 
 ```bash
 pnpm install
@@ -25,7 +25,7 @@ pnpm lint
 
 | Path | What lives there |
 | --- | --- |
-| [apps/web](apps/web) | Next.js 16 frontend, NextAuth, REST proxy to the API |
+| [apps/web](apps/web) | Next.js 16 frontend, session-cookie auth, REST proxy to the API |
 | [apps/api](apps/api) | NestJS backend, Docker orchestration, terminal WebSocket |
 | [packages/db](packages/db) | Prisma schema + generated client (shared) |
 
