@@ -78,6 +78,7 @@ IMAGES=(
   "web|.|apps/web/Dockerfile"
   "claude-runner|apps/api/runner|"
   "code-server|apps/api/code-server-image|"
+  "code-tunnel|apps/api/code-tunnel-image|"
   "qa-browser|apps/api/qa-browser-image|"
 )
 
