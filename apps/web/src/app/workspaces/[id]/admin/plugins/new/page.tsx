@@ -65,11 +65,14 @@ export default function NewPluginPage(
     setInstalling(true);
     setInstallError(null);
     try {
-      const res = await fetch("/api/admin/plugins", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ manifestText }),
-      });
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/admin/plugins`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ manifestText }),
+        }
+      );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         setInstallError(

@@ -45,24 +45,29 @@ export default function MarketplacePage(
   const [q, setQ] = useState("");
   const [installing, setInstalling] = useState<string | null>(null);
 
-  const load = useCallback(async (query: string) => {
-    setRows(null);
-    setError(null);
-    const url = new URL(
-      "/api/admin/plugins/marketplace/catalog",
-      window.location.origin
-    );
-    if (query) url.searchParams.set("q", query);
-    const res = await fetch(url.toString().replace(window.location.origin, ""));
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      setError(parseError(text) || `Failed to load (HTTP ${res.status})`);
-      setRows([]);
-      return;
-    }
-    const body = (await res.json()) as { plugins: CatalogRow[] };
-    setRows(body.plugins);
-  }, []);
+  const load = useCallback(
+    async (query: string) => {
+      setRows(null);
+      setError(null);
+      const url = new URL(
+        `/api/workspaces/${workspaceId}/admin/plugins/marketplace/catalog`,
+        window.location.origin
+      );
+      if (query) url.searchParams.set("q", query);
+      const res = await fetch(
+        url.toString().replace(window.location.origin, "")
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        setError(parseError(text) || `Failed to load (HTTP ${res.status})`);
+        setRows([]);
+        return;
+      }
+      const body = (await res.json()) as { plugins: CatalogRow[] };
+      setRows(body.plugins);
+    },
+    [workspaceId]
+  );
 
   useEffect(() => {
     void load("");
@@ -74,11 +79,14 @@ export default function MarketplacePage(
       // Slug-only — the api side composes the marketplace URL from
       // WITHVIBE_MARKETPLACE_BASE_URL, fetches the manifest, runs the
       // existing install path.
-      const res = await fetch("/api/admin/plugins/install-from-marketplace", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slug }),
-      });
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/admin/plugins/install-from-marketplace`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ slug }),
+        }
+      );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         toast.error(parseError(text) || `Install failed (HTTP ${res.status})`);
@@ -110,7 +118,7 @@ export default function MarketplacePage(
 
       <p className="text-sm text-muted-foreground">
         Browse plugins published on the WithVibe marketplace and install
-        them into this deployment in one click. The product fetches the
+        them into this workspace in one click. The product fetches the
         manifest from the marketplace and runs the same install path you
         get with a pasted YAML.
       </p>

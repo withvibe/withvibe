@@ -50,7 +50,11 @@ export class PluginMcpBridgeService {
     const plugin = await this.prisma.client.pluginDefinition.findUnique({
       where: { id: args.pluginId },
     });
-    if (!plugin || !plugin.enabled) {
+    if (
+      !plugin ||
+      !plugin.enabled ||
+      plugin.workspaceId !== args.ctx.workspaceId
+    ) {
       throw new NotFoundException(
         `Plugin ${args.pluginId} not installed or disabled`
       );
@@ -204,7 +208,7 @@ export class PluginMcpBridgeService {
     }[]
   > {
     const plugins = await this.prisma.client.pluginDefinition.findMany({
-      where: { enabled: true },
+      where: { enabled: true, workspaceId: ctx.workspaceId },
     });
     const prefs = await this.prisma.client.envPluginPreference.findMany({
       where: { envId: ctx.envId },

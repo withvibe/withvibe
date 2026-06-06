@@ -29,8 +29,8 @@ export class PluginsModule implements OnApplicationBootstrap {
    */
   private async registerAllRoutes(): Promise<void> {
     const enabled = await this.plugins.listEnabled();
-    for (const { manifest } of enabled) {
-      this.plugins.registerRoute(manifest);
+    for (const { id, manifest } of enabled) {
+      this.plugins.registerRoute(id, manifest);
     }
     this.logger.log(
       `Registered ${enabled.length} plugin proxy route(s) with SidecarProxy.`

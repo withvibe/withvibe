@@ -30,6 +30,7 @@ import { cn } from "@/lib/utils";
 
 type AdminPluginRow = {
   id: string;
+  manifestId: string;
   name: string;
   version: string;
   image: string;
@@ -56,14 +57,14 @@ export default function AdminPluginsPage(
   const [installingFromUrl, setInstallingFromUrl] = useState(false);
 
   const load = useCallback(async () => {
-    const res = await fetch("/api/admin/plugins");
+    const res = await fetch(`/api/workspaces/${workspaceId}/admin/plugins`);
     if (!res.ok) {
       toast.error(`Failed to load plugins (HTTP ${res.status})`);
       return;
     }
     const body = (await res.json()) as { plugins: AdminPluginRow[] };
     setPlugins(body.plugins);
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     void load();
@@ -73,7 +74,7 @@ export default function AdminPluginsPage(
     setActingId(p.id);
     try {
       const res = await fetch(
-        `/api/admin/plugins/${encodeURIComponent(p.id)}`,
+        `/api/workspaces/${workspaceId}/admin/plugins/${encodeURIComponent(p.id)}`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -103,7 +104,7 @@ export default function AdminPluginsPage(
     );
     try {
       const res = await fetch(
-        `/api/admin/plugins/${encodeURIComponent(p.id)}`,
+        `/api/workspaces/${workspaceId}/admin/plugins/${encodeURIComponent(p.id)}`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -137,11 +138,14 @@ export default function AdminPluginsPage(
     if (!url) return;
     setInstallingFromUrl(true);
     try {
-      const res = await fetch("/api/admin/plugins/install-from-url", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ manifestUrl: url }),
-      });
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/admin/plugins/install-from-url`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ manifestUrl: url }),
+        }
+      );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         toast.error(parseError(text) || `Install failed (HTTP ${res.status})`);
@@ -161,7 +165,7 @@ export default function AdminPluginsPage(
     setDeleting(true);
     try {
       const res = await fetch(
-        `/api/admin/plugins/${encodeURIComponent(deleteOpen.id)}`,
+        `/api/workspaces/${workspaceId}/admin/plugins/${encodeURIComponent(deleteOpen.id)}`,
         { method: "DELETE" }
       );
       if (!res.ok) {
@@ -186,9 +190,9 @@ export default function AdminPluginsPage(
             <Package className="size-5" /> Plugins
           </h1>
           <p className="text-sm text-muted-foreground">
-            Globally-installed plugins are available in every env&apos;s
-            activity bar. Disabling stops every running instance across all
-            envs.
+            Plugins installed here are available in every env&apos;s activity
+            bar in this workspace. Disabling stops every running instance
+            across this workspace&apos;s envs.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -241,7 +245,7 @@ export default function AdminPluginsPage(
                     {p.name}
                   </span>
                   <span className="text-[11px] font-mono text-muted-foreground">
-                    {p.id}@{p.version}
+                    {p.manifestId}@{p.version}
                   </span>
                   <span
                     className={cn(

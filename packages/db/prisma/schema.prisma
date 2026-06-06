@@ -159,6 +159,7 @@ model Workspace {
   members     WorkspaceMember[]
   repos       Repo[]
   envs        Env[]
+  pluginDefinitions PluginDefinition[]
   pluginInstances PluginInstance[]
   invitations Invitation[]
   agents      Agent[]
@@ -401,14 +402,21 @@ model Env {
   pluginInstances PluginInstance[]
 }
 
-// Deployment-wide plugin registry. One row per admin-installed plugin.
-// `manifest` holds the full validated PluginManifest JSON (see
+// Per-workspace plugin registry. One row per plugin installed into a given
+// workspace by a workspace admin. `id` is a surrogate cuid (FK target for
+// instances/prefs); `manifestId` is the PluginManifest.id (e.g.
+// "withvibe.sample.hello") and is unique only *within* a workspace, so the
+// same plugin can be installed independently across workspaces. `manifest`
+// holds the full validated PluginManifest JSON (see
 // apps/api/src/plugins/manifest.ts). `image` is denormalized for query
-// convenience. `enabled=false` hides the plugin from envs without
-// uninstalling it. installedBy is a soft pointer to User.id (no FK so
+// convenience. `enabled=false` hides the plugin from this workspace's envs
+// without uninstalling it. installedBy is a soft pointer to User.id (no FK so
 // deleting the admin user doesn't cascade plugins).
 model PluginDefinition {
-  id          String   @id              // PluginManifest.id, e.g. "withvibe.sample.hello"
+  id          String   @id @default(cuid())   // surrogate PK (FK target for instances/prefs)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  manifestId  String              // PluginManifest.id, e.g. "withvibe.sample.hello"
   name        String
   version     String
   image       String
@@ -423,6 +431,8 @@ model PluginDefinition {
   installedBy String?
   instances   PluginInstance[]
   envPrefs    EnvPluginPreference[]
+  @@unique([workspaceId, manifestId])
+  @@index([workspaceId])
 }
 
 // Per-(scope, plugin) running container record. Scope follows the plugin

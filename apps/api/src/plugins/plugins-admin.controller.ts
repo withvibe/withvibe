@@ -14,10 +14,10 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { z, ZodError } from "zod";
-import { AdminGuard } from "../auth/admin.guard";
 import { CliOrJwtAuthGuard } from "../auth/cli-or-jwt-auth.guard";
 import { CurrentUser } from "../auth/current-user.decorator";
 import type { AuthUser } from "../auth/jwt.strategy";
+import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { PluginsService } from "./plugins.service";
 
 const InstallBody = z.object({
@@ -59,17 +59,25 @@ function parseBody<T>(schema: { parse: (v: unknown) => T }, value: unknown): T {
   }
 }
 
-@Controller("admin/plugins")
-@UseGuards(CliOrJwtAuthGuard, AdminGuard)
+// Plugins are installed per-workspace: each row is scoped to a workspace and
+// only that workspace's admins may install/update/uninstall. The deployment-
+// wide AdminGuard is gone; authority is the workspace-admin check below.
+@Controller("workspaces/:workspaceId/admin/plugins")
+@UseGuards(CliOrJwtAuthGuard)
 export class PluginsAdminController {
   constructor(
     private readonly plugins: PluginsService,
-    private readonly config: ConfigService
+    private readonly config: ConfigService,
+    private readonly access: WorkspaceAccessService
   ) {}
 
   @Get()
-  async list() {
-    const plugins = await this.plugins.listAll();
+  async list(
+    @Param("workspaceId") workspaceId: string,
+    @CurrentUser() user: AuthUser
+  ) {
+    await this.access.admin(user.id, workspaceId);
+    const plugins = await this.plugins.listAll(workspaceId);
     return { plugins };
   }
 
@@ -82,9 +90,12 @@ export class PluginsAdminController {
 
   @Get("marketplace/catalog")
   async marketplaceCatalog(
+    @Param("workspaceId") workspaceId: string,
+    @CurrentUser() user: AuthUser,
     @Query("q") q?: string,
     @Query("category") category?: string
   ) {
+    await this.access.admin(user.id, workspaceId);
     const url = new URL(`${this.marketplaceBaseUrl()}/api/catalog`);
     if (q) url.searchParams.set("q", q);
     if (category) url.searchParams.set("category", category);
@@ -105,15 +116,17 @@ export class PluginsAdminController {
   @Post("install-from-marketplace")
   @HttpCode(HttpStatus.CREATED)
   async installFromMarketplace(
+    @Param("workspaceId") workspaceId: string,
     @Body() body: unknown,
     @CurrentUser() user: AuthUser
   ) {
+    await this.access.admin(user.id, workspaceId);
     const { slug, version } = parseBody(InstallFromMarketplaceBody, body);
     const base = this.marketplaceBaseUrl();
     const url = new URL(`${base}/api/catalog/${slug}/manifest.yaml`);
     if (version) url.searchParams.set("version", version);
     const manifestText = await this.fetchManifestText(url.toString());
-    return this.plugins.install(manifestText, user.id);
+    return this.plugins.install(workspaceId, manifestText, user.id);
   }
 
   // Install by arbitrary HTTPS URL (paste-URL flow for air-gapped or
@@ -122,12 +135,14 @@ export class PluginsAdminController {
   @Post("install-from-url")
   @HttpCode(HttpStatus.CREATED)
   async installFromUrl(
+    @Param("workspaceId") workspaceId: string,
     @Body() body: unknown,
     @CurrentUser() user: AuthUser
   ) {
+    await this.access.admin(user.id, workspaceId);
     const { manifestUrl } = parseBody(InstallFromUrlBody, body);
     const manifestText = await this.fetchManifestText(manifestUrl);
-    return this.plugins.install(manifestText, user.id);
+    return this.plugins.install(workspaceId, manifestText, user.id);
   }
 
   private async fetchManifestText(url: string): Promise<string> {
@@ -151,16 +166,26 @@ export class PluginsAdminController {
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  async install(@Body() body: unknown, @CurrentUser() user: AuthUser) {
+  async install(
+    @Param("workspaceId") workspaceId: string,
+    @Body() body: unknown,
+    @CurrentUser() user: AuthUser
+  ) {
+    await this.access.admin(user.id, workspaceId);
     const { manifestText } = parseBody(InstallBody, body);
-    return this.plugins.install(manifestText, user.id);
+    return this.plugins.install(workspaceId, manifestText, user.id);
   }
 
   // GET /:pluginId — fetch the stored manifest so the admin editor can
   // preload it for the "Update" flow.
   @Get(":pluginId")
-  async getOne(@Param("pluginId") pluginId: string) {
-    return this.plugins.getManifestText(pluginId);
+  async getOne(
+    @Param("workspaceId") workspaceId: string,
+    @Param("pluginId") pluginId: string,
+    @CurrentUser() user: AuthUser
+  ) {
+    await this.access.admin(user.id, workspaceId);
+    return this.plugins.getManifestText(workspaceId, pluginId);
   }
 
   // POST /:pluginId/update — replace the stored manifest with a new one,
@@ -169,21 +194,26 @@ export class PluginsAdminController {
   @Post(":pluginId/update")
   @HttpCode(HttpStatus.OK)
   async update(
+    @Param("workspaceId") workspaceId: string,
     @Param("pluginId") pluginId: string,
     @Body() body: unknown,
     @CurrentUser() user: AuthUser
   ) {
+    await this.access.admin(user.id, workspaceId);
     const { manifestText } = parseBody(InstallBody, body);
-    return this.plugins.update(pluginId, manifestText, user.id);
+    return this.plugins.update(workspaceId, pluginId, manifestText, user.id);
   }
 
   @Patch(":pluginId")
   async toggle(
+    @Param("workspaceId") workspaceId: string,
     @Param("pluginId") pluginId: string,
-    @Body() body: unknown
+    @Body() body: unknown,
+    @CurrentUser() user: AuthUser
   ) {
+    await this.access.admin(user.id, workspaceId);
     const { enabled, defaultEnabledInEnv } = parseBody(PatchBody, body);
-    return this.plugins.updateAdminFlags(pluginId, {
+    return this.plugins.updateAdminFlags(workspaceId, pluginId, {
       enabled,
       defaultEnabledInEnv,
     });
@@ -191,7 +221,12 @@ export class PluginsAdminController {
 
   @Delete(":pluginId")
   @HttpCode(HttpStatus.OK)
-  async uninstall(@Param("pluginId") pluginId: string) {
-    return this.plugins.uninstall(pluginId);
+  async uninstall(
+    @Param("workspaceId") workspaceId: string,
+    @Param("pluginId") pluginId: string,
+    @CurrentUser() user: AuthUser
+  ) {
+    await this.access.admin(user.id, workspaceId);
+    return this.plugins.uninstall(workspaceId, pluginId);
   }
 }

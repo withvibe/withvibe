@@ -125,7 +125,7 @@ export class McpController {
     // [^a-zA-Z0-9_] → "_", matches the URL segment.
     const sanitized = serverName.slice(PLUGIN_PREFIX.length);
     const enabled = await this.prisma.client.pluginDefinition.findMany({
-      where: { enabled: true },
+      where: { enabled: true, workspaceId: ctx.workspaceId },
       select: { id: true },
     });
     const match = enabled.find(

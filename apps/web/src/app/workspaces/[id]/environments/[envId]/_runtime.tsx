@@ -223,7 +223,7 @@ export function EnvPanel({
   containerPorts: Record<string, number> | null;
   onOpenCompose: () => void;
   onUpdated: () => void | Promise<void>;
-  /** Total plugins installed deployment-wide. 0 hides the Plugins section. */
+  /** Total plugins installed in this workspace. 0 hides the Plugins section. */
   pluginPrefsCount: number;
   /** Subset of pluginPrefsCount currently enabled for this env. */
   pluginsEnabledCount: number;

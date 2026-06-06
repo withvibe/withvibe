@@ -53,6 +53,7 @@ export type EnvPluginPrefRow = {
 
 export type PluginAdminRow = {
   id: string;
+  manifestId: string;
   name: string;
   version: string;
   image: string;
@@ -155,8 +156,9 @@ export class PluginsService {
 
   // ── admin: install / uninstall / toggle / list ─────────────────────────
 
-  async listAll(): Promise<PluginAdminRow[]> {
+  async listAll(workspaceId: string): Promise<PluginAdminRow[]> {
     const rows = await this.prisma.client.pluginDefinition.findMany({
+      where: { workspaceId },
       orderBy: { installedAt: "asc" },
       include: {
         _count: { select: { instances: { where: { status: "running" } } } },
@@ -164,6 +166,7 @@ export class PluginsService {
     });
     return rows.map((p) => ({
       id: p.id,
+      manifestId: p.manifestId,
       name: p.name,
       version: p.version,
       image: p.image,
@@ -178,6 +181,7 @@ export class PluginsService {
   }
 
   async install(
+    workspaceId: string,
     manifestText: string,
     installedBy: string | null,
     opts: { forcePull?: boolean } = {}
@@ -246,10 +250,11 @@ export class PluginsService {
         );
       }
     }
-    await this.prisma.client.pluginDefinition.upsert({
-      where: { id: manifest.id },
+    const def = await this.prisma.client.pluginDefinition.upsert({
+      where: { workspaceId_manifestId: { workspaceId, manifestId: manifest.id } },
       create: {
-        id: manifest.id,
+        workspaceId,
+        manifestId: manifest.id,
         name: manifest.name,
         version: manifest.version,
         image: manifest.image,
@@ -267,34 +272,16 @@ export class PluginsService {
         manifest,
       },
     });
-    this.registerRoute(manifest);
+    // Routes are keyed by the surrogate definition id (globally unique), so
+    // the same plugin installed in two workspaces gets two independent routes.
+    this.registerRoute(def.id, manifest);
     this.logger.info(
-      `Installed plugin ${manifest.id}@${manifest.version} scope=${manifest.scope} storage=${manifest.storage.kind} (image ${manifest.image}) by ${installedBy ?? "<unknown>"}`
+      `Installed plugin ${manifest.id}@${manifest.version} (def ${def.id}) ws=${workspaceId} scope=${manifest.scope} storage=${manifest.storage.kind} (image ${manifest.image}) by ${installedBy ?? "<unknown>"}`
     );
-    const rows = await this.listAll();
-    const row = rows.find((r) => r.id === manifest.id);
+    const rows = await this.listAll(workspaceId);
+    const row = rows.find((r) => r.id === def.id);
     if (!row) throw new Error("install: row vanished post-upsert");
     return row;
-  }
-
-  async upsertManifestForSeed(manifest: PluginManifestT): Promise<void> {
-    await this.prisma.client.pluginDefinition.upsert({
-      where: { id: manifest.id },
-      create: {
-        id: manifest.id,
-        name: manifest.name,
-        version: manifest.version,
-        image: manifest.image,
-        manifest,
-        enabled: true,
-      },
-      update: {
-        name: manifest.name,
-        version: manifest.version,
-        image: manifest.image,
-        manifest,
-      },
-    });
   }
 
   // ── admin: update existing plugin manifest / image ─────────────────────
@@ -307,6 +294,7 @@ export class PluginsService {
    * cleanly; the operator restarts envs from their plugin panels.
    */
   async update(
+    workspaceId: string,
     pluginId: string,
     manifestText: string,
     installedBy: string | null
@@ -314,7 +302,7 @@ export class PluginsService {
     const existing = await this.prisma.client.pluginDefinition.findUnique({
       where: { id: pluginId },
     });
-    if (!existing) {
+    if (!existing || existing.workspaceId !== workspaceId) {
       throw new NotFoundException(`Plugin ${pluginId} not installed`);
     }
     // Pre-parse to catch id mismatch before we touch any state. The full
@@ -328,13 +316,15 @@ export class PluginsService {
       );
     }
     const probe = PluginManifest.safeParse(parsed);
-    if (probe.success && probe.data.id !== pluginId) {
+    if (probe.success && probe.data.id !== existing.manifestId) {
       throw new BadRequestException(
-        `Manifest id "${probe.data.id}" does not match URL plugin id "${pluginId}". Changing the id is an install, not an update — uninstall the old plugin first.`
+        `Manifest id "${probe.data.id}" does not match the installed plugin "${existing.manifestId}". Changing the id is an install, not an update — uninstall the old plugin first.`
       );
     }
     await this.stopAllInstancesOfPlugin(pluginId);
-    return this.install(manifestText, installedBy, { forcePull: true });
+    return this.install(workspaceId, manifestText, installedBy, {
+      forcePull: true,
+    });
   }
 
   /**
@@ -342,23 +332,29 @@ export class PluginsService {
    * it. We round-trip through `yaml` so the output keeps the editor's
    * native format even though we store JSON in Prisma.
    */
-  async getManifestText(pluginId: string): Promise<{ manifestText: string }> {
+  async getManifestText(
+    workspaceId: string,
+    pluginId: string
+  ): Promise<{ manifestText: string }> {
     const plugin = await this.prisma.client.pluginDefinition.findUnique({
       where: { id: pluginId },
-      select: { manifest: true },
+      select: { manifest: true, workspaceId: true },
     });
-    if (!plugin) {
+    if (!plugin || plugin.workspaceId !== workspaceId) {
       throw new NotFoundException(`Plugin ${pluginId} not installed`);
     }
     const yamlText = stringifyYaml(plugin.manifest, { indent: 2 });
     return { manifestText: yamlText };
   }
 
-  async uninstall(pluginId: string): Promise<{ ok: true }> {
+  async uninstall(
+    workspaceId: string,
+    pluginId: string
+  ): Promise<{ ok: true }> {
     const plugin = await this.prisma.client.pluginDefinition.findUnique({
       where: { id: pluginId },
     });
-    if (!plugin) {
+    if (!plugin || plugin.workspaceId !== workspaceId) {
       throw new NotFoundException(`Plugin ${pluginId} not installed`);
     }
     await this.stopAllInstancesOfPlugin(pluginId);
@@ -394,13 +390,14 @@ export class PluginsService {
    * yet, so flipping it is cheap and reversible.
    */
   async updateAdminFlags(
+    workspaceId: string,
     pluginId: string,
     patch: { enabled?: boolean; defaultEnabledInEnv?: boolean }
   ): Promise<PluginAdminRow> {
     const plugin = await this.prisma.client.pluginDefinition.findUnique({
       where: { id: pluginId },
     });
-    if (!plugin) {
+    if (!plugin || plugin.workspaceId !== workspaceId) {
       throw new NotFoundException(`Plugin ${pluginId} not installed`);
     }
     const data: { enabled?: boolean; defaultEnabledInEnv?: boolean } = {};
@@ -428,12 +425,12 @@ export class PluginsService {
       data,
     });
     if (data.enabled === true) {
-      this.registerRoute(this.parseManifest(plugin.manifest));
+      this.registerRoute(plugin.id, this.parseManifest(plugin.manifest));
     }
     this.logger.info(
       `Plugin ${pluginId} updated: ${JSON.stringify(data)}`
     );
-    const rows = await this.listAll();
+    const rows = await this.listAll(workspaceId);
     const row = rows.find((r) => r.id === pluginId);
     if (!row) throw new Error("updateAdminFlags: row vanished post-update");
     return row;
@@ -488,7 +485,7 @@ export class PluginsService {
   ): Promise<PluginViewRow[]> {
     await this.assertEnvInWorkspace(envId, workspaceId);
     const enabled = await this.prisma.client.pluginDefinition.findMany({
-      where: { enabled: true },
+      where: { enabled: true, workspaceId },
       orderBy: { installedAt: "asc" },
     });
     const prefs = await this.prisma.client.envPluginPreference.findMany({
@@ -545,7 +542,7 @@ export class PluginsService {
   ): Promise<EnvPluginPrefRow[]> {
     await this.assertEnvInWorkspace(envId, workspaceId);
     const defs = await this.prisma.client.pluginDefinition.findMany({
-      where: { enabled: true },
+      where: { enabled: true, workspaceId },
       orderBy: { installedAt: "asc" },
     });
     const prefs = await this.prisma.client.envPluginPreference.findMany({
@@ -583,9 +580,9 @@ export class PluginsService {
     await this.assertEnvInWorkspace(envId, workspaceId);
     const plugin = await this.prisma.client.pluginDefinition.findUnique({
       where: { id: pluginId },
-      select: { id: true, manifest: true, enabled: true },
+      select: { id: true, manifest: true, enabled: true, workspaceId: true },
     });
-    if (!plugin || !plugin.enabled) {
+    if (!plugin || !plugin.enabled || plugin.workspaceId !== workspaceId) {
       throw new NotFoundException(`Plugin ${pluginId} not installed`);
     }
     const manifest = this.parseManifest(plugin.manifest);
@@ -658,7 +655,7 @@ export class PluginsService {
     const plugin = await this.prisma.client.pluginDefinition.findUnique({
       where: { id: pluginId },
     });
-    if (!plugin || !plugin.enabled) {
+    if (!plugin || !plugin.enabled || plugin.workspaceId !== workspaceId) {
       return { ok: false, error: "Plugin not installed or disabled" };
     }
     // Honor the per-env preference. Don't spawn a container for a plugin
@@ -992,13 +989,13 @@ export class PluginsService {
 
   // ── proxy route registration (one route per plugin, scope-prefixed) ───
 
-  registerRoute(manifest: PluginManifestT): void {
-    const prefix = `/api/plugins/view/${manifest.id}/${manifest.scope === "global" ? "global" : manifest.scope === "workspace" ? "ws" : "env"}/`;
+  registerRoute(defId: string, manifest: PluginManifestT): void {
+    const prefix = `/api/plugins/view/${defId}/${manifest.scope === "global" ? "global" : manifest.scope === "workspace" ? "ws" : "env"}/`;
     this.sidecarProxy.addRoute({
       prefix,
       ws: manifest.ui.websocket,
       target: (scopeIdSegment) =>
-        this.getProxyTarget(manifest.id, manifest.scope, scopeIdSegment),
+        this.getProxyTarget(defId, manifest.scope, scopeIdSegment),
       membershipCheck: (scopeIdSegment, userId) =>
         this.checkMembershipForScope(manifest.scope, scopeIdSegment, userId),
       skipTrailingSlashRedirect: true,

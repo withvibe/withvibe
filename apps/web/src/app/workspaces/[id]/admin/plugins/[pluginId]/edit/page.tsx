@@ -36,7 +36,7 @@ export default function EditPluginPage(
     let cancelled = false;
     void (async () => {
       const res = await fetch(
-        `/api/admin/plugins/${encodeURIComponent(pluginId)}`
+        `/api/workspaces/${workspaceId}/admin/plugins/${encodeURIComponent(pluginId)}`
       );
       if (cancelled) return;
       if (!res.ok) {
@@ -50,7 +50,7 @@ export default function EditPluginPage(
     return () => {
       cancelled = true;
     };
-  }, [pluginId]);
+  }, [pluginId, workspaceId]);
 
   async function save() {
     if (manifestText === null) return;
@@ -58,7 +58,7 @@ export default function EditPluginPage(
     setSaveError(null);
     try {
       const res = await fetch(
-        `/api/admin/plugins/${encodeURIComponent(pluginId)}/update`,
+        `/api/workspaces/${workspaceId}/admin/plugins/${encodeURIComponent(pluginId)}/update`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -93,9 +93,7 @@ export default function EditPluginPage(
             Plugins
           </Button>
           <span className="text-muted-foreground/50">/</span>
-          <h1 className="text-sm font-mono font-medium">
-            Update {pluginId}
-          </h1>
+          <h1 className="text-sm font-mono font-medium">Update plugin</h1>
           <div className="ml-auto flex items-center gap-2">
             <Button
               size="sm"
