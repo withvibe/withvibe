@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -201,32 +202,55 @@ export function VsCodeMenu({
                 </span>
               </div>
             </DropdownMenuItem>
+            {/* VS Code Tunnel options. In the live demo these are shown but
+                disabled — the tunnel needs a one-time GitHub device sign-in
+                that doesn't fit a shared demo — so visitors can still see the
+                feature exists. The `demoMode` guards below set disabled + a
+                "Demo" badge and swap the subtext to the reason. */}
+            <DropdownMenuItem
+              disabled={demoMode || busy !== null}
+              onClick={demoMode ? undefined : openInDesktop}
+            >
+              <Laptop className="size-4" />
+              <div className="flex flex-col">
+                <span className="flex items-center gap-1.5 font-medium">
+                  Desktop
+                  {demoMode && (
+                    <Badge variant="outline" className="px-1 py-0 text-[10px]">
+                      Demo
+                    </Badge>
+                  )}
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  {demoMode
+                    ? "Not available in the live demo"
+                    : "via VS Code Tunnel (your local app)"}
+                </span>
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={demoMode || busy !== null}
+              onClick={demoMode ? undefined : openInVscodeDev}
+            >
+              <ExternalLink className="size-4" />
+              <div className="flex flex-col">
+                <span className="flex items-center gap-1.5 font-medium">
+                  vscode.dev (browser)
+                  {demoMode && (
+                    <Badge variant="outline" className="px-1 py-0 text-[10px]">
+                      Demo
+                    </Badge>
+                  )}
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  {demoMode
+                    ? "Not available in the live demo"
+                    : "same tunnel, no local VS Code needed"}
+                </span>
+              </div>
+            </DropdownMenuItem>
             {!demoMode && (
               <>
-                <DropdownMenuItem
-                  disabled={busy !== null}
-                  onClick={openInDesktop}
-                >
-                  <Laptop className="size-4" />
-                  <div className="flex flex-col">
-                    <span className="font-medium">Desktop</span>
-                    <span className="text-[11px] text-muted-foreground">
-                      via VS Code Tunnel (your local app)
-                    </span>
-                  </div>
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  disabled={busy !== null}
-                  onClick={openInVscodeDev}
-                >
-                  <ExternalLink className="size-4" />
-                  <div className="flex flex-col">
-                    <span className="font-medium">vscode.dev (browser)</span>
-                    <span className="text-[11px] text-muted-foreground">
-                      same tunnel, no local VS Code needed
-                    </span>
-                  </div>
-                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={logoutTunnel}>
                   <LogOut className="size-4" />
