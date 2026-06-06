@@ -22,6 +22,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useDemoMode } from "../../_demo-mode";
 import type { ContainerStatus } from "./_runtime";
 
 type TunnelAuthDialogState =
@@ -65,6 +66,10 @@ export function VsCodeMenu({
   const [authDialog, setAuthDialog] = useState<TunnelAuthDialogState>({
     open: false,
   });
+  // The tunnel sidecar bind-mounts every workspace's clones, so it's hidden on
+  // the shared demo deployment. The api also blocks `start` server-side; this
+  // is the cosmetic mirror. code-server (Browser) stays — it's per-env scoped.
+  const demoMode = useDemoMode();
 
   const isRunning = containerStatus === "running";
 
@@ -196,35 +201,39 @@ export function VsCodeMenu({
                 </span>
               </div>
             </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={busy !== null}
-              onClick={openInDesktop}
-            >
-              <Laptop className="size-4" />
-              <div className="flex flex-col">
-                <span className="font-medium">Desktop</span>
-                <span className="text-[11px] text-muted-foreground">
-                  via VS Code Tunnel (your local app)
-                </span>
-              </div>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={busy !== null}
-              onClick={openInVscodeDev}
-            >
-              <ExternalLink className="size-4" />
-              <div className="flex flex-col">
-                <span className="font-medium">vscode.dev (browser)</span>
-                <span className="text-[11px] text-muted-foreground">
-                  same tunnel, no local VS Code needed
-                </span>
-              </div>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={logoutTunnel}>
-              <LogOut className="size-4" />
-              <span>Sign out of tunnel auth</span>
-            </DropdownMenuItem>
+            {!demoMode && (
+              <>
+                <DropdownMenuItem
+                  disabled={busy !== null}
+                  onClick={openInDesktop}
+                >
+                  <Laptop className="size-4" />
+                  <div className="flex flex-col">
+                    <span className="font-medium">Desktop</span>
+                    <span className="text-[11px] text-muted-foreground">
+                      via VS Code Tunnel (your local app)
+                    </span>
+                  </div>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={busy !== null}
+                  onClick={openInVscodeDev}
+                >
+                  <ExternalLink className="size-4" />
+                  <div className="flex flex-col">
+                    <span className="font-medium">vscode.dev (browser)</span>
+                    <span className="text-[11px] text-muted-foreground">
+                      same tunnel, no local VS Code needed
+                    </span>
+                  </div>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={logoutTunnel}>
+                  <LogOut className="size-4" />
+                  <span>Sign out of tunnel auth</span>
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuGroup>
         </DropdownMenuContent>
       </DropdownMenu>
