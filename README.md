@@ -16,8 +16,6 @@ review pass.
 [![pnpm](https://img.shields.io/badge/pnpm-%E2%89%A59-orange.svg)](https://pnpm.io)
 [![Website](https://img.shields.io/badge/website-withvibe.dev-7c3aed.svg)](https://withvibe.dev)
 
-<!-- HERO GIF — the core loop: spin up an env → describe the feature → AI edits the code → live preview updates ("live app, no deploy"). -->
-![WithVibe: describe a feature and the live preview updates instantly — no deploy](assets/hero-live-preview.gif)
 
 ## Try it in 30 seconds
 
@@ -64,8 +62,6 @@ flowchart TD
     class F,L decision;
 ```
 
-<!-- AGENT-GATE GIF — the gate running: security / code review / tests / policy passing (the "safe" half). -->
-![The automated agent gate: security, QA and lint/typecheck checks passing before production](assets/agent-gate.gif)
 
 ## The idea
 
