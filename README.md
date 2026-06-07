@@ -71,8 +71,6 @@ flowchart TD
 - **Automated gate before prod.** Once humans approve, specialist agents (security, code review, tests, policy) run as a final gate. Anything flagged loops back to the env.
 - **Ship.** Clean pass → merge to main → production.
 
-<!-- WORKSPACE screenshot — one screen: AI chat + live code diff + live preview ("one environment, every tool"). -->
-![The WithVibe environment: AI chat, a live code diff and the running app preview in one screen](assets/workspace.png)
 
 ## Repository layout
 
