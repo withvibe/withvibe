@@ -1,8 +1,10 @@
 # Contributing to withvibe
 
-Thanks for considering a contribution! This project is licensed under the
-[Elastic License 2.0](LICENSE) — by submitting a contribution you agree your
-work is licensed under the same terms.
+Thanks for considering a contribution! This project is open source under the
+[GNU AGPL-3.0](LICENSE). Before we can merge your first pull request you'll
+need to sign our [Contributor License Agreement](CLA.md) — it keeps dual
+licensing (open source + commercial hosted tier) possible. The CLA check
+runs automatically on your PR.
 
 ## Ground rules
 

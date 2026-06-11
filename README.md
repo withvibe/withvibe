@@ -10,7 +10,7 @@ review pass.
 📖 **[Docs](https://withvibe.dev/docs)** &nbsp;·&nbsp;
 ✉️ **[Contact](https://withvibe.dev/contact)**
 
-[![License: ELv2](https://img.shields.io/badge/license-Elastic%202.0-005571.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![CLI: Apache 2.0](https://img.shields.io/badge/CLI-Apache%202.0-blue.svg)](https://github.com/withvibe/withvibe-cli)
 [![Node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](https://nodejs.org)
 [![pnpm](https://img.shields.io/badge/pnpm-%E2%89%A59-orange.svg)](https://pnpm.io)
@@ -87,7 +87,7 @@ the stack lives in a [separate, Apache-2.0 repo](https://github.com/withvibe/wit
 │   └── db/         # Prisma schema + generated client (@withvibe/db)
 ├── docs/           # architecture and operator notes
 ├── scripts/        # release + GHCR publishing
-└── LICENSE         # Elastic License 2.0
+└── LICENSE         # GNU AGPL-3.0
 ```
 
 ## Develop the codebase
@@ -175,7 +175,7 @@ server forwards the user's session cookie to NestJS over a same-origin path.
 
 | Repo | License | What it is |
 | --- | --- | --- |
-| **[withvibe/withvibe](https://github.com/withvibe/withvibe)** (this repo) | Elastic 2.0 | The server stack — api, web, db, QA-browser extension |
+| **[withvibe/withvibe](https://github.com/withvibe/withvibe)** (this repo) | AGPL-3.0 | The server stack — api, web, db, QA-browser extension |
 | **[withvibe/withvibe-cli](https://github.com/withvibe/withvibe-cli)** | Apache 2.0 | The `withvibe` CLI — installs and manages the stack, runs envs locally |
 | **[withvibe/withvibe-skills](https://github.com/withvibe/withvibe-skills)** | Apache 2.0 | Claude Code skills — first-time installer guide + plugin scaffolder |
 | **[withvibe/withvibe-roadmap](https://github.com/withvibe/withvibe-roadmap)** | Apache 2.0 | Roadmap plugin — a per-env implementation board (Postgres-backed) with an MCP server the AI orchestrator drives |
@@ -196,8 +196,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). For security issues, see
 
 ## License
 
-Source code in this repository is licensed under the **Elastic License 2.0**
-(ELv2). See [LICENSE](LICENSE) for the full text.
+Source code in this repository is **open source** under the
+**GNU Affero General Public License v3.0** (AGPL-3.0). See
+[LICENSE](LICENSE) for the full text.
 
 ### Plain-language summary
 
@@ -208,22 +209,26 @@ Source code in this repository is licensed under the **Elastic License 2.0**
 your organization** (running it for your own team, customizing it, fixing
 bugs, contributing patches back).
 
-✅ **Free to fork** and build on, as long as you keep the license notices
-intact.
+✅ **Free to fork** and build on, under the same AGPL-3.0 terms.
 
-❌ **Not free** to offer the software (or a substantial set of its features)
-to third parties as a **hosted, managed, or commercial service**.
+⚠️ **If you offer a modified version to others over a network** (e.g. as a
+hosted service), the AGPL requires you to make your modified source available
+to its users under the same license.
 
-❌ **Not free** to remove or work around any license-key functionality or
-licensor notices.
+### Commercial licensing
 
-### Need a different license?
-
-If you want to use WithVibe for purposes ELv2 doesn't permit — offering it as
-a SaaS product, embedding it in a commercial offering, or any other
-public/commercial distribution beyond internal organizational use — reach out
-and we'll work out a **commercial license agreement**:
+The hosted WithVibe offering is provided by us under a separate commercial
+license. If the AGPL doesn't fit your use case — embedding WithVibe in a
+proprietary offering, or running it as a service without the source-sharing
+obligation — reach out and we'll work out a **commercial license agreement**:
 [withvibe.dev/contact](https://withvibe.dev/contact).
+
+### Contributor License Agreement
+
+External contributions require agreeing to our [CLA](CLA.md), which licenses
+your contribution to us broadly enough to keep dual licensing (open source +
+commercial) possible. The CLA check runs automatically on your first pull
+request.
 
 ---
 

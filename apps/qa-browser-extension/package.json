@@ -2,7 +2,7 @@
   "name": "@withvibe/qa-browser-extension",
   "version": "0.1.0",
   "private": true,
-  "license": "Elastic-2.0",
+  "license": "AGPL-3.0-only",
   "description": "Chrome extension that lets the WithVibe QA agent drive your real browser instead of a Docker sidecar.",
   "type": "module",
   "scripts": {
