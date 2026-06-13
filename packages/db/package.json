@@ -35,8 +35,8 @@
     "pg": "^8.20.0"
   },
   "devDependencies": {
-    "@types/bcryptjs": "^2.4.6",
-    "@types/node": "^20",
+    "@types/bcryptjs": "^3.0.0",
+    "@types/node": "^25",
     "@types/pg": "^8.20.0",
     "dotenv": "^16.4.7",
     "prisma": "^7.7.0",
