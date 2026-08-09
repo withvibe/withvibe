@@ -21,6 +21,7 @@ import { EnvCloneService } from "../env-clones/env-clone.service";
 import { StorageService } from "../storage/storage.service";
 import { ReposService } from "../repos/repos.service";
 import { SlackService } from "../slack/slack.service";
+import { DEFAULT_MODEL, isModelChoice } from "../chat/models";
 import { SlackSocketService } from "../slack/slack-socket.service";
 import { getAppVersion } from "../common/version";
 
@@ -170,11 +171,11 @@ export class WorkspacesService {
       data: {
         name: input.name,
         description: input.description ?? null,
-        // Default new workspaces to Sonnet 4.6 rather than the schema's "auto"
-        // (which per-turn routes and can escalate to Opus). A concrete model id
-        // makes the model-router short-circuit, so every session in the
-        // workspace uses Sonnet 4.6 unless an admin changes it in Settings.
-        defaultModel: "claude-sonnet-4-6",
+        // Default new workspaces to a concrete model rather than the schema's
+        // "auto" (which per-turn routes and can escalate to Opus). A concrete
+        // id makes the model-router short-circuit, so every session in the
+        // workspace uses DEFAULT_MODEL unless an admin changes it in Settings.
+        defaultModel: DEFAULT_MODEL,
         members: {
           create: {
             userId,
@@ -532,12 +533,9 @@ export class WorkspacesService {
     if (typeof body.debugMode === "boolean") {
       data.debugMode = body.debugMode;
     }
-    if (
-      typeof body.defaultModel === "string" &&
-      (
-        ["auto", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"] as string[]
-      ).includes(body.defaultModel)
-    ) {
+    // Validated against the shared model list rather than a local copy — the
+    // hardcoded array here silently rejected every model added to models.ts.
+    if (isModelChoice(body.defaultModel)) {
       data.defaultModel = body.defaultModel;
     }
     // Tri-state: true=force on, false=force off, null=inherit deployment.

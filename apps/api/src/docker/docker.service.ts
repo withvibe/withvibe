@@ -553,9 +553,19 @@ export class DockerService {
     void this.startBg(envId);
   }
 
-  async stopEnvironment(envId: string): Promise<void> {
+  /**
+   * `purgeVolumes` is for env DELETION only. A plain stop must leave named
+   * volumes alone — that's the env's database, its maven cache, its
+   * node_modules; the user expects them back on the next start. Deletion is
+   * the only moment where dropping them is correct, and without it they
+   * survive forever: nothing else in the system ever removes them.
+   */
+  async stopEnvironment(
+    envId: string,
+    options: { purgeVolumes?: boolean } = {}
+  ): Promise<void> {
     await this.setStatus(envId, "stopping", { error: null });
-    void this.stopBg(envId);
+    void this.stopBg(envId, options);
   }
 
   async rebuildEnvironment(envId: string): Promise<void> {
@@ -709,8 +719,15 @@ export class DockerService {
     }
   }
 
-  private async stopBg(envId: string): Promise<void> {
-    this.pushLog(envId, `[stop] shutting down…\n`);
+  private async stopBg(
+    envId: string,
+    options: { purgeVolumes?: boolean } = {}
+  ): Promise<void> {
+    const purge = options.purgeVolumes === true;
+    this.pushLog(
+      envId,
+      purge ? `[stop] shutting down + removing volumes…\n` : `[stop] shutting down…\n`
+    );
     // Tear down the DB viewer + QA browser sidecars first — their network
     // goes away with `compose down --remove-orphans`, so stopping them after
     // would fail.
@@ -736,7 +753,7 @@ export class DockerService {
       await this.runComposeBare(
         envId,
         proj,
-        ["down", "--remove-orphans", "-t", "10"],
+        ["down", "--remove-orphans", "-t", "10", ...(purge ? ["-v"] : [])],
         2 * 60 * 1000
       );
 
@@ -758,6 +775,8 @@ export class DockerService {
           }
         }
       }
+
+      if (purge) await this.removeProjectVolumes(envId, proj);
 
       await this.removeEnvProxyNet(envId);
       await this.setStatus(envId, "stopped", { ports: {} });
@@ -925,6 +944,62 @@ export class DockerService {
         .filter(Boolean);
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * Drop every volume compose labeled for this project. Runs after
+   * `down -v` rather than instead of it: `down -v` only knows the volumes
+   * declared in the compose file it resolved, and by delete time that file
+   * is often unreachable (template edited or removed, clone already torn
+   * down), so on its own it silently leaves the whole set behind.
+   *
+   * Deletion-only — the caller gates this behind `purgeVolumes`.
+   */
+  private async removeProjectVolumes(
+    envId: string,
+    proj: string
+  ): Promise<void> {
+    let names: string[];
+    try {
+      const { stdout } = await exec(
+        "docker",
+        [
+          "volume",
+          "ls",
+          "-q",
+          "--filter",
+          `label=com.docker.compose.project=${proj}`,
+        ],
+        { timeout: 15_000 }
+      );
+      names = stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    } catch (err) {
+      this.pushLog(
+        envId,
+        `[stop] could not list volumes for ${proj}: ${this.formatErr(err)}\n`
+      );
+      return;
+    }
+    if (names.length === 0) return;
+    this.pushLog(
+      envId,
+      `[stop] removing ${names.length} volume(s): ${names.join(", ")}\n`
+    );
+    try {
+      await exec("docker", ["volume", "rm", "-f", ...names], {
+        timeout: 60_000,
+      });
+    } catch (err) {
+      // A volume still attached to a container outside this project can't be
+      // removed; log it rather than failing the whole teardown.
+      this.pushLog(
+        envId,
+        `[stop] volume removal failed: ${this.formatErr(err)}\n`
+      );
     }
   }
 

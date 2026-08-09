@@ -12,8 +12,8 @@ import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 // Maps the per-turn classification tier to a concrete Claude model id.
 const TIER_TO_MODEL: Record<"simple" | "medium" | "hard", ConcreteModelId> = {
   simple: "claude-haiku-4-5",
-  medium: "claude-sonnet-4-6",
-  hard: "claude-opus-4-7",
+  medium: "claude-sonnet-5",
+  hard: "claude-opus-5",
 };
 
 // Five-minute in-memory cache of (prompt-hash → tier). Keeps retries and

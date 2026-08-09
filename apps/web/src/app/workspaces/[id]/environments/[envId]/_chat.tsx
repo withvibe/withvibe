@@ -51,11 +51,27 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { useDemoMode } from "../../_demo-mode";
+import {
+  AskUserQuestionCard,
+  type AskQuestion,
+} from "./_ask-user-question";
 
 type MessageSegment =
   | { type: "text"; text: string }
   /** `id` matches the model's tool_use_id. The UI uses it to look up `debug_tool_latency` and show a wall-clock duration on the tool card. */
-  | { type: "tool_use"; name: string; input: unknown; id?: string };
+  | { type: "tool_use"; name: string; input: unknown; id?: string }
+  /**
+   * A blocking `AskUserQuestion`. The agent's turn is suspended server-side
+   * until this is answered, skipped, or times out — `status` tracks which,
+   * driven by the stream rather than by the card, since the turn can be
+   * closed from elsewhere (timeout, interrupt, another tab).
+   */
+  | {
+      type: "ask_user_question";
+      toolUseId: string;
+      questions: AskQuestion[];
+      status: "pending" | "answered" | "closed";
+    };
 
 type ToolLatency = {
   name: string;
@@ -307,9 +323,42 @@ export function EnvironmentChat({
     activeRef.current = active;
   }, [active]);
 
+  // Questions whose turn is still parked on the server but whose card was
+  // lost with the page that rendered it. Fetched once per active session;
+  // while a turn is live the stream is authoritative, so this only ever
+  // covers the reload case.
+  const [orphanQuestions, setOrphanQuestions] = useState<
+    { toolUseId: string; questions: AskQuestion[] }[]
+  >([]);
+  useEffect(() => {
+    if (active == null || active === "legacy") {
+      setOrphanQuestions([]);
+      return;
+    }
+    let cancelled = false;
+    fetch(
+      `/api/workspaces/${workspaceId}/envs/${envId}/questions/pending?sessionId=${encodeURIComponent(active)}`
+    )
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d) => {
+        if (!cancelled && Array.isArray(d)) setOrphanQuestions(d);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [active, workspaceId, envId]);
+
   const activeState = active != null ? sessionStates[active] : null;
   const messages = activeState?.messages ?? [];
   const live = activeState?.live ?? null;
+  // The live stream owns any question it is already showing — don't let the
+  // recovered copy render a second card for the same one.
+  const liveQuestionIds = new Set(
+    (live?.segments ?? []).flatMap((s) =>
+      s.type === "ask_user_question" ? [s.toolUseId] : []
+    )
+  );
   const error = activeState?.error ?? null;
   const sending = !!activeState?.controller;
   const queuedCount = activeState?.queuedCount ?? 0;
@@ -1058,6 +1107,10 @@ export function EnvironmentChat({
       status?: string;
       auto?: boolean;
       tier?: string;
+      /** `ask_user_question` — the set the model wants answered. */
+      questions?: AskQuestion[];
+      /** `ask_user_question_closed` — false when skipped or timed out. */
+      answered?: boolean;
     } & Partial<DebugMeta>
   ) {
     // Queue tracking and turn-boundary events don't depend on `live`, so
@@ -1172,6 +1225,32 @@ export function EnvironmentChat({
             { name: ev.name, input: ev.input, id },
           ],
           segments: [...live.segments, seg],
+        };
+      } else if (
+        ev.type === "ask_user_question" &&
+        typeof ev.toolUseId === "string" &&
+        Array.isArray(ev.questions)
+      ) {
+        const seg: MessageSegment = {
+          type: "ask_user_question",
+          toolUseId: ev.toolUseId,
+          questions: ev.questions as AskQuestion[],
+          status: "pending",
+        };
+        live = { ...live, segments: [...live.segments, seg] };
+      } else if (
+        ev.type === "ask_user_question_closed" &&
+        typeof ev.toolUseId === "string"
+      ) {
+        const closedId = ev.toolUseId;
+        const answered = ev.answered === true;
+        live = {
+          ...live,
+          segments: live.segments.map((s) =>
+            s.type === "ask_user_question" && s.toolUseId === closedId
+              ? { ...s, status: answered ? "answered" : "closed" }
+              : s
+          ),
         };
       } else if (
         ev.type === "debug_tool_latency" &&
@@ -1650,7 +1729,12 @@ export function EnvironmentChat({
                 // visible above the input box at all scroll positions.
                 <div className="px-6 pb-16 space-y-5">
                   {live && !currentRunIsSlackTriggered && (
-                    <LiveBubble live={live} debugMode={debugMode} />
+                    <LiveBubble
+                      live={live}
+                      debugMode={debugMode}
+                      workspaceId={workspaceId}
+                      envId={envId}
+                    />
                   )}
                   {error && (
                     <Alert variant="destructive">
@@ -1725,6 +1809,27 @@ export function EnvironmentChat({
               e.target.value = "";
             }}
           />
+          {/* Recovered after a reload: the card normally lives inside the
+              streamed turn, but the run stays parked server-side while the
+              page that rendered it is gone. Without this the agent just
+              looks hung until the answer times out. */}
+          {orphanQuestions
+            .filter((q) => !liveQuestionIds.has(q.toolUseId))
+            .map((q) => (
+              <AskUserQuestionCard
+                key={q.toolUseId}
+                toolUseId={q.toolUseId}
+                questions={q.questions}
+                status="pending"
+                workspaceId={workspaceId}
+                envId={envId}
+                onAnswered={() =>
+                  setOrphanQuestions((prev) =>
+                    prev.filter((p) => p.toolUseId !== q.toolUseId)
+                  )
+                }
+              />
+            ))}
           <Composer
             ref={composerRef}
             sending={sending}
@@ -2176,9 +2281,14 @@ function MessageTimestamp({ createdAt }: { createdAt: string }) {
 const LiveBubble = memo(function LiveBubble({
   live,
   debugMode,
+  workspaceId,
+  envId,
 }: {
   live: LiveAssistant;
   debugMode: boolean;
+  /** Only the live bubble can host an answerable question — history is read-only. */
+  workspaceId: string;
+  envId: string;
 }) {
   const label = live.content
     ? "Working…"
@@ -2194,6 +2304,8 @@ const LiveBubble = memo(function LiveBubble({
           <SegmentsRenderer
             segments={live.segments}
             toolLatencies={debugMode ? live.debug.toolLatencies : undefined}
+            workspaceId={workspaceId}
+            envId={envId}
           />
         )}
         <div
@@ -2761,15 +2873,31 @@ const ToolCallsList = memo(function ToolCallsList({
 const SegmentsRenderer = memo(function SegmentsRenderer({
   segments,
   toolLatencies,
+  workspaceId,
+  envId,
 }: {
   segments: MessageSegment[];
   /** Same shape as ToolCallsList — per-id latency map, debug-only. */
   toolLatencies?: Record<string, ToolLatency>;
+  /** Needed by the question card to post its answer back. */
+  workspaceId?: string;
+  envId?: string;
 }) {
   return (
     <div className="space-y-2">
       {segments.map((seg, i) =>
-        seg.type === "text" ? (
+        seg.type === "ask_user_question" ? (
+          <AskUserQuestionCard
+            key={seg.toolUseId}
+            toolUseId={seg.toolUseId}
+            questions={seg.questions}
+            // A replayed segment from history has no live turn behind it, and
+            // without the ids there's nothing to post to — render read-only.
+            status={workspaceId && envId ? seg.status : "closed"}
+            workspaceId={workspaceId ?? ""}
+            envId={envId ?? ""}
+          />
+        ) : seg.type === "text" ? (
           <div
             key={i}
             dir="auto"

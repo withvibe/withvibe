@@ -389,10 +389,13 @@ export class StorageService {
   async deleteEnv(workspaceId: string, envId: string): Promise<void> {
     const cfg = await this.loadConfig(workspaceId);
     if (cfg.storageMode === "LOCAL") {
+      // Always remove it, even when `base` IS the env clone dir. This used to
+      // return early and defer to env-clone teardown, which in fact only
+      // removed the per-repo clones inside the directory — so in the default
+      // LOCAL setup nothing deleted it at all. Both paths are idempotent
+      // `force` removes of the same env-scoped directory, so letting them
+      // overlap is cheaper than depending on the other one running.
       const base = this.localEnvBase(workspaceId, envId, cfg);
-      const envDir = this.envClones.envDir(workspaceId, envId);
-      // When storage is the env clone dir, env-clone teardown already cleans this.
-      if (path.resolve(base) === path.resolve(envDir)) return;
       await fs.rm(base, { recursive: true, force: true });
       return;
     }

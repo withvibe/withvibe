@@ -560,5 +560,20 @@ exit 0
     for (const er of envRepos) {
       await this.removeEnvClone(er.id, options);
     }
+
+    // Then the env directory itself. Removing the per-repo clones above
+    // leaves the parent behind, and it is not empty: `extracontext/`, the
+    // generated `.code-workspace`, and anything an agent wrote at the env
+    // root all live there. An env with no repos at all left the entire
+    // directory untouched.
+    const env = await this.prisma.client.env.findUnique({
+      where: { id: envId },
+      select: { workspaceId: true },
+    });
+    if (!env) return;
+    const dir = this.envDir(env.workspaceId, envId);
+    await rm(dir, { recursive: true, force: true }).catch((err) =>
+      this.logger.warn(`Failed to remove env dir ${dir}: ${err}`)
+    );
   }
 }

@@ -52,10 +52,14 @@ export async function proxyToApi(
   const method = req.method.toUpperCase();
   const hasBody = method !== "GET" && method !== "HEAD";
 
+  // Read the body directly — never `req.clone()`. Cloning routes the read
+  // through Next's cloneable-body stream, which silently truncates at
+  // `experimental.proxyClientMaxBodySize` and forwards the cut-off bytes
+  // upstream (the API then fails with "Unterminated string in JSON").
   const apiRes = await fetchWithBootRetry(url, {
     method,
     headers,
-    body: hasBody ? await req.clone().arrayBuffer() : undefined,
+    body: hasBody ? await req.arrayBuffer() : undefined,
     ...(hasBody ? { duplex: "half" } : {}),
   } as RequestInit);
 

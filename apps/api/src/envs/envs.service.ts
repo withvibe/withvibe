@@ -28,6 +28,7 @@ import { PortAllocatorService } from "../ports/port-allocator.service";
 import { ClaudeRunnerService } from "../runner/claude-runner.service";
 import { StorageService } from "../storage/storage.service";
 import { ActiveRunsService } from "../chat/active-runs.service";
+import { isModelChoice } from "../chat/models";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const VALID_STATUSES: EnvStatus[] = ["todo", "in_progress", "done"];
@@ -646,6 +647,14 @@ export class EnvsService {
           const result = await this.envClones.ensureEnvClone(er.id);
           if ("error" in result) {
             await this.portAllocator.releaseForEnv(env.id).catch(() => {});
+            // Clones for the repos that succeeded before this one are already
+            // on disk. Soft-deleting alone would strand them: the env is gone
+            // from every UI, so nothing ever comes back to clean them up.
+            await this.envClones.removeEnvClones(env.id).catch((err) => {
+              this.logger.error(
+                `Rollback cleanup failed for env ${env.id}: ${err}`
+              );
+            });
             await this.prisma.client.env.update({
               where: { id: env.id },
               data: { deletedAt: new Date() },
@@ -677,6 +686,14 @@ export class EnvsService {
           `Template materialization failed for env ${env.id}: ${err}`
         );
         await this.portAllocator.releaseForEnv(env.id).catch(() => {});
+        // The materializer has already written the env dir (compose, assets,
+        // .env) and clones may exist too — drop the whole thing rather than
+        // leaving an invisible soft-deleted env's files behind forever.
+        await this.envClones.removeEnvClones(env.id).catch((cleanupErr) => {
+          this.logger.error(
+            `Rollback cleanup failed for env ${env.id}: ${cleanupErr}`
+          );
+        });
         await this.prisma.client.env.update({
           where: { id: env.id },
           data: { deletedAt: new Date() },
@@ -843,12 +860,7 @@ export class EnvsService {
     // id pins this env. Anything else is ignored to keep the field a closed set.
     if (body.modelChoice === null) {
       data.modelChoice = null;
-    } else if (
-      typeof body.modelChoice === "string" &&
-      (
-        ["auto", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"] as string[]
-      ).includes(body.modelChoice)
-    ) {
+    } else if (isModelChoice(body.modelChoice)) {
       data.modelChoice = body.modelChoice;
     }
     // sandboxBypass: null = inherit workspace/deployment; true/false force
@@ -999,7 +1011,10 @@ export class EnvsService {
     // actually released them on the network side.
     void (async () => {
       try {
-        await this.docker.stopEnvironment(envId);
+        // purgeVolumes: this is a delete, not a stop — the env's named
+        // volumes (db data, caches, node_modules) go with it. Nothing else
+        // ever removes them, so skipping this leaks them permanently.
+        await this.docker.stopEnvironment(envId, { purgeVolumes: true });
       } catch {
         // already logged by docker service
       }

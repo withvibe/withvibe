@@ -12,6 +12,8 @@ import { EnvKnowledgeService } from "./env-knowledge.service";
 import { WorkspaceKnowledgeService } from "./workspace-knowledge.service";
 import { MemberMemoryService } from "./member-memory.service";
 import { HumanQuestionService } from "./human-question.service";
+import { PendingQuestionsService } from "./pending-questions.service";
+import { QuestionsController } from "./questions.controller";
 import { MemoryMirrorService } from "./memory-mirror.service";
 import { ExternalContextMcpService } from "./external-context-mcp.service";
 import { SessionsService } from "./sessions.service";
@@ -42,6 +44,7 @@ import { BenchController } from "./bench/bench.controller";
     ActiveRunsController,
     AttachmentsController,
     BenchController,
+    QuestionsController,
   ],
   providers: [
     ChatContextService,
@@ -60,6 +63,7 @@ import { BenchController } from "./bench/bench.controller";
     ActiveRunsService,
     SecurityScanService,
     BenchService,
+    PendingQuestionsService,
   ],
   exports: [
     EnvKnowledgeService,

@@ -431,6 +431,8 @@ export type ChatContext = {
   envId: string;
   workspaceId: string;
   sessionId: string | null;
+  /** Whoever is speaking this turn — the only person allowed to answer an `AskUserQuestion`. */
+  speakerUserId: string;
 };
 
 @Injectable()
@@ -1350,6 +1352,7 @@ A read-only markdown mirror of everything above (workspace + env knowledge, memb
       envId,
       workspaceId: env.workspaceId,
       sessionId,
+      speakerUserId,
     };
   }
 }

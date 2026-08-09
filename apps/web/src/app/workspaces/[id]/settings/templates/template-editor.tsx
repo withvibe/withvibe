@@ -131,6 +131,30 @@ export function extractServiceNames(composeFile: string): string[] {
   return names;
 }
 
+/**
+ * The services the editor shows: every service declared in the compose file,
+ * carrying whatever enrichment has been recorded for it. `state.services` is
+ * only the enrichment store — services with nothing filled in are dropped on
+ * save, so it is empty for most templates and can never be the source of the
+ * list itself.
+ */
+export function deriveServices(state: {
+  composeFile: string;
+  services: EditorService[];
+}): EditorService[] {
+  const byName = new Map(state.services.map((s) => [s.name, s]));
+  return extractServiceNames(state.composeFile).map(
+    (name) =>
+      byName.get(name) ?? {
+        name,
+        description: "",
+        role: "",
+        userFacing: false,
+        agentInstructions: "",
+      }
+  );
+}
+
 type WorkspaceRepo = { id: string; name: string };
 
 const KIND_OPTIONS: { value: TemplateVariableKind; label: string; help: string }[] = [
@@ -228,6 +252,32 @@ export function TemplateEditor({
 
   const assistantRef = useRef<AssistantPanelHandle>(null);
 
+  // Deriving here (rather than storing) is what makes an existing template's
+  // services show up at all — previously the list was only ever rebuilt while
+  // editing the YAML, so opening a saved template showed "no services
+  // detected" no matter what the compose file contained.
+  const services = useMemo<EditorService[]>(
+    () => deriveServices(state),
+    [state]
+  );
+
+  // Assets are shipped inline on save, and a template can carry hundreds of
+  // files (tens of MB). Only send them when something actually touched them —
+  // the api leaves the asset tree alone when the key is absent, so an
+  // unrelated edit (attaching a repo, renaming) stays a few KB instead of
+  // round-tripping every file through the proxy.
+  const [assetsDirty, setAssetsDirty] = useState(false);
+
+  function setAssets(
+    next: EditorAsset[] | ((prev: EditorAsset[]) => EditorAsset[])
+  ) {
+    setAssetsDirty(true);
+    setState((prev) => ({
+      ...prev,
+      assets: typeof next === "function" ? next(prev.assets) : next,
+    }));
+  }
+
   useEffect(() => {
     let cancelled = false;
     fetch(`/api/workspaces/${workspaceId}/repos`)
@@ -294,27 +344,12 @@ export function TemplateEditor({
     setState((prev) => ({ ...prev, [key]: value }));
   }
 
-  // Keep the services list in sync with the compose YAML: add rows for
-  // newly-declared services, drop rows for services that no longer exist.
-  // User-entered description/role/userFacing/agentInstructions are preserved
-  // for any service whose name persists. Done inline at edit time so we don't
-  // need a useEffect that calls setState.
+  // Only the YAML changes here. The services list re-derives from it (see
+  // `services` above) and enrichment is keyed by service name, so it survives
+  // any edit that doesn't rename the service. Enrichment left behind by a
+  // removed service is ignored on save, which builds from the derived list.
   function setComposeFile(composeFile: string) {
-    setState((prev) => {
-      const names = extractServiceNames(composeFile);
-      const byName = new Map(prev.services.map((s) => [s.name, s]));
-      const services: EditorService[] = names.map(
-        (n) =>
-          byName.get(n) ?? {
-            name: n,
-            description: "",
-            role: "",
-            userFacing: false,
-            agentInstructions: "",
-          }
-      );
-      return { ...prev, composeFile, services };
-    });
+    setState((prev) => ({ ...prev, composeFile }));
   }
 
   function addVariable() {
@@ -338,13 +373,33 @@ export function TemplateEditor({
     }));
   }
 
+  // Upsert: a service derived from the compose file has no enrichment row
+  // until its first edit, so a plain map() would silently drop the change.
   function updateService(name: string, patch: Partial<EditorService>) {
-    setState((prev) => ({
-      ...prev,
-      services: prev.services.map((s) =>
-        s.name === name ? { ...s, ...patch } : s
-      ),
-    }));
+    setState((prev) => {
+      if (prev.services.some((s) => s.name === name)) {
+        return {
+          ...prev,
+          services: prev.services.map((s) =>
+            s.name === name ? { ...s, ...patch } : s
+          ),
+        };
+      }
+      return {
+        ...prev,
+        services: [
+          ...prev.services,
+          {
+            name,
+            description: "",
+            role: "",
+            userFacing: false,
+            agentInstructions: "",
+            ...patch,
+          },
+        ],
+      };
+    });
   }
 
   function toggleRepo(repoId: string, checked: boolean) {
@@ -470,38 +525,26 @@ export function TemplateEditor({
         case "setService": {
           const svcName = str("name");
           if (!svcName) return { ok: false, error: "name is required" };
-          const exists = stateRef.current.services.some(
-            (s) => s.name === svcName
-          );
-          if (!exists) {
+          // Check against the compose file, not the enrichment rows — a
+          // service the assistant has never described has no row yet.
+          const inCompose = extractServiceNames(
+            stateRef.current.composeFile
+          ).includes(svcName);
+          if (!inCompose) {
             return {
               ok: false,
               error: `Service "${svcName}" not found in compose. Add it to the compose file first.`,
             };
           }
-          setState((prev) => ({
-            ...prev,
-            services: prev.services.map((s) =>
-              s.name === svcName
-                ? {
-                    ...s,
-                    description:
-                      typeof input.description === "string"
-                        ? str("description")
-                        : s.description,
-                    role: typeof input.role === "string" ? str("role") : s.role,
-                    userFacing:
-                      typeof input.userFacing === "boolean"
-                        ? bool("userFacing")
-                        : s.userFacing,
-                    agentInstructions:
-                      typeof input.agentInstructions === "string"
-                        ? str("agentInstructions")
-                        : s.agentInstructions,
-                  }
-                : s
-            ),
-          }));
+          const patch: Partial<EditorService> = {};
+          if (typeof input.description === "string")
+            patch.description = str("description");
+          if (typeof input.role === "string") patch.role = str("role");
+          if (typeof input.userFacing === "boolean")
+            patch.userFacing = bool("userFacing");
+          if (typeof input.agentInstructions === "string")
+            patch.agentInstructions = str("agentInstructions");
+          updateService(svcName, patch);
           return { ok: true };
         }
         case "writeAsset": {
@@ -511,20 +554,12 @@ export function TemplateEditor({
             return { ok: false, error: "Invalid asset path" };
           const content = str("content");
           const isTemplate = bool("isTemplate");
-          setState((prev) => {
-            const idx = prev.assets.findIndex((a) => a.path === path);
-            if (idx === -1) {
-              return {
-                ...prev,
-                assets: [...prev.assets, { path, content, isTemplate }],
-              };
-            }
-            return {
-              ...prev,
-              assets: prev.assets.map((a, j) =>
-                j === idx ? { ...a, content, isTemplate } : a
-              ),
-            };
+          setAssets((prev) => {
+            const idx = prev.findIndex((a) => a.path === path);
+            if (idx === -1) return [...prev, { path, content, isTemplate }];
+            return prev.map((a, j) =>
+              j === idx ? { ...a, content, isTemplate } : a
+            );
           });
           return { ok: true };
         }
@@ -532,10 +567,7 @@ export function TemplateEditor({
           const path = str("path");
           if (!stateRef.current.assets.some((a) => a.path === path))
             return { ok: false, error: `Asset "${path}" not found` };
-          setState((prev) => ({
-            ...prev,
-            assets: prev.assets.filter((a) => a.path !== path),
-          }));
+          setAssets((prev) => prev.filter((a) => a.path !== path));
           return { ok: true };
         }
         default:
@@ -578,11 +610,17 @@ export function TemplateEditor({
         }
         return out;
       }),
-      assets: state.assets.map((a) => ({
-        path: a.path,
-        content: a.content,
-        isTemplate: a.isTemplate,
-      })),
+      // Omitted entirely when untouched — the api replaces the whole asset
+      // set when this key is present and leaves it alone when it isn't.
+      ...(mode === "create" || assetsDirty
+        ? {
+            assets: state.assets.map((a) => ({
+              path: a.path,
+              content: a.content,
+              isTemplate: a.isTemplate,
+            })),
+          }
+        : {}),
       repos: state.repos.map((r) => ({
         id: r.id,
         baseBranch: r.baseBranch.trim() || null,
@@ -594,7 +632,7 @@ export function TemplateEditor({
           : null,
       qaBrowserMode: state.qaBrowserMode,
       agentInstructions: state.agentInstructions.trim() || null,
-      services: state.services
+      services: services
         .filter(
           (s) =>
             s.description.trim() ||
@@ -649,7 +687,7 @@ export function TemplateEditor({
       ? "complete"
       : "optional";
     const servicesStatus: SectionStatus =
-      state.services.length === 0 ? "optional" : "complete";
+      services.length === 0 ? "optional" : "complete";
     const variablesStatus: SectionStatus =
       state.variables.length === 0
         ? "optional"
@@ -671,7 +709,7 @@ export function TemplateEditor({
       { key: "repos", label: "Repositories", status: reposStatus },
       { key: "runtime", label: "Routing & QA", status: runtimeStatus },
     ];
-  }, [state]);
+  }, [state, services]);
 
   return (
     <form onSubmit={submit}>
@@ -716,7 +754,7 @@ export function TemplateEditor({
             />
             <SidebarFiles
               assets={state.assets}
-              onAssetsChange={(next) => setField("assets", next)}
+              onAssetsChange={(next) => setAssets(next)}
               activeFile={activeFile}
               onOpenFile={openFile}
               composePresent={state.composeFile.trim().length > 0}
@@ -727,7 +765,13 @@ export function TemplateEditor({
           <AssistantPanel
             ref={assistantRef}
             workspaceId={workspaceId}
-            getState={() => stateRef.current}
+            // Hand the assistant the derived service list, not the enrichment
+            // store — otherwise its prompt reads "Services: (none)" for a
+            // compose file full of them.
+            getState={() => ({
+              ...stateRef.current,
+              services: deriveServices(stateRef.current),
+            })}
             applyToolCall={applyToolCall}
             variant="inline"
           />
@@ -743,19 +787,13 @@ export function TemplateEditor({
               setComposeFile={setComposeFile}
               assets={state.assets}
               onAssetChange={(path, content) =>
-                setField(
-                  "assets",
-                  state.assets.map((a) =>
-                    a.path === path ? { ...a, content } : a
-                  )
+                setAssets((prev) =>
+                  prev.map((a) => (a.path === path ? { ...a, content } : a))
                 )
               }
               onAssetInterpolateChange={(path, isTemplate) =>
-                setField(
-                  "assets",
-                  state.assets.map((a) =>
-                    a.path === path ? { ...a, isTemplate } : a
-                  )
+                setAssets((prev) =>
+                  prev.map((a) => (a.path === path ? { ...a, isTemplate } : a))
                 )
               }
               mode={mode}
@@ -870,12 +908,13 @@ export function TemplateEditor({
           <div>
             <h3 className="font-mono text-sm font-semibold">Services</h3>
             <p className="text-xs text-muted-foreground">
-              Auto-detected from the compose YAML above. Describe each service so
-              the DevOps agent (and future UI surfaces) know what it&apos;s for. All
-              fields optional — leave blank to skip enrichment for a service.
+              Auto-detected from <code>docker-compose.yml</code> under Files.
+              Describe each service so the DevOps agent (and future UI surfaces)
+              know what it&apos;s for. All fields optional — leave blank to skip
+              enrichment for a service.
             </p>
           </div>
-          {state.services.length > 0 && (
+          {services.length > 0 && (
             <Button
               type="button"
               variant="outline"
@@ -892,13 +931,13 @@ export function TemplateEditor({
             </Button>
           )}
         </div>
-        {state.services.length === 0 ? (
+        {services.length === 0 ? (
           <p className="text-xs text-muted-foreground italic">
             No services detected in the compose file yet.
           </p>
         ) : (
           <div className="space-y-3">
-            {state.services.map((s) => (
+            {services.map((s) => (
               <div
                 key={s.name}
                 className="space-y-2 rounded-md border p-3"

@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint src",
     "bench:chat": "ts-node -r tsconfig-paths/register src/chat/bench/run-bench.ts",
+    "check:models": "ts-node -r tsconfig-paths/register src/chat/models.check.ts",
     "check:compose-security": "ts-node -r tsconfig-paths/register src/docker/compose-security.check.ts",
     "check:compose-rewriter": "ts-node -r tsconfig-paths/register src/templates/compose-rewriter.check.ts"
   },

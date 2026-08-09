@@ -8,6 +8,11 @@ import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatContext } from "./chat-context.service";
 import { ClaudeCodeEngineService } from "./claude-code-engine.service";
 import { ModelRouterService } from "./model-router.service";
+import {
+  PendingQuestionsService,
+  type PendingQuestion,
+} from "./pending-questions.service";
+import { SideChannel, merge } from "./side-channel";
 import { PrismaService } from "../prisma/prisma.service";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
@@ -155,7 +160,58 @@ export type ChatEvent =
   | { type: "tool_result"; toolUseId: string; isError?: boolean }
   | { type: "done"; fullText: string; cost?: number; durationMs?: number }
   | { type: "error"; message: string }
+  /**
+   * The model called `AskUserQuestion`. The turn is parked inside the tool
+   * call until the browser POSTs an answer (or the question times out), so
+   * this event is pushed from `canUseTool` via the side channel rather than
+   * from the SDK message loop.
+   */
+  | {
+      type: "ask_user_question";
+      toolUseId: string;
+      questions: PendingQuestion[];
+    }
+  /** The question is closed — answered, skipped, or timed out. Clears the card. */
+  | { type: "ask_user_question_closed"; toolUseId: string; answered: boolean }
   | DebugEvent;
+
+/**
+ * Narrow the SDK's `AskUserQuestion` input to what the UI needs. Defensive
+ * rather than schema-validating: a malformed question should degrade to "let
+ * the tool run unanswered", never throw inside `canUseTool` (which would kill
+ * the turn).
+ */
+function parseQuestions(input: unknown): PendingQuestion[] {
+  const raw = (input as { questions?: unknown })?.questions;
+  if (!Array.isArray(raw)) return [];
+  const out: PendingQuestion[] = [];
+  for (const q of raw) {
+    if (!q || typeof q !== "object") continue;
+    const { question, header, options, multiSelect } = q as Record<string, unknown>;
+    if (typeof question !== "string" || !question.trim()) continue;
+    if (!Array.isArray(options)) continue;
+    const parsedOptions = options.flatMap((o) => {
+      if (!o || typeof o !== "object") return [];
+      const { label, description, preview } = o as Record<string, unknown>;
+      if (typeof label !== "string" || !label.trim()) return [];
+      return [
+        {
+          label,
+          description: typeof description === "string" ? description : "",
+          ...(typeof preview === "string" && preview ? { preview } : {}),
+        },
+      ];
+    });
+    if (parsedOptions.length === 0) continue;
+    out.push({
+      question,
+      header: typeof header === "string" ? header : "",
+      multiSelect: multiSelect === true,
+      options: parsedOptions,
+    });
+  }
+  return out;
+}
 
 /** One-line summary of an SDK message for the debug panel — never throws. */
 function summarizeSdkMessage(msg: unknown): string | undefined {
@@ -192,7 +248,8 @@ export class ChatStreamService {
     private readonly logger: PinoLogger,
     private readonly claudeCode: ClaudeCodeEngineService,
     private readonly prisma: PrismaService,
-    private readonly modelRouter: ModelRouterService
+    private readonly modelRouter: ModelRouterService,
+    private readonly pendingQuestions: PendingQuestionsService
   ) {}
 
   async *stream(opts: {
@@ -396,6 +453,12 @@ export class ChatStreamService {
         };
       }
 
+      // Events produced from inside canUseTool while the SDK loop is parked.
+      const sideChannel = new SideChannel<ChatEvent>();
+      const askUserId = opts.context.speakerUserId;
+      const logger = this.logger;
+      const pendingQuestions = this.pendingQuestions;
+
       const q = query({
         prompt: userMessages(),
         options: {
@@ -417,12 +480,74 @@ export class ChatStreamService {
           ...(enableProjectSources && { settingSources: ["project" as const] }),
           ...(resumeSessionId && { resume: resumeSessionId }),
           includePartialMessages: true,
+          /**
+           * Only ever consulted for interactive tools — `bypassPermissions`
+           * still short-circuits everything else, so ordinary tool calls
+           * never round-trip through here. `AskUserQuestion` is the
+           * exception: the SDK routes it through the permission channel
+           * regardless of mode, and with no handler it auto-cancels (the
+           * tool comes back as an error reading "Answer questions?").
+           */
+          canUseTool: async (toolName, input, { toolUseID, signal }) => {
+            if (toolName !== "AskUserQuestion") return { behavior: "allow" };
+
+            const questions = parseQuestions(input);
+            if (questions.length === 0) {
+              logger.warn(
+                `AskUserQuestion ${toolUseID} had no parsable questions — allowing unanswered`
+              );
+              return { behavior: "allow" };
+            }
+
+            sideChannel.push({
+              type: "ask_user_question",
+              toolUseId: toolUseID,
+              questions,
+            });
+
+            const outcome = await pendingQuestions.register({
+              toolUseId: toolUseID,
+              sessionId: opts.context.sessionId,
+              envId: opts.context.envId,
+              askedOfUserId: askUserId,
+              questions,
+              signal,
+            });
+
+            sideChannel.push({
+              type: "ask_user_question_closed",
+              toolUseId: toolUseID,
+              answered: outcome.answered,
+            });
+
+            if (!outcome.answered) {
+              // Deny rather than allow-with-nothing: the model gets a reason
+              // it can act on ("they skipped it") instead of an empty answer
+              // set it would have to guess about.
+              return { behavior: "deny", message: outcome.reason };
+            }
+            return {
+              behavior: "allow",
+              updatedInput: {
+                ...input,
+                answers: outcome.answers,
+                ...(outcome.annotations && { annotations: outcome.annotations }),
+              },
+            };
+          },
         },
       });
 
       let capturedSessionId: string | null = null;
 
-      for await (const msg of q) {
+      // Merged so events pushed from canUseTool reach the browser while the
+      // SDK loop is parked inside that same tool call.
+      for await (const item of merge(q, sideChannel)) {
+        if (item.kind === "side") {
+          yield item.value;
+          continue;
+        }
+        const msg = item.value;
         const now = Date.now();
         if (firstEventAt === null) {
           firstEventAt = now;

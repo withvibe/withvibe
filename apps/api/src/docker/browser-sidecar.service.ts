@@ -13,7 +13,14 @@ const exec = promisify(execFile);
 // Override with QA_BROWSER_IMAGE if you want to pin a registry-hosted tag.
 // Tag follows the install's WITHVIBE_VERSION (set by `withvibe init`); falls
 // back to :latest for from-source installs.
-const DEFAULT_IMAGE = `withvibe-qa-browser:${process.env.WITHVIBE_VERSION || "latest"}`;
+const IMAGE_TAG = process.env.WITHVIBE_VERSION || "latest";
+const DEFAULT_IMAGE = `withvibe-qa-browser:${IMAGE_TAG}`;
+// Where to fetch the image from when it isn't present locally. The published
+// images are public, so the default works for every from-registry install
+// without extra configuration; override for a private fork/mirror.
+const IMAGE_NAMESPACE =
+  process.env.WITHVIBE_IMAGE_NAMESPACE?.trim().replace(/\/+$/, "") ||
+  "ghcr.io/withvibe";
 const VNC_INTERNAL_PORT = 7900;
 const CDP_INTERNAL_PORT = 9222;
 
@@ -31,6 +38,73 @@ export class BrowserSidecarService {
 
   private image(): string {
     return process.env.QA_BROWSER_IMAGE?.trim() || DEFAULT_IMAGE;
+  }
+
+  private async imageExists(tag: string): Promise<boolean> {
+    try {
+      await exec("docker", ["image", "inspect", tag], { timeout: 5_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // One pull at a time — the panel polls while starting, and the image is
+  // ~1GB; concurrent clicks should share a single download.
+  private pullInFlight: Promise<void> | null = null;
+
+  /**
+   * Make sure the image is on this host before `docker run` gets to it.
+   *
+   * Without this the run fails with docker's own message, which is actively
+   * misleading: `withvibe-qa-browser:latest` has no registry in it, so docker
+   * tries Docker Hub and reports "pull access denied ... may require 'docker
+   * login'" — an auth error for what is really just a missing local image.
+   * (Seen in the wild after a `docker image prune -a` reclaimed it: the QA
+   * browser is the one sidecar that had never run, so it looked unused.)
+   *
+   * Pull the registry copy and retag it to the local name the rest of the
+   * service expects. Returns an error string the caller can surface as-is.
+   */
+  private async ensureImage(): Promise<string | null> {
+    const local = this.image();
+    if (await this.imageExists(local)) return null;
+
+    // An explicitly-configured image already names its registry; pulling a
+    // guessed one under a different name would be wrong.
+    if (process.env.QA_BROWSER_IMAGE?.trim()) {
+      return (
+        `QA browser image ${local} is not present on this host. ` +
+        `Pull it manually, or unset QA_BROWSER_IMAGE to use the default.`
+      );
+    }
+
+    const remote = `${IMAGE_NAMESPACE}/qa-browser:${IMAGE_TAG}`;
+    this.logger.info(`QA browser image ${local} missing — pulling ${remote}`);
+    if (!this.pullInFlight) {
+      this.pullInFlight = (async () => {
+        await exec("docker", ["pull", remote], { timeout: 10 * 60 * 1000 });
+        await exec("docker", ["tag", remote, local], { timeout: 30_000 });
+      })().finally(() => {
+        this.pullInFlight = null;
+      });
+    }
+    try {
+      await this.pullInFlight;
+      this.logger.info(`Pulled ${remote} and tagged it ${local}`);
+      return null;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Failed to pull ${remote}: ${detail}`);
+      return (
+        `The QA browser image is not installed on this host and could not be ` +
+        `downloaded from ${remote}.\n\n` +
+        `Fix it by running on the server:\n` +
+        `  docker pull ${remote}\n` +
+        `  docker tag ${remote} ${local}\n\n` +
+        `Underlying error: ${detail}`
+      );
+    }
   }
 
   /**
@@ -188,6 +262,12 @@ export class BrowserSidecarService {
       }
       await this.hardStop(env.qaBrowserContainerId).catch(() => {});
     }
+
+    // Pre-flight, alongside the env-running and network checks below: bail
+    // before the status goes to "starting" so a missing image can't strand
+    // the panel mid-start.
+    const imageError = await this.ensureImage();
+    if (imageError) return { ok: false, error: imageError };
 
     const project = composeProjectName(envId);
     const network = await this.findEnvNetwork(project);

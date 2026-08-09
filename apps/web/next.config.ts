@@ -49,6 +49,15 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: monorepoRoot,
   },
+  experimental: {
+    // Every /api/* route handler forwards its body to NestJS via proxyToApi.
+    // Next caps the body it makes available to that path at 10MB by default
+    // and, on overflow, truncates it with only a console.warn — the API then
+    // rejects the half-JSON. Template saves carry every asset file inline, so
+    // an asset-heavy template blows straight past 10MB. Keep this at or above
+    // the API's own 50mb express limit (see apps/api/src/main.ts).
+    proxyClientMaxBodySize: "64mb",
+  },
   async redirects() {
     return [
       // `/signup` isn't a route (registration lives at `/register`). People
