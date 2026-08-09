@@ -93,20 +93,40 @@ export class PluginMcpBridgeService {
       throw new ForbiddenException("Not a workspace member");
     }
 
-    const target = await this.plugins.getProxyTarget(
+    let target = await this.plugins.getProxyTarget(
       args.pluginId,
       manifest.scope,
       scopeIdSegment
     );
     if (!target) {
-      // Common case: plugin container hasn't been spawned yet for this
-      // scope. We could auto-spawn here (would make MCP tools "just work"
-      // without the user clicking the panel) but that adds 5–30s to the
-      // first chat turn. Phase 5 keeps it explicit: user opens the
-      // plugin panel once → spawn → from then on tools are visible.
-      throw new NotFoundException(
-        `Plugin ${args.pluginId} not running for this scope. Open the plugin panel once to start it.`
+      // Lazy boot: tools are advertised even when the container isn't up
+      // yet, and the FIRST tool call pays the spawn cost here (instead of
+      // every chat turn paying it up front, or the user having to open the
+      // plugin panel once). start() de-dupes concurrent callers and sweeps
+      // orphans, so a burst of tool calls results in exactly one container.
+      this.logger.info(
+        `Plugin ${args.pluginId} not running for scope ${scopeIdSegment} — auto-starting`
       );
+      const started = await this.plugins
+        .start(args.ctx.envId, args.pluginId, args.ctx.workspaceId)
+        .catch((err) => ({
+          ok: false as const,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+      if (started.ok) {
+        target = await this.plugins.getProxyTarget(
+          args.pluginId,
+          manifest.scope,
+          scopeIdSegment
+        );
+      }
+      if (!target) {
+        throw new NotFoundException(
+          `Plugin ${args.pluginId} could not be started for this scope${
+            "error" in started && started.error ? `: ${started.error}` : ""
+          }`
+        );
+      }
     }
 
     // Forward the request. Plugin MCP servers are HTTP/JSON-RPC (or SSE
@@ -230,30 +250,15 @@ export class PluginMcpBridgeService {
       // tools to the agent even if its (shared) container is up.
       const envEnabled = prefByPluginId.get(p.id) ?? p.defaultEnabledInEnv;
       if (!envEnabled) continue;
-      let scopeKey: string;
-      switch (manifest.scope) {
-        case "env":
-          scopeKey = `env:${ctx.envId}`;
-          break;
-        case "workspace":
-          scopeKey = `ws:${ctx.workspaceId}`;
-          break;
-        case "global":
-          scopeKey = "global";
-          break;
-      }
-      const inst = await this.prisma.client.pluginInstance.findUnique({
-        where: { pluginId_scopeKey: { pluginId: p.id, scopeKey } },
-        select: { status: true },
+      // Listed regardless of instance state: the bridge auto-starts the
+      // container on the first tool call (see forward()), so enabled
+      // plugins' tools "just work" without opening the panel first.
+      out.push({
+        pluginId: p.id,
+        serverName: `plugin_${sanitizeServerName(p.id)}`,
+        name: manifest.name,
+        agentInstructions: manifest.agentInstructions ?? null,
       });
-      if (inst?.status === "running") {
-        out.push({
-          pluginId: p.id,
-          serverName: `plugin_${sanitizeServerName(p.id)}`,
-          name: manifest.name,
-          agentInstructions: manifest.agentInstructions ?? null,
-        });
-      }
     }
     return out;
   }

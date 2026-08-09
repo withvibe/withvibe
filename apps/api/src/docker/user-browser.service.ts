@@ -192,6 +192,11 @@ export class UserBrowserBridgeService {
       waitFor: (a) => dispatch("wait_for", a),
       snapshot: () => dispatch("snapshot", {}),
       screenshot: (a) => dispatch("screenshot", a),
+      setViewport: async () => {
+        throw new Error(
+          "set_viewport is only available in QA-browser sidecar mode — the user's own Chrome window cannot be resized by the agent."
+        );
+      },
       evaluate: (a) => dispatch("evaluate", a),
       currentState: () => dispatch("current_state", {}),
       goBack: () => dispatch("go_back", {}),

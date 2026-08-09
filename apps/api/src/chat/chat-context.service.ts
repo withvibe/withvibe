@@ -709,30 +709,34 @@ export class ChatContextService {
           extraAllowedTools.push("Skill", "mcp__withvibe-agent__save_skill");
         }
 
-        // QA agent: attach the Playwright MCP server. The MCP server picks the
-        // right transport at tool-call time based on env.qaBrowserMode:
+        // Every agent gets the Playwright MCP server — browser-driven features
+        // (QA flows, Walkthrough video capture) run from whichever agent the
+        // user is chatting with, not only the QA agent. The MCP server picks
+        // the right transport at tool-call time based on env.qaBrowserMode:
         //   - "sidecar": connects via CDP to the Docker QA browser sidecar.
-        //     Pre-warm the sidecar here so the first tool call doesn't pay the
-        //     boot latency (best-effort; chat still proceeds if it fails).
+        //     Only the QA agent pre-warms the sidecar here (it browses on
+        //     almost every session); for other agents the first tool call
+        //     boots it lazily so ordinary chats don't pay the container cost.
         //   - "user_browser": dispatches each call to the speaker's paired
         //     Chrome extension. No server-side warm-up needed; if the user
         //     hasn't paired yet, the first tool call surfaces a clear error.
-        if (session.agent.slug === "qa") {
-          mcpServers["withvibe-browser"] = this.playwrightMcp.createMcpServer({
-            envId,
-            userId: speakerUserId,
+        mcpServers["withvibe-browser"] = this.playwrightMcp.createMcpServer({
+          envId,
+          userId: speakerUserId,
+        });
+        extraAllowedTools.push(...this.playwrightMcp.allowedToolNames());
+        if (
+          session.agent.slug === "qa" &&
+          env.qaBrowserMode !== "user_browser"
+        ) {
+          await phase("ensure-qa-browser", async () => {
+            const result = await this.browserSidecar.start(envId);
+            if (!result.ok) {
+              this.logger.warn(
+                `QA sidecar not started for env ${envId}: ${result.error}`
+              );
+            }
           });
-          extraAllowedTools.push(...this.playwrightMcp.allowedToolNames());
-          if (env.qaBrowserMode !== "user_browser") {
-            await phase("ensure-qa-browser", async () => {
-              const result = await this.browserSidecar.start(envId);
-              if (!result.ok) {
-                this.logger.warn(
-                  `QA sidecar not started for env ${envId}: ${result.error}`
-                );
-              }
-            });
-          }
         }
 
         // ask_human target: clone owner for clones, current speaker otherwise.

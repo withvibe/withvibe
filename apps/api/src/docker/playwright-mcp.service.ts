@@ -1,4 +1,6 @@
 import { Injectable } from "@nestjs/common";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { z } from "zod";
 import {
   createSdkMcpServer,
@@ -15,6 +17,7 @@ import type {
   McpServerSpec,
   McpToolDescriptor,
 } from "../mcp-bridge/mcp-tool-types";
+import { EnvCloneService } from "../env-clones/env-clone.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { BrowserSidecarService } from "./browser-sidecar.service";
 import { UserBrowserBridgeService } from "./user-browser.service";
@@ -104,6 +107,31 @@ const TEXT_SHAPE = {
     .describe("Playwright selector for the element whose text you want."),
 };
 
+const VIEWPORT_SHAPE = {
+  width: z.number().int().min(320).max(3840).describe("Viewport width in CSS px."),
+  height: z.number().int().min(240).max(2160).describe("Viewport height in CSS px."),
+};
+
+const SAVE_SCREENSHOT_SHAPE = {
+  file: z
+    .string()
+    .min(1)
+    .max(200)
+    .describe(
+      "Relative file path under the env's extracontext/ directory, e.g. 'walkthrough/step-1.png'. '.png' is appended if missing."
+    ),
+  fullPage: z
+    .boolean()
+    .optional()
+    .describe("Capture the full scrollable page. Default false (viewport only)."),
+};
+
+/** Width/height from a PNG buffer (IHDR is always the first chunk). */
+function pngDims(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 24 || buf.readUInt32BE(12) !== 0x49484452) return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
 /**
  * In-process MCP server exposing browser-driving tools. Dispatches each call
  * to a `BrowserOps` chosen at the start of the tool call:
@@ -124,7 +152,8 @@ export class PlaywrightMcpService {
     private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly sidecar: BrowserSidecarService,
-    private readonly userBrowser: UserBrowserBridgeService
+    private readonly userBrowser: UserBrowserBridgeService,
+    private readonly envClones: EnvCloneService
   ) {}
 
   async closeForEnv(envId: string): Promise<void> {
@@ -214,6 +243,13 @@ export class PlaywrightMcpService {
         });
         return { pngBase64: buf.toString("base64") };
       },
+      async setViewport(args) {
+        const page = await getPage();
+        await page.setViewportSize({
+          width: args.width,
+          height: args.height,
+        });
+      },
       async evaluate(args) {
         const page = await getPage();
         return await page.evaluate(args.expression);
@@ -240,10 +276,21 @@ export class PlaywrightMcpService {
   }
 
   private async getPage(envId: string): Promise<Page> {
-    const cdp = await this.sidecar.getCdpEndpoint(envId);
+    let cdp = await this.sidecar.getCdpEndpoint(envId);
+    if (!cdp) {
+      // Lazy boot: non-QA agents don't pre-warm the sidecar at session start,
+      // so the first browser tool call brings it up here instead of failing.
+      const started = await this.sidecar.start(envId).catch((err) => ({
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      if (started.ok) {
+        cdp = await this.sidecar.getCdpEndpoint(envId);
+      }
+    }
     if (!cdp) {
       throw new Error(
-        "QA browser sidecar is not running for this env. Start it from the QA Browser tab, or switch this env's QA browser mode to 'user_browser'."
+        "QA browser sidecar is not running for this env and could not be started. Start it from the QA Browser tab, or switch this env's QA browser mode to 'user_browser'."
       );
     }
     const cached = this.connections.get(envId);
@@ -499,6 +546,66 @@ export class PlaywrightMcpService {
       },
     };
 
+    const setViewport: McpToolDescriptor<typeof VIEWPORT_SHAPE> = {
+      name: "set_viewport",
+      description:
+        "Resize the QA browser's viewport (CSS px). Use before capturing video/screenshot material that needs a specific resolution (e.g. 1920x1080 for walkthrough videos). Sidecar mode only.",
+      inputShape: VIEWPORT_SHAPE,
+      async handler(raw) {
+        const input = z.object(VIEWPORT_SHAPE).parse(raw);
+        const ops = await self.opsFor({ envId, userId });
+        await ops.setViewport(input);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Viewport set to ${input.width}x${input.height}.`,
+            },
+          ],
+        };
+      },
+    };
+
+    const saveScreenshot: McpToolDescriptor<typeof SAVE_SCREENSHOT_SHAPE> = {
+      name: "save_screenshot",
+      description:
+        "Capture a PNG of the current page and save it as a FILE in the env's shared extracontext/ directory (visible to you at /workspace/extracontext/...). Returns the saved path — the image is NOT loaded into your context, so use this (not `screenshot`) when collecting capture material for videos/reports.",
+      inputShape: SAVE_SCREENSHOT_SHAPE,
+      async handler(raw) {
+        const input = z.object(SAVE_SCREENSHOT_SHAPE).parse(raw);
+        // Sandbox the destination to extracontext/: relative, no traversal.
+        const rel = input.file.replace(/\\/g, "/").replace(/^\/+/, "");
+        if (rel.split("/").some((seg) => seg === ".." || seg === "")) {
+          throw new Error("file must be a simple relative path without '..'");
+        }
+        const relPng = rel.toLowerCase().endsWith(".png") ? rel : `${rel}.png`;
+        const env = await self.prisma.client.env.findUnique({
+          where: { id: envId },
+          select: { workspaceId: true },
+        });
+        if (!env) throw new Error("env not found");
+        const ops = await self.opsFor({ envId, userId });
+        const r = await ops.screenshot({ fullPage: input.fullPage ?? false });
+        const buf = Buffer.from(r.pngBase64, "base64");
+        const dest = path.join(
+          self.envClones.envDir(env.workspaceId, envId),
+          "extracontext",
+          relPng
+        );
+        await fs.mkdir(path.dirname(dest), { recursive: true });
+        await fs.writeFile(dest, buf);
+        const dims = pngDims(buf);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Saved ${dims ? `${dims.width}x${dims.height} ` : ""}PNG (${buf.length} bytes) to /workspace/extracontext/${relPng}`,
+            },
+          ],
+        };
+      },
+    };
+
     return {
       name: "withvibe-browser",
       version: "1.0.0",
@@ -515,6 +622,8 @@ export class PlaywrightMcpService {
         goBack,
         reload,
         textContent,
+        setViewport,
+        saveScreenshot,
       ],
     };
   }
@@ -548,6 +657,8 @@ export class PlaywrightMcpService {
       "mcp__withvibe-browser__go_back",
       "mcp__withvibe-browser__reload",
       "mcp__withvibe-browser__text_content",
+      "mcp__withvibe-browser__set_viewport",
+      "mcp__withvibe-browser__save_screenshot",
     ];
   }
 }

@@ -634,7 +634,35 @@ export class PluginsService {
 
   // ── start / stop ────────────────────────────────────────────────────────
 
+  /**
+   * In-flight de-duplication per (plugin, scope). The panel UI mounts + polls,
+   * so concurrent start calls for the same scope are common; without this,
+   * each one passes the "is a container already running?" check before any of
+   * them has spawned, and every call spawns its own container — the instance
+   * row only remembers the last one, leaking the rest (seen as N healthy
+   * walkthrough containers for one scopeKey after a docker restart).
+   */
+  private readonly startInflight = new Map<string, Promise<StartResult>>();
+
   async start(
+    envId: string,
+    pluginId: string,
+    workspaceId: string
+  ): Promise<StartResult> {
+    // envId is part of the key: for env-scoped plugins it IS the scope, and
+    // for workspace/global plugins concurrent calls from different envs are
+    // rare enough that an extra alive-check round-trip is fine.
+    const lockKey = `${pluginId}:${envId}:${workspaceId}`;
+    const inflight = this.startInflight.get(lockKey);
+    if (inflight) return inflight;
+    const run = this.startImpl(envId, pluginId, workspaceId).finally(() =>
+      this.startInflight.delete(lockKey)
+    );
+    this.startInflight.set(lockKey, run);
+    return run;
+  }
+
+  private async startImpl(
     envId: string,
     pluginId: string,
     workspaceId: string
@@ -706,6 +734,12 @@ export class PluginsService {
       }
       await this.hardStop(existing.containerId).catch(() => {});
     }
+
+    // Sweep any other containers carrying this scope's labels. The instance
+    // row only tracks one containerId, so a crashed daemon / past race can
+    // leave healthy-but-orphaned siblings the row knows nothing about; left
+    // alone they pile up and the bridge talks to none of them.
+    await this.stopScopeOrphans(pluginId, scopeKey);
 
     // Network selection: env-scoped joins env compose net; others join
     // only `withvibe` (via attachToWithvibe later).
@@ -1156,6 +1190,43 @@ export class PluginsService {
 
   private async hardStop(containerId: string): Promise<void> {
     await exec("docker", ["rm", "-f", containerId], { timeout: 30_000 });
+  }
+
+  /** Remove every container labeled for this (plugin, scope) — orphans the
+   *  instance row lost track of. Best-effort; failures only get logged. */
+  private async stopScopeOrphans(
+    pluginId: string,
+    scopeKey: string
+  ): Promise<void> {
+    try {
+      const { stdout } = await exec(
+        "docker",
+        [
+          "ps",
+          "-aq",
+          "--filter",
+          `label=com.withvibe.plugin=${pluginId}`,
+          "--filter",
+          `label=com.withvibe.scope-key=${scopeKey}`,
+        ],
+        { timeout: 15_000 }
+      );
+      const ids = stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+      if (ids.length === 0) return;
+      this.logger.warn(
+        `Sweeping ${ids.length} orphaned container(s) for plugin ${pluginId} (${scopeKey})`
+      );
+      await exec("docker", ["rm", "-f", ...ids], { timeout: 60_000 }).catch(
+        (err) =>
+          this.logger.warn(
+            `Orphan sweep failed: ${err instanceof Error ? err.message : String(err)}`
+          )
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Orphan sweep skipped: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
 
   private async pollHealth(target: string, path: string): Promise<void> {

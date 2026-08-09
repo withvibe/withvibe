@@ -36,6 +36,7 @@ export interface BrowserOps {
   }): Promise<void>;
   snapshot(): Promise<{ url: string; title: string; ariaTreeYaml: string }>;
   screenshot(args: { fullPage?: boolean }): Promise<{ pngBase64: string }>;
+  setViewport(args: { width: number; height: number }): Promise<void>;
   evaluate(args: { expression: string }): Promise<unknown>;
   currentState(): Promise<{ url: string; title: string }>;
   goBack(): Promise<{ url: string }>;
