@@ -12,6 +12,7 @@ import {
   displayName,
   type DisplayMember,
   type ChatEngine,
+  type ComputeTarget,
 } from "@withvibe/db";
 import { PrismaService } from "../prisma/prisma.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
@@ -417,6 +418,9 @@ export type ChatContext = {
   debugMode: boolean;
   /** Env-level engine selector — agent_sdk (in-process) vs. claude_code (runner container). */
   chatEngine: ChatEngine;
+  /** Where the env's containers run. Fargate envs must never execute the AI
+   * on the platform host — engines branch on this. */
+  computeTarget: ComputeTarget;
   /** Per-env model override ("auto" | concrete model id | null = inherit). */
   envModelChoice: string | null;
   /** Workspace default model ("auto" | concrete model id). */
@@ -1339,7 +1343,12 @@ A read-only markdown mirror of everything above (workspace + env knowledge, memb
       hasSkills,
       agent: agentConfig,
       debugMode: Boolean(env.workspace.debugMode),
-      chatEngine: env.chatEngine,
+      // Fargate envs are hard-pinned to the containerized engine regardless
+      // of what the row says — the Agent SDK engine runs in-process on the
+      // platform host, which would break the sandbox isolation promise.
+      chatEngine:
+        env.computeTarget === "fargate" ? "claude_code" : env.chatEngine,
+      computeTarget: env.computeTarget,
       envModelChoice: env.modelChoice ?? null,
       workspaceDefaultModel: env.workspace.defaultModel ?? "auto",
       mcpBridgeToken: this.mcpTokens.sign({

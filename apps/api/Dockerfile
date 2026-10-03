@@ -64,6 +64,22 @@ RUN apt-get update \
         docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# AWS session-manager-plugin: FargateDriver.openShell speaks the SSM session
+# protocol through it (ECS ExecuteCommand terminals into client-cloud
+# sandboxes). AWS ships per-arch debs/binaries; the ubuntu deb works on
+# debian. Resolve arch at build time like the VS Code CLI below.
+RUN set -e; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) smpArch=64bit ;; \
+        arm64) smpArch=arm64 ;; \
+        *) echo "Unsupported arch for session-manager-plugin" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/smp.deb \
+        "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_${smpArch}/session-manager-plugin.deb" \
+    && dpkg -i /tmp/smp.deb \
+    && rm /tmp/smp.deb \
+    && session-manager-plugin --version
+
 # VS Code CLI (standalone `code` binary) so CodeTunnelService can run
 # `code tunnel` from inside the container. Microsoft ships a single-binary
 # tarball (~30MB) separate from full VS Code. Resolve arch at build time so

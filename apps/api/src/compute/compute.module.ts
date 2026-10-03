@@ -6,7 +6,9 @@ import { EnvComputeService } from "./env-compute.service";
 import { AwsClientsService } from "./fargate/aws-clients.service";
 import { AwsConnectionService } from "./fargate/aws-connection.service";
 import { AwsConnectionController } from "./fargate/aws-connection.controller";
+import { FargatePublicController } from "./fargate/fargate-public.controller";
 import { TraefikDynamicService } from "./fargate/traefik-dynamic.service";
+import { FargateExecService } from "./fargate/fargate-exec.service";
 import { FargateDriver } from "./fargate/fargate.driver";
 
 /**
@@ -19,16 +21,22 @@ import { FargateDriver } from "./fargate/fargate.driver";
 @Global()
 @Module({
   imports: [AuthModule],
-  controllers: [AwsConnectionController],
+  controllers: [AwsConnectionController, FargatePublicController],
   providers: [
     EnvLogBufferService,
     LocalDockerDriver,
     AwsClientsService,
     AwsConnectionService,
     TraefikDynamicService,
+    FargateExecService,
     FargateDriver,
     EnvComputeService,
   ],
-  exports: [EnvLogBufferService, EnvComputeService, AwsConnectionService],
+  exports: [
+    EnvLogBufferService,
+    EnvComputeService,
+    AwsConnectionService,
+    FargateExecService,
+  ],
 })
 export class ComputeModule {}

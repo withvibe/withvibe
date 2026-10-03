@@ -504,6 +504,12 @@ export class EnvsService {
         routingBaseDomain,
         qaBrowserMode,
         computeTarget,
+        // Fargate envs must run the AI inside the sandbox, never in-process
+        // on the platform host — pin the containerized engine. The context
+        // builder enforces the same pin at runtime regardless of this row.
+        ...(computeTarget === "fargate"
+          ? { chatEngine: "claude_code" as ChatEngine }
+          : {}),
         createdById: userId,
         envRepos: {
           create: repos.map((r) => ({

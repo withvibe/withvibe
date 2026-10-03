@@ -4,6 +4,10 @@ import path from "path";
 import { createHash, randomUUID } from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { ClaudeRunnerService } from "../runner/claude-runner.service";
+import {
+  FargateExecService,
+  fargateApiBaseUrl,
+} from "../compute/fargate/fargate-exec.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { PluginMcpBridgeService } from "../plugins/plugin-mcp-bridge.service";
 import type { ChatContext } from "./chat-context.service";
@@ -17,6 +21,20 @@ import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 function mcpBridgeBaseUrl(): string {
   return process.env.CLAUDE_RUNNER_MCP_BASE_URL || "http://host.docker.internal:4000/api/mcp";
 }
+
+/**
+ * The slice of ChildProcess the stream loop consumes — both the local
+ * `docker exec` child and the Fargate bridge handle satisfy it, keeping the
+ * NDJSON loop transport-agnostic.
+ */
+type RunnerChild = {
+  stdout: NodeJS.ReadableStream;
+  stderr: NodeJS.ReadableStream;
+  killed: boolean;
+  exitCode: number | null;
+  kill(signal?: NodeJS.Signals): void;
+  on(event: string, cb: (...args: unknown[]) => void): void;
+};
 
 const MCP_SERVER_NAMES = [
   "withvibe-env",
@@ -102,6 +120,7 @@ export class ClaudeCodeEngineService {
     private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
     private readonly runner: ClaudeRunnerService,
+    private readonly fargateExec: FargateExecService,
     private readonly envClones: EnvCloneService,
     private readonly pluginMcp: PluginMcpBridgeService
   ) {}
@@ -109,9 +128,14 @@ export class ClaudeCodeEngineService {
   /**
    * Fast pre-check — returns null on success, or an error string. Used by
    * ChatStreamService to decide whether to auto-fall-back to the Agent SDK
-   * engine BEFORE any stream events reach the client.
+   * engine BEFORE any stream events reach the client (local envs only —
+   * fargate envs never fall back; see ChatStreamService).
    */
   async preflight(context: ChatContext): Promise<string | null> {
+    if (context.computeTarget === "fargate") {
+      // The runner rides in the task; nothing to boot — just probe the bridge.
+      return this.fargateExec.preflight(context.envId);
+    }
     try {
       const name = await this.runner.ensureRunning(
         context.envId,
@@ -142,17 +166,33 @@ export class ClaudeCodeEngineService {
   }): AsyncGenerator<ChatEvent, void> {
     const { context, prompt } = opts;
     const envDir = this.envClones.envDir(context.workspaceId, context.envId);
+    // Fargate envs have no shared filesystem: per-turn files travel to the
+    // sandbox through the exec bridge instead of a bind mount, and the api
+    // itself must be reachable from the task on a public URL.
+    const isFargate = context.computeTarget === "fargate";
 
-    // Per-turn scratch dir (bind-mounted → visible inside the runner). Host
-    // and container see identical paths because we mount envDir at /workspace
-    // AND the turn dir ultimately lives under /workspace/.withvibe/runner.
+    // Per-turn scratch dir. Local: bind-mounted (host and container see
+    // identical paths because envDir is mounted at /workspace). Fargate: the
+    // path exists only inside the task; the bridge writes the files there.
     const turnId = Date.now().toString(36) + "-" + randomUUID().slice(0, 8);
     const hostTurnDir = path.join(envDir, ".withvibe", "runner", turnId);
     const containerTurnDir = `/workspace/.withvibe/runner/${turnId}`;
-    await mkdir(hostTurnDir, { recursive: true });
-    // HOME for the non-root claude process — must be writable for cache,
-    // credentials, and the runtime's session store (used by --resume).
-    await mkdir(path.join(envDir, ".withvibe", "home"), { recursive: true });
+    if (!isFargate) {
+      await mkdir(hostTurnDir, { recursive: true });
+      // HOME for the non-root claude process — must be writable for cache,
+      // credentials, and the runtime's session store (used by --resume).
+      await mkdir(path.join(envDir, ".withvibe", "home"), { recursive: true });
+    }
+
+    const fargateApiBase = isFargate ? fargateApiBaseUrl() : null;
+    if (isFargate && !fargateApiBase) {
+      yield {
+        type: "error",
+        message:
+          "Fargate chat needs a publicly reachable api URL (set FARGATE_API_BASE_URL on the api) so the sandbox can call back for MCP tools.",
+      };
+      return;
+    }
 
     // MCP config — one HTTP entry per bridged server, all sharing the session
     // bridge token. strict-mcp-config below ensures nothing else is loaded.
@@ -168,13 +208,18 @@ export class ClaudeCodeEngineService {
       ...MCP_SERVER_NAMES.map((name) => ({ name })),
       ...pluginServers.map((s) => ({ name: s.serverName })),
     ];
+    // Local: the runner reaches the api via host.docker.internal. Fargate:
+    // the task calls back over the public api URL.
+    const mcpBase = isFargate
+      ? `${fargateApiBase!.replace(/\/$/, "")}/api/mcp`
+      : mcpBridgeBaseUrl();
     const mcpConfig = {
       mcpServers: Object.fromEntries(
         allServers.map(({ name }) => [
           name,
           {
             type: "http" as const,
-            url: `${mcpBridgeBaseUrl()}/${name}`,
+            url: `${mcpBase}/${name}`,
             headers: {
               Authorization: `Bearer ${context.mcpBridgeToken}`,
             },
@@ -184,7 +229,10 @@ export class ClaudeCodeEngineService {
     };
     const mcpConfigHostPath = path.join(hostTurnDir, "mcp.json");
     const mcpConfigContainerPath = `${containerTurnDir}/mcp.json`;
-    await writeFile(mcpConfigHostPath, JSON.stringify(mcpConfig, null, 2), "utf-8");
+    const mcpConfigJson = JSON.stringify(mcpConfig, null, 2);
+    if (!isFargate) {
+      await writeFile(mcpConfigHostPath, mcpConfigJson, "utf-8");
+    }
 
     // Resume id from DB, if any. Undefined on first turn.
     const resumeSessionId = context.sessionId
@@ -208,7 +256,10 @@ export class ClaudeCodeEngineService {
     const execEnv: Record<string, string> = {
       HOME: "/workspace/.withvibe/home",
     };
-    if (key) {
+    if (isFargate) {
+      // The key was baked into the runner container's environment at task
+      // start — never send it over the bridge connection per-turn.
+    } else if (key) {
       if (key.startsWith("sk-ant-oat")) {
         execEnv.CLAUDE_CODE_OAUTH_TOKEN = key;
       } else {
@@ -244,14 +295,16 @@ export class ClaudeCodeEngineService {
       mcpConfigContainerPath,
       "--strict-mcp-config",
     ];
-    for (const dir of context.additionalDirectories) {
-      // Host paths are bind-mounted 1:1 (envDir is always at /workspace).
-      // Rewrite so the CLI sees paths the runner's filesystem actually has.
-      const rel = path.relative(envDir, dir);
-      const containerPath = rel && !rel.startsWith("..")
-        ? `/workspace/${rel}`
-        : dir;
-      claudeArgs.push("--add-dir", containerPath);
+    if (!isFargate) {
+      for (const dir of context.additionalDirectories) {
+        // Host paths are bind-mounted 1:1 (envDir is always at /workspace).
+        // Rewrite so the CLI sees paths the runner's filesystem actually has.
+        const rel = path.relative(envDir, dir);
+        const containerPath = rel && !rel.startsWith("..")
+          ? `/workspace/${rel}`
+          : dir;
+        claudeArgs.push("--add-dir", containerPath);
+      }
     }
     if (context.disallowedTools.length > 0) {
       claudeArgs.push("--disallowedTools", context.disallowedTools.join(","));
@@ -264,11 +317,18 @@ export class ClaudeCodeEngineService {
       `[claude-code] exec claude in runner (env=${context.envId}, resume=${resumeSessionId ?? "-"}, tools-denied=${context.disallowedTools.length}, addl-dirs=${context.additionalDirectories.length})`
     );
 
-    const child = this.runner.execStream(context.envId, {
-      argv: claudeArgs,
-      env: execEnv,
-      cwd: "/workspace",
-    });
+    const child: RunnerChild = isFargate
+      ? await this.fargateExec.execStream(context.envId, {
+          argv: claudeArgs,
+          env: execEnv,
+          cwd: "/workspace",
+          files: { [mcpConfigContainerPath]: mcpConfigJson },
+        })
+      : this.runner.execStream(context.envId, {
+          argv: claudeArgs,
+          env: execEnv,
+          cwd: "/workspace",
+        });
 
     // Hook the upstream abort signal so interrupt() kills the runner cleanly.
     // SIGTERM is proxied through to the claude CLI; it exits, stdout closes,
@@ -327,7 +387,7 @@ export class ClaudeCodeEngineService {
       }
     });
     child.on("error", (err) => {
-      errorBox.err = err;
+      errorBox.err = err instanceof Error ? err : new Error(String(err));
       signalEnd();
     });
     child.on("close", () => {
@@ -582,8 +642,11 @@ export class ClaudeCodeEngineService {
       }
       if (opts.signal) opts.signal.removeEventListener("abort", abortHandler);
       // Best-effort cleanup of scratch dir. Leaving it around isn't fatal but
-      // clutters envDir across turns.
-      rm(hostTurnDir, { recursive: true, force: true }).catch(() => undefined);
+      // clutters envDir across turns. (Fargate: the dir lives only inside the
+      // task and dies with it.)
+      if (!isFargate) {
+        rm(hostTurnDir, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 

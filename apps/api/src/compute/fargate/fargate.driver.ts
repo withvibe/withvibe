@@ -6,8 +6,10 @@ import {
   RunTaskCommand,
   StopTaskCommand,
   DescribeTasksCommand,
+  ExecuteCommandCommand,
   type Task,
 } from "@aws-sdk/client-ecs";
+import * as pty from "node-pty";
 import { DescribeNetworkInterfacesCommand } from "@aws-sdk/client-ec2";
 import {
   GetLogEventsCommand,
@@ -21,6 +23,11 @@ import { EnvLogBufferService } from "../env-log-buffer.service";
 import { AwsClientsService } from "./aws-clients.service";
 import { AwsConnectionService } from "./aws-connection.service";
 import { TraefikDynamicService } from "./traefik-dynamic.service";
+import {
+  FargateExecService,
+  FARGATE_BRIDGE_PORT,
+  fargateApiBaseUrl,
+} from "./fargate-exec.service";
 import {
   translateComposeToTaskDef,
   ComposeTranslateError,
@@ -62,7 +69,8 @@ export class FargateDriver implements EnvComputeDriver {
     private readonly logBuffer: EnvLogBufferService,
     private readonly aws: AwsClientsService,
     private readonly connections: AwsConnectionService,
-    private readonly traefik: TraefikDynamicService
+    private readonly traefik: TraefikDynamicService,
+    private readonly bridge: FargateExecService
   ) {}
 
   // ---------- lifecycle ------------------------------------------------------
@@ -139,6 +147,17 @@ export class FargateDriver implements EnvComputeDriver {
       });
       for (const note of translated.notes) log(`[fargate] note: ${note}\n`);
 
+      // The sandbox AI: a runner container (claude CLI) rides in every
+      // fargate task, serving the exec bridge the chat engine drives. The
+      // bridge is fetched from the api at boot, so the task must be able to
+      // reach the api on a public URL.
+      const bridgeCert = await this.addRunnerContainer(
+        envId,
+        env.workspaceId,
+        translated.taskDefinition,
+        log
+      );
+
       const { ecs } = this.clients(conn);
       const registered = await ecs.send(
         new RegisterTaskDefinitionCommand(translated.taskDefinition)
@@ -174,7 +193,7 @@ export class FargateDriver implements EnvComputeDriver {
       if (!taskArn) throw new Error("RunTask returned no task");
       await this.prisma.client.env.update({
         where: { id: envId },
-        data: { fargateTaskArn: taskArn },
+        data: { fargateTaskArn: taskArn, fargateBridgeCert: bridgeCert },
       });
       log(`[fargate] task started: ${taskArn.split("/").pop()}\n`);
 
@@ -274,7 +293,11 @@ export class FargateDriver implements EnvComputeDriver {
       await this.traefik.removeEnvRoutes(envId);
       await this.prisma.client.env.update({
         where: { id: envId },
-        data: { fargateTaskArn: null, fargatePublicIp: null },
+        data: {
+          fargateTaskArn: null,
+          fargatePublicIp: null,
+          fargateBridgeCert: null,
+        },
       });
       if (!opts.silent) {
         await this.setStatus(envId, "stopped", { error: null });
@@ -448,21 +471,212 @@ export class FargateDriver implements EnvComputeDriver {
 
   // ---------- interaction ----------------------------------------------------
 
+  /**
+   * Interactive shell via ECS ExecuteCommand: the session is brokered
+   * through AWS's public SSM endpoints — no network path into the client VPC
+   * is needed. The `session-manager-plugin` binary speaks the SSM session
+   * protocol; we run it in a PTY (exactly how the AWS CLI does) and adapt it
+   * to the ShellSession shape the terminal WebSocket expects.
+   */
   async openShell(
-    _envId: string,
-    _containerKey: string,
-    _size: { cols: number; rows: number }
+    envId: string,
+    containerKey: string,
+    size: { cols: number; rows: number }
   ): Promise<ShellSession | null> {
-    // Phase 3: ECS ExecuteCommand (SSM) session bridged to the ShellSession
-    // shape. Returning null → the terminal shows "Container not running in
-    // this environment" instead of hanging.
-    this.logger.warn(
-      "[fargate] terminal requested but SSM exec isn't implemented yet (Phase 3)"
+    const env = await this.prisma.client.env.findUnique({
+      where: { id: envId },
+      select: { workspaceId: true, fargateTaskArn: true },
+    });
+    if (!env?.fargateTaskArn) return null;
+    const conn = await this.connections.getVerified(env.workspaceId);
+    const task = await this.describeTask(conn, env.fargateTaskArn);
+    if (!task || task.lastStatus !== "RUNNING") return null;
+    const container = (task.containers ?? []).find(
+      (c) =>
+        c.name === containerKey ||
+        c.runtimeId === containerKey ||
+        (c.runtimeId ?? "").startsWith(containerKey)
     );
-    return null;
+    if (!container?.name || container.lastStatus !== "RUNNING") return null;
+
+    const { ecs } = this.clients(conn);
+    const res = await ecs.send(
+      new ExecuteCommandCommand({
+        cluster: conn.clusterArn!,
+        task: env.fargateTaskArn,
+        container: container.name,
+        interactive: true,
+        command:
+          "/bin/sh -c 'command -v bash >/dev/null && exec bash -l || exec sh -l'",
+      })
+    );
+    const session = res.session;
+    if (!session?.sessionId || !session.streamUrl || !session.tokenValue) {
+      this.logger.error("[fargate] ExecuteCommand returned no session");
+      return null;
+    }
+
+    const taskId = env.fargateTaskArn.split("/").pop();
+    const clusterName = conn.clusterArn!.split("/").pop();
+    let shell: pty.IPty;
+    try {
+      // Same five-arg invocation the AWS CLI uses. The binary ships with the
+      // api image; dev hosts can point SESSION_MANAGER_PLUGIN_BIN anywhere.
+      shell = pty.spawn(
+        process.env.SESSION_MANAGER_PLUGIN_BIN || "session-manager-plugin",
+        [
+          JSON.stringify({
+            SessionId: session.sessionId,
+            StreamUrl: session.streamUrl,
+            TokenValue: session.tokenValue,
+          }),
+          conn.region!,
+          "StartSession",
+          "",
+          JSON.stringify({
+            Target: `ecs:${clusterName}_${taskId}_${container.runtimeId}`,
+          }),
+          `https://ssm.${conn.region}.amazonaws.com`,
+        ],
+        {
+          name: "xterm-256color",
+          cols: size.cols,
+          rows: size.rows,
+          cwd: process.cwd(),
+          env: process.env as { [key: string]: string },
+        }
+      );
+    } catch (err) {
+      this.logger.error(
+        `[fargate] session-manager-plugin unavailable — install it on the api host ` +
+          `(brew install --cask session-manager-plugin / see api Dockerfile): ${this.errMsg(err)}`
+      );
+      return null;
+    }
+
+    return {
+      onData: (cb) => shell.onData(cb),
+      onExit: (cb) => shell.onExit(cb),
+      write: (data) => shell.write(data),
+      resize: (cols, rows) => shell.resize(cols, rows),
+      kill: () => shell.kill(),
+    };
   }
 
   // ---------- helpers --------------------------------------------------------
+
+  /**
+   * Append the runner container (claude CLI + exec bridge) to the env's task
+   * definition. Secrets policy: the Anthropic key and the bridge's TLS
+   * private key travel ONLY via the task definition (TLS to the AWS API,
+   * visible to the client account's admins — who own the sandbox anyway);
+   * nothing secret ever crosses the bridge connection in cleartext because
+   * the bridge itself is TLS with the generated cert.
+   */
+  private async addRunnerContainer(
+    envId: string,
+    workspaceId: string,
+    taskDef: import("@aws-sdk/client-ecs").RegisterTaskDefinitionCommandInput,
+    log: (line: string) => void
+  ): Promise<string> {
+    const containers = taskDef.containerDefinitions ?? [];
+    if (containers.some((c) => c.name === "withvibe-runner")) {
+      throw new ComposeTranslateError(
+        `"withvibe-runner" is a reserved service name on Fargate envs`
+      );
+    }
+    const apiBase = fargateApiBaseUrl();
+    if (!apiBase) {
+      throw new Error(
+        "Fargate envs need a publicly reachable api URL for the sandbox AI runner. " +
+          "Set FARGATE_API_BASE_URL (or PUBLIC_API_BASE_URL / API_PUBLIC_URL) on the api."
+      );
+    }
+
+    // Same key routing as the chat engines: workspace key wins, sk-ant-oat*
+    // is an OAuth token. Resolved at task start; turns rely on container env.
+    const ws = await this.prisma.client.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { anthropicApiKey: true },
+    });
+    const key =
+      ws?.anthropicApiKey ||
+      process.env.ANTHROPIC_API_KEY ||
+      process.env.CLAUDE_CODE_OAUTH_TOKEN ||
+      "";
+    const keyEnv: { name: string; value: string }[] = key
+      ? [
+          key.startsWith("sk-ant-oat")
+            ? { name: "CLAUDE_CODE_OAUTH_TOKEN", value: key }
+            : { name: "ANTHROPIC_API_KEY", value: key },
+        ]
+      : [];
+    if (!key) {
+      log(
+        `[fargate] warning: no Anthropic API key configured — chat in this sandbox will fail until one is set\n`
+      );
+    }
+
+    const { cert, key: tlsKey } = await this.bridge.generateBridgeCert(envId);
+    const image = `${process.env.WITHVIBE_IMAGE_NAMESPACE || "ghcr.io/withvibe"}/claude-runner:${
+      process.env.CLAUDE_RUNNER_FARGATE_TAG ||
+      process.env.WITHVIBE_VERSION ||
+      "latest"
+    }`;
+
+    containers.push({
+      name: "withvibe-runner",
+      image,
+      essential: true,
+      command: [
+        "sh",
+        "-c",
+        // Fetch the bridge from the api (versions it with the api, no image
+        // rebuilds) and run it. tini in the image reaps children.
+        `curl -fsSL "$WV_BRIDGE_URL" -o /tmp/wv-bridge.js && exec node /tmp/wv-bridge.js`,
+      ],
+      environment: [
+        { name: "WV_BRIDGE_URL", value: `${apiBase.replace(/\/$/, "")}/api/fargate/bridge.js` },
+        { name: "WV_BRIDGE_PORT", value: String(FARGATE_BRIDGE_PORT) },
+        { name: "WV_BRIDGE_TOKEN", value: this.bridge.bridgeToken(envId) },
+        {
+          name: "WV_BRIDGE_TLS_CERT_B64",
+          value: Buffer.from(cert, "utf-8").toString("base64"),
+        },
+        {
+          name: "WV_BRIDGE_TLS_KEY_B64",
+          value: Buffer.from(tlsKey, "utf-8").toString("base64"),
+        },
+        // The container runs as root; IS_SANDBOX is Claude Code's documented
+        // escape hatch so bypassPermissions works in containerized hosts.
+        { name: "IS_SANDBOX", value: "1" },
+        { name: "HOME", value: "/workspace/.withvibe/home" },
+        ...keyEnv,
+      ],
+      portMappings: [{ containerPort: FARGATE_BRIDGE_PORT, protocol: "tcp" }],
+      mountPoints: [
+        { sourceVolume: "withvibe-workspace", containerPath: "/workspace" },
+      ],
+      healthCheck: {
+        command: [
+          "CMD-SHELL",
+          `curl -skf https://127.0.0.1:${FARGATE_BRIDGE_PORT}/healthz || exit 1`,
+        ],
+        interval: 15,
+        timeout: 5,
+        retries: 3,
+        startPeriod: 60,
+      },
+      logConfiguration: containers[0]?.logConfiguration,
+    });
+    taskDef.containerDefinitions = containers;
+    taskDef.volumes = [
+      ...(taskDef.volumes ?? []),
+      { name: "withvibe-workspace" },
+    ];
+    log(`[fargate] runner container added (${image})\n`);
+    return cert;
+  }
 
   private clients(conn: AwsComputeConnection) {
     return this.aws.clientsFor({

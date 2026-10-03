@@ -310,6 +310,20 @@ export class ChatStreamService {
     if (opts.context.chatEngine === "claude_code") {
       const preflightError = await this.claudeCode.preflight(opts.context);
       if (preflightError) {
+        if (opts.context.computeTarget === "fargate") {
+          // NEVER fall back to the in-process engine for a fargate env: the
+          // Agent SDK path runs the AI on the platform host with the env dir
+          // as cwd — the exact opposite of the isolation the sandbox
+          // promises. Fail the turn instead.
+          this.logger.error(
+            `[claude-code] fargate sandbox unavailable (no fallback): ${preflightError}`
+          );
+          yield {
+            type: "error",
+            message: `Sandbox runner unavailable: ${preflightError}. Start the env and try again.`,
+          };
+          return;
+        }
         this.logger.warn(
           `[claude-code] preflight failed, falling back to Agent SDK: ${preflightError}`
         );
