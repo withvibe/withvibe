@@ -78,6 +78,28 @@ type TemplateSummary = {
   qaBrowserMode: "sidecar" | "user_browser";
 };
 
+type ComputeTarget = "local" | "fargate";
+
+const COMPUTE_TARGET_CHOICES: {
+  id: ComputeTarget;
+  label: string;
+  hint: string;
+  available: boolean;
+}[] = [
+  {
+    id: "local",
+    label: "This server",
+    hint: "Runs on the host Docker daemon, next to the platform.",
+    available: true,
+  },
+  {
+    id: "fargate",
+    label: "AWS Fargate",
+    hint: "Isolated ECS task in the connected AWS account. Images-only compose; needs a verified AWS connection in Settings.",
+    available: true,
+  },
+];
+
 export default function NewEnvironmentPage(
   props: PageProps<"/workspaces/[id]/environments/new">
 ) {
@@ -106,6 +128,10 @@ export default function NewEnvironmentPage(
   const [qaBrowserMode, setQaBrowserMode] = useState<
     "sidecar" | "user_browser"
   >("sidecar");
+  // Where this env will run. Seeded from the workspace default below; the
+  // user can override per env. Unlike routing/QA mode this is not a template
+  // property — the same template can be materialized on either target.
+  const [computeTarget, setComputeTarget] = useState<ComputeTarget>("local");
   const [activeSection, setActiveSection] = useState<SectionKey>("basics");
 
   useEffect(() => {
@@ -122,6 +148,15 @@ export default function NewEnvironmentPage(
       .then((r) => (r.ok ? r.json() : []))
       .then((data: TemplateSummary[]) => setTemplates(data))
       .catch(() => setTemplates([]));
+    // Seed the compute target from the workspace default. Readable by any
+    // member (getIntegrations checks membership, not admin). On failure we
+    // keep "local" — the safe, always-available target.
+    fetch(`/api/workspaces/${id}/settings/integrations`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { defaultComputeTarget?: ComputeTarget } | null) => {
+        if (data?.defaultComputeTarget) setComputeTarget(data.defaultComputeTarget);
+      })
+      .catch(() => {});
   }, [id]);
 
   const selectedTemplate =
@@ -355,6 +390,7 @@ export default function NewEnvironmentPage(
         templateId,
         templateVars: templateId ? scrubbedVars : undefined,
         qaBrowserMode,
+        computeTarget,
         ...(templateId
           ? {}
           : {
@@ -500,6 +536,8 @@ export default function NewEnvironmentPage(
                 hasTemplate={!!selectedTemplate}
                 qaBrowserMode={qaBrowserMode}
                 setQaBrowserMode={setQaBrowserMode}
+                computeTarget={computeTarget}
+                setComputeTarget={setComputeTarget}
                 routingMode={routingMode}
                 routingBaseDomain={routingBaseDomain}
                 onRoutingChange={({ routingMode: m, routingBaseDomain: b }) => {
@@ -861,6 +899,8 @@ function RuntimeSection({
   hasTemplate,
   qaBrowserMode,
   setQaBrowserMode,
+  computeTarget,
+  setComputeTarget,
   routingMode,
   routingBaseDomain,
   onRoutingChange,
@@ -868,6 +908,8 @@ function RuntimeSection({
   hasTemplate: boolean;
   qaBrowserMode: "sidecar" | "user_browser";
   setQaBrowserMode: (v: "sidecar" | "user_browser") => void;
+  computeTarget: ComputeTarget;
+  setComputeTarget: (v: ComputeTarget) => void;
   routingMode: RoutingMode;
   routingBaseDomain: string;
   onRoutingChange: (next: {
@@ -879,9 +921,49 @@ function RuntimeSection({
     <section>
       <SectionHeader
         title="Runtime"
-        description="How the env is reached and where the QA agent runs its browser."
+        description="Where the env runs, how it's reached, and where the QA agent runs its browser."
       />
       <div className="space-y-6">
+        <div className="space-y-3 rounded-md border border-border/60 bg-card/30 p-4">
+          <div>
+            <Label className="font-mono text-sm">Compute target</Label>
+            <p className="text-xs text-muted-foreground mt-1">
+              Where this env&apos;s containers run. Fixed once the env is
+              created — pre-selected from the workspace default.
+            </p>
+          </div>
+          <div className="space-y-2">
+            {COMPUTE_TARGET_CHOICES.map((opt) => (
+              <label
+                key={opt.id}
+                className={`flex items-start gap-3 text-xs ${
+                  opt.available
+                    ? "cursor-pointer"
+                    : "cursor-not-allowed opacity-60"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="compute-target"
+                  value={opt.id}
+                  checked={computeTarget === opt.id}
+                  onChange={() => setComputeTarget(opt.id)}
+                  disabled={!opt.available}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="font-mono">{opt.label}</span>
+                  {!opt.available && (
+                    <span className="ml-1.5 text-muted-foreground">(soon)</span>
+                  )}
+                  <span className="block text-muted-foreground mt-0.5">
+                    {opt.hint}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
         <div className="space-y-3 rounded-md border border-border/60 bg-card/30 p-4">
           <div>
             <Label className="font-mono text-sm">QA browser</Label>

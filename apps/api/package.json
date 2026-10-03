@@ -1,6 +1,6 @@
 {
   "name": "@withvibe/api",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "private": true,
   "license": "AGPL-3.0-only",
   "scripts": {
@@ -14,12 +14,19 @@
     "bench:chat": "ts-node -r tsconfig-paths/register src/chat/bench/run-bench.ts",
     "check:models": "ts-node -r tsconfig-paths/register src/chat/models.check.ts",
     "check:compose-security": "ts-node -r tsconfig-paths/register src/docker/compose-security.check.ts",
-    "check:compose-rewriter": "ts-node -r tsconfig-paths/register src/templates/compose-rewriter.check.ts"
+    "check:compose-rewriter": "ts-node -r tsconfig-paths/register src/templates/compose-rewriter.check.ts",
+    "check:compose-to-taskdef": "ts-node -r tsconfig-paths/register src/compute/fargate/compose-to-taskdef.check.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",
     "@anthropic-ai/sdk": "^0.89.0",
+    "@aws-sdk/client-cloudformation": "^3.1146.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.1146.0",
+    "@aws-sdk/client-ec2": "^3.1146.0",
+    "@aws-sdk/client-ecs": "^3.1146.0",
     "@aws-sdk/client-s3": "^3.658.1",
+    "@aws-sdk/client-sts": "^3.1146.0",
+    "@aws-sdk/credential-providers": "^3.1146.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@nestjs/common": "^10.4.0",
     "@nestjs/config": "^3.2.3",
@@ -55,6 +62,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@aws-sdk/types": "^3.974.6",
     "@nestjs/cli": "^10.4.0",
     "@nestjs/schematics": "^10.2.0",
     "@nestjs/testing": "^10.4.0",
@@ -65,15 +73,15 @@
     "@types/multer": "^2.1.0",
     "@types/node": "^20",
     "@types/passport-google-oauth20": "^2.0.16",
-    "@types/pg": "^8.11.0",
     "@types/passport-jwt": "^4.0.1",
+    "@types/pg": "^8.11.0",
     "@types/ws": "^8.18.1",
     "eslint": "^9",
     "pino-pretty": "^11.3.0",
-    "typescript-eslint": "^8.58.2",
     "ts-loader": "^9.5.1",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
-    "typescript": "^5"
+    "typescript": "^5",
+    "typescript-eslint": "^8.58.2"
   }
 }

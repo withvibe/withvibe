@@ -42,6 +42,7 @@ export class EnvsController {
       templateId?: unknown;
       templateVars?: unknown;
       qaBrowserMode?: unknown;
+      computeTarget?: unknown;
     }
   ) {
     return this.envs.create(user.id, workspaceId, body);

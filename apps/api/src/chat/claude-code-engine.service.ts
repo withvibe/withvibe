@@ -1,5 +1,4 @@
 import { Injectable } from "@nestjs/common";
-import { spawn } from "child_process";
 import { mkdir, rm, writeFile } from "fs/promises";
 import path from "path";
 import { createHash, randomUUID } from "crypto";
@@ -86,10 +85,10 @@ type ClaudeCliEvent =
     };
 
 /**
- * Runs the real `claude` CLI inside the env's runner container via
- * `docker exec`, streams its NDJSON output, and emits the same `ChatEvent`
- * shape the Agent SDK path emits — so the rest of the system (UI, persistence,
- * active-runs) is engine-agnostic.
+ * Runs the real `claude` CLI inside the env's runner container (via the
+ * runner's exec seam — `docker exec` locally), streams its NDJSON output, and
+ * emits the same `ChatEvent` shape the Agent SDK path emits — so the rest of
+ * the system (UI, persistence, active-runs) is engine-agnostic.
  *
  * MCP parity is via HTTP — the runner calls back to the Nest API at
  * /api/mcp/:serverName with the bridge token baked into context. `--resume`
@@ -142,7 +141,6 @@ export class ClaudeCodeEngineService {
     };
   }): AsyncGenerator<ChatEvent, void> {
     const { context, prompt } = opts;
-    const containerName = this.runner.containerName(context.envId);
     const envDir = this.envClones.envDir(context.workspaceId, context.envId);
 
     // Per-turn scratch dir (bind-mounted → visible inside the runner). Host
@@ -205,12 +203,16 @@ export class ClaudeCodeEngineService {
       process.env.ANTHROPIC_API_KEY ||
       process.env.CLAUDE_CODE_OAUTH_TOKEN ||
       "";
-    const dockerEnvFlags: string[] = [];
+    // HOME for the non-root claude process — must be writable for cache,
+    // credentials, and the runtime's session store (used by --resume).
+    const execEnv: Record<string, string> = {
+      HOME: "/workspace/.withvibe/home",
+    };
     if (key) {
       if (key.startsWith("sk-ant-oat")) {
-        dockerEnvFlags.push("-e", `CLAUDE_CODE_OAUTH_TOKEN=${key}`);
+        execEnv.CLAUDE_CODE_OAUTH_TOKEN = key;
       } else {
-        dockerEnvFlags.push("-e", `ANTHROPIC_API_KEY=${key}`);
+        execEnv.ANTHROPIC_API_KEY = key;
       }
     } else {
       this.logger.error("[claude-code] run aborted: no Anthropic API key configured");
@@ -222,24 +224,7 @@ export class ClaudeCodeEngineService {
       return;
     }
 
-    // Claude Code refuses to run with --dangerously-skip-permissions or
-    // bypassPermissions as root. Run as the host API's uid/gid — the bind
-    // mount already has those owners, and the host uid maps 1:1 into the
-    // container, so the CLI sees a non-root uid.
-    const uid = process.getuid?.() ?? 0;
-    const gid = process.getgid?.() ?? 0;
-
     const claudeArgs = [
-      "exec",
-      "-i",
-      "--user",
-      `${uid}:${gid}`,
-      "-e",
-      `HOME=/workspace/.withvibe/home`,
-      ...dockerEnvFlags,
-      "-w",
-      "/workspace",
-      containerName,
       "claude",
       "-p",
       prompt,
@@ -276,14 +261,18 @@ export class ClaudeCodeEngineService {
     }
 
     this.logger.info(
-      `[claude-code] spawning docker exec (container=${containerName}, resume=${resumeSessionId ?? "-"}, tools-denied=${context.disallowedTools.length}, addl-dirs=${context.additionalDirectories.length})`
+      `[claude-code] exec claude in runner (env=${context.envId}, resume=${resumeSessionId ?? "-"}, tools-denied=${context.disallowedTools.length}, addl-dirs=${context.additionalDirectories.length})`
     );
 
-    const child = spawn("docker", claudeArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = this.runner.execStream(context.envId, {
+      argv: claudeArgs,
+      env: execEnv,
+      cwd: "/workspace",
+    });
 
     // Hook the upstream abort signal so interrupt() kills the runner cleanly.
-    // SIGTERM → docker exec proxies it through; the claude CLI exits, stdout
-    // closes, and our line-loop drains and exits.
+    // SIGTERM is proxied through to the claude CLI; it exits, stdout closes,
+    // and our line-loop drains and exits.
     const abortHandler = () => {
       if (!child.killed && child.exitCode === null) {
         try {

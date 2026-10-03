@@ -2,20 +2,18 @@ import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { createServer, type IncomingMessage, type Server } from "http";
 import type { Duplex } from "stream";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import * as jwt from "jsonwebtoken";
 import { WebSocketServer, WebSocket } from "ws";
-import * as pty from "node-pty";
 import { PrismaService } from "../prisma/prisma.service";
-import { DockerService } from "../docker/docker.service";
+import { EnvComputeService } from "../compute/env-compute.service";
+import type { ShellSession } from "../compute/env-compute-driver";
 import type { BridgeJwtPayload } from "../auth/jwt.strategy";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
-const exec = promisify(execFile);
-
 /**
- * WebSocket terminal — browser xterm.js ↔ this handler ↔ `docker exec sh`.
+ * WebSocket terminal — browser xterm.js ↔ this handler ↔ a shell inside one
+ * of the env's containers, opened through the env's compute driver
+ * (`docker exec` locally; ECS ExecuteCommand on Fargate).
  *
  * URL: `ws://<api-host>/api/terminal/<envId>/<containerNameOrId>?token=<jwt>`
  * Auth: the same INTERNAL_JWT_SECRET used for HTTP requests. The browser
@@ -31,7 +29,7 @@ export class TerminalService {
     @InjectPinoLogger(TerminalService.name)
     private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
-    private readonly docker: DockerService,
+    private readonly compute: EnvComputeService,
     private readonly config: ConfigService
   ) {}
 
@@ -114,20 +112,32 @@ export class TerminalService {
       return;
     }
 
-    // Container must belong to the env's compose project.
-    const project = this.docker.composeProjectName(envId);
-    const targetId = await this.resolveContainer(project, containerKey);
-    if (!targetId) {
+    // The driver resolves the container within this env only, so a shell can
+    // never be opened into another env's container.
+    const driver = await this.compute.driverFor(envId);
+    const shell = await driver.openShell(envId, containerKey, {
+      cols: 80,
+      rows: 24,
+    });
+    if (!shell) {
       this.reject(socket, 404, "Container not running in this environment");
       return;
     }
 
     this.logger.info(
-      `${tag} — opening shell in ${targetId.slice(0, 12)} for user ${userId}`
+      `${tag} — opening shell in ${containerKey} for user ${userId}`
     );
-    this.wss.handleUpgrade(req, socket, head, (ws) => {
-      this.openShell(ws, targetId);
-    });
+    try {
+      this.wss.handleUpgrade(req, socket, head, (ws) => {
+        this.bridge(ws, shell);
+      });
+    } catch (err) {
+      // Upgrade failed after the shell was already opened — don't leak it.
+      try {
+        shell.kill();
+      } catch {}
+      throw err;
+    }
   }
 
   private reject(socket: Duplex, code: number, reason: string) {
@@ -139,59 +149,7 @@ export class TerminalService {
     } catch {}
   }
 
-  private async resolveContainer(
-    project: string,
-    key: string
-  ): Promise<string | null> {
-    try {
-      const { stdout } = await exec(
-        "docker",
-        [
-          "ps",
-          "--filter",
-          `label=com.docker.compose.project=${project}`,
-          "--format",
-          "{{.ID}}\t{{.Names}}",
-        ],
-        { timeout: 10_000 }
-      );
-      const candidates = stdout
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .map((line) => {
-          const [id, name] = line.split("\t");
-          return { id, name };
-        });
-      const match = candidates.find(
-        (c) => c.id === key || c.id.startsWith(key) || c.name === key
-      );
-      return match ? match.id : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private openShell(ws: WebSocket, containerId: string): void {
-    const shell = pty.spawn(
-      "docker",
-      [
-        "exec",
-        "-it",
-        containerId,
-        "sh",
-        "-c",
-        "command -v bash >/dev/null && exec bash -l || exec sh -l",
-      ],
-      {
-        name: "xterm-256color",
-        cols: 80,
-        rows: 24,
-        cwd: process.cwd(),
-        env: process.env as { [key: string]: string },
-      }
-    );
-
+  private bridge(ws: WebSocket, shell: ShellSession): void {
     shell.onData((data) => {
       try {
         ws.send(data);

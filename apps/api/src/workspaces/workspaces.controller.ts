@@ -93,6 +93,7 @@ export class WorkspacesController {
       debugMode?: boolean;
       defaultModel?: string;
       sandboxBypass?: boolean | null;
+      defaultComputeTarget?: string;
     }
   ) {
     this.assertNotDemo();

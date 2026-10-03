@@ -11,6 +11,7 @@ import {
   GetObjectCommand,
   DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
+import { type ComputeTarget } from "@withvibe/db";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { PrismaService } from "../prisma/prisma.service";
@@ -394,6 +395,7 @@ export class WorkspacesService {
         debugMode: true,
         defaultModel: true,
         sandboxBypass: true,
+        defaultComputeTarget: true,
       },
     });
     const envAnthropic = Boolean(process.env.ANTHROPIC_API_KEY);
@@ -425,6 +427,7 @@ export class WorkspacesService {
       defaultModel: workspace?.defaultModel ?? "auto",
       // null = inherit the deployment IS_SANDBOX default (tri-state).
       sandboxBypass: workspace?.sandboxBypass ?? null,
+      defaultComputeTarget: workspace?.defaultComputeTarget ?? "local",
     };
   }
 
@@ -440,6 +443,7 @@ export class WorkspacesService {
       debugMode?: boolean;
       defaultModel?: string;
       sandboxBypass?: boolean | null;
+      defaultComputeTarget?: string;
     }
   ) {
     await this.access.admin(userId, workspaceId);
@@ -462,6 +466,7 @@ export class WorkspacesService {
       debugMode?: boolean;
       defaultModel?: string;
       sandboxBypass?: boolean | null;
+      defaultComputeTarget?: ComputeTarget;
     } = {};
     let slackTokenChanged = false;
 
@@ -544,6 +549,13 @@ export class WorkspacesService {
       typeof body.sandboxBypass === "boolean"
     ) {
       data.sandboxBypass = body.sandboxBypass;
+    }
+    // Default only — existing envs keep the target they were created with.
+    if (
+      body.defaultComputeTarget === "local" ||
+      body.defaultComputeTarget === "fargate"
+    ) {
+      data.defaultComputeTarget = body.defaultComputeTarget;
     }
 
     await this.prisma.client.workspace.update({

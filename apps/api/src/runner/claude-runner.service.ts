@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
-import { execFile } from "child_process";
+import { execFile, spawn, type ChildProcessByStdio } from "child_process";
+import type { Readable } from "stream";
 import { promisify } from "util";
 import { ensureEnvDir } from "../common/repo-base-dir";
 import { EnvCloneService } from "../env-clones/env-clone.service";
@@ -183,6 +184,42 @@ export class ClaudeRunnerService {
     }
 
     return name;
+  }
+
+  /**
+   * Run a command inside the env's runner container, streaming stdout/stderr.
+   * This is the chat engine's exec seam: the engine decides WHAT to run
+   * (the `claude` argv, env vars, workdir) and this method owns HOW it is
+   * transported into the sandbox — `docker exec` here; a Fargate runner
+   * variant will carry the same argv over an ECS ExecuteCommand session.
+   *
+   * Transport details owned here, not by callers:
+   *   - Claude Code refuses --dangerously-skip-permissions / bypassPermissions
+   *     as root, so we exec as the host api's uid/gid — the bind mount already
+   *     has those owners and the host uid maps 1:1 into the container.
+   *   - stdin is ignored; abort = SIGTERM to the returned child (docker exec
+   *     proxies it through, the inner process exits, stdout closes).
+   */
+  execStream(
+    envId: string,
+    opts: {
+      argv: string[];
+      env?: Record<string, string>;
+      cwd?: string;
+    }
+  ): ChildProcessByStdio<null, Readable, Readable> {
+    const name = this.containerName(envId);
+    const uid = process.getuid?.() ?? 0;
+    const gid = process.getgid?.() ?? 0;
+    const args = ["exec", "-i", "--user", `${uid}:${gid}`];
+    for (const [k, v] of Object.entries(opts.env ?? {})) {
+      args.push("-e", `${k}=${v}`);
+    }
+    args.push("-w", opts.cwd ?? "/workspace", name, ...opts.argv);
+    this.logger.info(
+      `[runner] exec in ${name}: ${opts.argv[0]} (cwd=${opts.cwd ?? "/workspace"})`
+    );
+    return spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
   }
 
   async stop(envId: string): Promise<void> {

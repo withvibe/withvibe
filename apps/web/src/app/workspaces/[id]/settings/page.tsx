@@ -6,6 +6,8 @@ import {
   AlertTriangle,
   Bug,
   Check,
+  Cloud,
+  Copy,
   Database,
   Eye,
   EyeOff,
@@ -13,6 +15,7 @@ import {
   Layers,
   MessageSquare,
   Plus,
+  Server,
   ShieldAlert,
   Sparkles,
   Trash2,
@@ -57,7 +60,30 @@ type Integrations = {
   debugMode: boolean;
   defaultModel: ModelChoice;
   sandboxBypass: boolean | null;
+  defaultComputeTarget: ComputeTarget;
 };
+
+type ComputeTarget = "local" | "fargate";
+
+const COMPUTE_TARGET_OPTIONS: {
+  id: ComputeTarget;
+  label: string;
+  hint: string;
+  available: boolean;
+}[] = [
+  {
+    id: "local",
+    label: "This server",
+    hint: "Containers run on the host Docker daemon, alongside the platform.",
+    available: true,
+  },
+  {
+    id: "fargate",
+    label: "AWS Fargate",
+    hint: "One isolated ECS task per env in the connected AWS account. Needs a verified AWS compute connection.",
+    available: true,
+  },
+];
 
 type Role = "admin" | "member" | null;
 
@@ -199,6 +225,22 @@ export default function SettingsPage(
               value={data.sandboxBypass}
               onChange={load}
             />
+
+            <Divider />
+
+            <ComputeTargetRow
+              id={id}
+              isAdmin={isAdmin}
+              value={data.defaultComputeTarget}
+              onChange={load}
+            />
+          </Section>
+
+          <Section
+            title="AWS compute"
+            description="Connect a client AWS account so Fargate envs deploy as isolated sandboxes in their cloud — WithVibe only gets a scoped cross-account role, never credentials."
+          >
+            <AwsComputeRow id={id} isAdmin={isAdmin} />
           </Section>
 
           <Section
@@ -1989,3 +2031,300 @@ function StorageSection({ id, isAdmin }: { id: string; isAdmin: boolean }) {
   );
 }
 
+function ComputeTargetRow({
+  id,
+  isAdmin,
+  value,
+  onChange,
+}: {
+  id: string;
+  isAdmin: boolean;
+  value: ComputeTarget;
+  onChange: () => void;
+}) {
+  const [saving, setSaving] = useState(false);
+
+  async function pick(next: ComputeTarget) {
+    if (next === value || saving) return;
+    setSaving(true);
+    const res = await fetch(`/api/workspaces/${id}/settings/integrations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defaultComputeTarget: next }),
+    });
+    setSaving(false);
+    if (res.ok) {
+      toast.success("Default compute target updated");
+      onChange();
+    } else {
+      toast.error("Failed to save");
+    }
+  }
+
+  const current =
+    COMPUTE_TARGET_OPTIONS.find((o) => o.id === value) ??
+    COMPUTE_TARGET_OPTIONS[0];
+
+  return (
+    <SettingRow
+      icon={<Server className="size-4" />}
+      title="Default compute target"
+      hint="Where new envs run. Every env keeps the target it was created with, so changing this never moves an existing env — it only changes what's pre-selected on the create screen."
+      badge={
+        <Badge
+          variant="outline"
+          className="font-mono text-[10px] text-muted-foreground"
+        >
+          {current.label}
+        </Badge>
+      }
+    >
+      {!isAdmin ? (
+        <p className="text-xs text-muted-foreground">Admins only.</p>
+      ) : (
+        <div className="space-y-2">
+          {COMPUTE_TARGET_OPTIONS.map((opt) => {
+            const active = opt.id === value;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                disabled={saving || !opt.available}
+                onClick={() => pick(opt.id)}
+                className={[
+                  "w-full text-left rounded-md border px-3 py-2 transition-smooth",
+                  active
+                    ? "bg-primary/10 border-primary/40"
+                    : "bg-card hover:bg-muted/40 border-border/60",
+                  saving && !active ? "opacity-50" : "",
+                  !opt.available ? "opacity-50 cursor-not-allowed" : "",
+                ].join(" ")}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs font-semibold">
+                    {opt.label}
+                  </span>
+                  {active && (
+                    <Check className="size-3 text-primary" aria-hidden />
+                  )}
+                  {!opt.available && (
+                    <Badge
+                      variant="outline"
+                      className="text-[9px] px-1 py-0 text-muted-foreground"
+                    >
+                      soon
+                    </Badge>
+                  )}
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-0.5">
+                  {opt.hint}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </SettingRow>
+  );
+}
+
+
+type AwsCompute = {
+  status: "pending" | "ok" | "error";
+  externalId: string;
+  roleArn: string | null;
+  region: string | null;
+  clusterArn: string | null;
+  logGroupName: string | null;
+  lastError: string | null;
+  lastVerifiedAt: string | null;
+  platformAccountId: string | null;
+  platformCredsPresent: boolean;
+};
+
+function AwsComputeRow({ id, isAdmin }: { id: string; isAdmin: boolean }) {
+  const [data, setData] = useState<AwsCompute | null>(null);
+  const [roleArn, setRoleArn] = useState("");
+  const [region, setRegion] = useState("eu-west-1");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    const res = await fetch(`/api/workspaces/${id}/compute/aws`);
+    if (res.ok) {
+      const d: AwsCompute = await res.json();
+      setData(d);
+      if (d.roleArn) setRoleArn(d.roleArn);
+      if (d.region) setRegion(d.region);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    if (isAdmin) void load();
+  }, [isAdmin, load]);
+
+  async function post(path: string, body?: object) {
+    setBusy(true);
+    const res = await fetch(`/api/workspaces/${id}/compute/aws${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      toast.error(err?.message ?? "Request failed");
+      return;
+    }
+    const d: AwsCompute = await res.json();
+    setData((prev) => (prev ? { ...prev, ...d } : prev));
+    if (d.status === "ok") toast.success("AWS account connected and verified");
+    else if (d.lastError) toast.error(d.lastError);
+  }
+
+  async function disconnect() {
+    setBusy(true);
+    const res = await fetch(`/api/workspaces/${id}/compute/aws`, {
+      method: "DELETE",
+    });
+    setBusy(false);
+    if (res.ok) {
+      toast.success("Disconnected");
+      void load();
+    } else {
+      toast.error("Failed to disconnect");
+    }
+  }
+
+  function copy(text: string, what: string) {
+    void navigator.clipboard.writeText(text).then(() => toast.success(`${what} copied`));
+  }
+
+  const deployCommand =
+    data &&
+    `aws cloudformation deploy \\
+  --template-file withvibe-client-compute.cfn.yaml \\
+  --stack-name withvibe-compute \\
+  --capabilities CAPABILITY_NAMED_IAM \\
+  --region ${region || "<region>"} \\
+  --parameter-overrides \\
+    PlatformAccountId=${data.platformAccountId ?? "<platform-account-id>"} \\
+    ExternalId=${data.externalId}`;
+
+  return (
+    <SettingRow
+      icon={<Cloud className="size-4" />}
+      title="Client AWS account"
+      hint={
+        <>
+          <span className="block">
+            Fargate envs run as ECS tasks in this account. The client deploys
+            our CloudFormation template (
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-[11px]">
+              infra/aws/withvibe-client-compute.cfn.yaml
+            </code>
+            ), which creates an isolated VPC, a cluster, and a cross-account
+            role locked to this workspace&apos;s external id.
+          </span>
+        </>
+      }
+      badge={
+        data?.status === "ok" ? (
+          <Badge className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20 gap-1 font-mono text-[10px]">
+            <Check className="size-3" /> Connected
+          </Badge>
+        ) : data?.status === "error" ? (
+          <Badge variant="destructive" className="gap-1 font-mono text-[10px]">
+            <AlertTriangle className="size-3" /> Error
+          </Badge>
+        ) : (
+          <Badge variant="outline" className="font-mono text-[10px] text-muted-foreground">
+            Not connected
+          </Badge>
+        )
+      }
+    >
+      {!isAdmin ? (
+        <p className="text-xs text-muted-foreground">Admins only.</p>
+      ) : !data ? (
+        <Skeleton className="h-16 w-full" />
+      ) : data.status === "ok" ? (
+        <div className="space-y-3">
+          <div className="rounded-md border border-border/60 bg-card/30 p-3 space-y-1 text-xs font-mono break-all">
+            <p>region: {data.region}</p>
+            <p>role: {data.roleArn}</p>
+            <p>cluster: {data.clusterArn?.split("/").pop()}</p>
+            {data.lastVerifiedAt && (
+              <p className="text-muted-foreground">
+                verified {new Date(data.lastVerifiedAt).toLocaleString()}
+              </p>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void post("/verify")}>
+              Re-verify
+            </Button>
+            <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => void disconnect()}>
+              Disconnect
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {!data.platformCredsPresent && (
+            <p className="text-xs text-amber-500">
+              The api has no AWS credentials — set AWS_PROFILE or
+              AWS_ACCESS_KEY_ID on the api before connecting.
+            </p>
+          )}
+          <div className="space-y-2">
+            <Label className="font-mono text-xs">
+              1. Deploy the stack in the client account
+            </Label>
+            <div className="relative">
+              <pre className="rounded-md border border-border/60 bg-card/50 p-3 pr-10 text-[11px] font-mono overflow-x-auto whitespace-pre">
+                {deployCommand}
+              </pre>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="absolute top-1.5 right-1.5 size-7"
+                onClick={() => deployCommand && copy(deployCommand, "Command")}
+              >
+                <Copy className="size-3.5" />
+              </Button>
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label className="font-mono text-xs">
+              2. Paste the stack&apos;s PlatformAccessRoleArn output
+            </Label>
+            <Input
+              value={roleArn}
+              onChange={(e) => setRoleArn(e.target.value)}
+              placeholder="arn:aws:iam::123456789012:role/withvibe-platform-access"
+              className="font-mono text-xs"
+            />
+            <div className="flex gap-2">
+              <Input
+                value={region}
+                onChange={(e) => setRegion(e.target.value)}
+                placeholder="eu-west-1"
+                className="font-mono text-xs w-36"
+              />
+              <Button
+                size="sm"
+                disabled={busy || !roleArn.trim()}
+                onClick={() => void post("/connect", { roleArn: roleArn.trim(), region: region.trim() })}
+              >
+                {busy ? "Verifying…" : "Connect & verify"}
+              </Button>
+            </div>
+          </div>
+          {data.status === "error" && data.lastError && (
+            <p className="text-xs text-destructive break-words">{data.lastError}</p>
+          )}
+        </div>
+      )}
+    </SettingRow>
+  );
+}

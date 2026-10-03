@@ -6,7 +6,8 @@ import {
   type McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { PrismaService } from "../prisma/prisma.service";
-import { DockerService } from "./docker.service";
+import { EnvComputeService } from "../compute/env-compute.service";
+import { EnvLogBufferService } from "../compute/env-log-buffer.service";
 import type {
   McpServerSpec,
   McpToolDescriptor,
@@ -86,13 +87,13 @@ const DESCRIPTIONS = {
 };
 
 /**
- * MCP server exposing the env's docker-compose lifecycle to chat agents
- * (the built-in DevOps persona in particular). Every tool is a thin wrapper
- * around DockerService, so:
+ * MCP server exposing the env's lifecycle to chat agents (the built-in
+ * DevOps persona in particular). Every tool is a thin wrapper around the
+ * env's compute driver (local docker today, Fargate later), so:
  *
- *   - logs flow through DockerService.pushLog → same log buffer the UI
- *     streams via SSE; the user sees exactly what the agent triggered.
- *   - the docker project name is identical to what Start / Stop / Rebuild
+ *   - logs flow into the shared EnvLogBufferService → same log buffer the
+ *     UI streams via SSE; the user sees exactly what the agent triggered.
+ *   - the lifecycle actions are identical to what Start / Stop / Rebuild
  *     buttons use, so parallel runs can't collide on host ports.
  *
  * The agent is meant to use these instead of shelling out to `docker compose`
@@ -104,7 +105,8 @@ export class DockerMcpService {
     @InjectPinoLogger(DockerMcpService.name)
     private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
-    private readonly docker: DockerService
+    private readonly compute: EnvComputeService,
+    private readonly logBuffer: EnvLogBufferService
   ) {}
 
   describeMcpServer(envId: string): McpServerSpec {
@@ -115,7 +117,7 @@ export class DockerMcpService {
       inputShape: {} as Record<string, never>,
       async handler() {
         self.logger.info(`[docker-mcp] start_env(${envId})`);
-        await self.docker.startEnvironment(envId);
+        await (await self.compute.driverFor(envId)).startEnvironment(envId);
         return {
           content: [
             {
@@ -133,7 +135,7 @@ export class DockerMcpService {
       inputShape: {} as Record<string, never>,
       async handler() {
         self.logger.info(`[docker-mcp] stop_env(${envId})`);
-        await self.docker.stopEnvironment(envId);
+        await (await self.compute.driverFor(envId)).stopEnvironment(envId);
         return {
           content: [
             {
@@ -151,7 +153,7 @@ export class DockerMcpService {
       inputShape: {} as Record<string, never>,
       async handler() {
         self.logger.info(`[docker-mcp] rebuild_env(${envId})`);
-        await self.docker.rebuildEnvironment(envId);
+        await (await self.compute.driverFor(envId)).rebuildEnvironment(envId);
         return {
           content: [
             {
@@ -183,7 +185,7 @@ export class DockerMcpService {
             isError: true,
           };
         }
-        const { containers } = await self.docker.listEnvContainers(envId);
+        const { containers } = await (await self.compute.driverFor(envId)).listEnvContainers(envId);
         const lines = [
           `status: ${env.containerStatus}`,
           env.containerError ? `error: ${env.containerError}` : null,
@@ -272,7 +274,7 @@ export class DockerMcpService {
       inputShape: LOGS_SHAPE,
       async handler(raw) {
         const input = z.object(LOGS_SHAPE).parse(raw);
-        const snapshot = self.docker.getLogBufferSnapshot(
+        const snapshot = self.logBuffer.snapshot(
           envId,
           input.maxChars ?? 8000
         );
@@ -302,7 +304,7 @@ export class DockerMcpService {
         self.logger.info(
           `[docker-mcp] get_env_service_logs(${envId}, service=${input.service}, tail=${tail})`
         );
-        const result = await self.docker.getServiceLogs(
+        const result = await (await self.compute.driverFor(envId)).getServiceLogs(
           envId,
           input.service,
           tail

@@ -12,13 +12,14 @@ import {
   type EnvStatus,
   type ChatEngine,
   type QaBrowserMode,
+  type ComputeTarget,
 } from "@withvibe/db";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { DemoModeService } from "../common/demo-mode.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { AgentSeedService } from "../agents/agent-seed.service";
-import { DockerService } from "../docker/docker.service";
+import { EnvComputeService } from "../compute/env-compute.service";
 import {
   assertComposeStringSafe,
   ComposeSecurityError,
@@ -34,6 +35,7 @@ import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 const VALID_STATUSES: EnvStatus[] = ["todo", "in_progress", "done"];
 const VALID_CHAT_ENGINES: ChatEngine[] = ["agent_sdk", "claude_code"];
 const VALID_QA_BROWSER_MODES: QaBrowserMode[] = ["sidecar", "user_browser"];
+const VALID_COMPUTE_TARGETS: ComputeTarget[] = ["local", "fargate"];
 
 type RepoBaseInput = { id: string; baseBranch: string | null };
 
@@ -74,7 +76,7 @@ export class EnvsService {
     private readonly demo: DemoModeService,
     private readonly envClones: EnvCloneService,
     private readonly agentSeed: AgentSeedService,
-    private readonly docker: DockerService,
+    private readonly compute: EnvComputeService,
     private readonly templateMaterializer: TemplateMaterializerService,
     private readonly portAllocator: PortAllocatorService,
     private readonly runner: ClaudeRunnerService,
@@ -149,8 +151,9 @@ export class EnvsService {
     // is never blocked. Lets the UI show "Service starting…".
     const serviceReady =
       env.containerStatus === "running"
-        ? await this.docker
-            .listEnvContainers(envId)
+        ? await this.compute
+            .driverFor(envId)
+            .then((d) => d.listEnvContainers(envId))
             .then((r) => r.serviceReady)
             .catch(() => true)
         : false;
@@ -174,6 +177,7 @@ export class EnvsService {
       dbViewerError: env.dbViewerError,
       chatEngine: env.chatEngine,
       qaBrowserMode: env.qaBrowserMode,
+      computeTarget: env.computeTarget,
       modelChoice: env.modelChoice,
       sandboxBypass: env.sandboxBypass,
       runnerStatus,
@@ -219,6 +223,52 @@ export class EnvsService {
     }
   }
 
+  /**
+   * Pick the compute target for a new env: explicit request wins, otherwise
+   * the workspace default. Unknown strings are rejected rather than silently
+   * falling back to `local` — a client asking for a target we don't know
+   * about is a bug, and quietly provisioning somewhere else would hide it.
+   */
+  private async resolveComputeTarget(
+    workspaceId: string,
+    requested: unknown
+  ): Promise<ComputeTarget> {
+    let target: ComputeTarget;
+    if (requested === undefined || requested === null) {
+      const ws = await this.prisma.client.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { defaultComputeTarget: true },
+      });
+      target = ws?.defaultComputeTarget ?? "local";
+    } else if (
+      typeof requested === "string" &&
+      (VALID_COMPUTE_TARGETS as string[]).includes(requested)
+    ) {
+      target = requested as ComputeTarget;
+    } else {
+      throw new BadRequestException(
+        `Invalid computeTarget. Expected one of: ${VALID_COMPUTE_TARGETS.join(", ")}`
+      );
+    }
+    if (target === "fargate") {
+      // Fargate needs a verified client-AWS-account connection: envs deploy
+      // into the CLIENT's cloud (SaaS model), and without a connection there
+      // is nowhere to deploy. Refused here rather than at start time so no
+      // half-configured env is left behind.
+      const conn = await this.prisma.client.awsComputeConnection.findUnique({
+        where: { workspaceId },
+        select: { status: true },
+      });
+      if (conn?.status !== "ok") {
+        throw new BadRequestException(
+          `Compute target "fargate" needs a verified AWS compute connection. ` +
+            `Connect a client AWS account in Settings → AWS compute, or create this env with "local".`
+        );
+      }
+    }
+    return target;
+  }
+
   async create(
     userId: string,
     workspaceId: string,
@@ -232,6 +282,7 @@ export class EnvsService {
       routingMode?: unknown;
       routingBaseDomain?: unknown;
       qaBrowserMode?: unknown;
+      computeTarget?: unknown;
     }
   ) {
     await this.access.member(userId, workspaceId);
@@ -352,6 +403,15 @@ export class EnvsService {
         ? (body.qaBrowserMode as QaBrowserMode)
         : "sidecar";
 
+    // Compute target: where this env's containers will run. Unlike routing
+    // and QA-browser mode this is NOT a template property — the same template
+    // can be materialized locally or on Fargate — so the client picks, and
+    // the workspace default fills in when it doesn't.
+    const computeTarget = await this.resolveComputeTarget(
+      workspaceId,
+      body.computeTarget
+    );
+
     // Routing config: a template-backed env inherits unconditionally (the
     // template owns the compose, so the mode must match what the template was
     // authored for). For custom-compose envs the client picks.
@@ -377,6 +437,18 @@ export class EnvsService {
       if (routingMode === "subdomain" && !routingBaseDomain) {
         routingBaseDomain = "localhost";
       }
+    }
+
+    // Fargate envs are subdomain-only: port mode means "published host ports
+    // on the platform server", which doesn't exist when the containers run
+    // in the client's cloud — the UI would render dead localhost links.
+    if (computeTarget === "fargate" && routingMode !== "subdomain") {
+      throw new BadRequestException(
+        template
+          ? `Template "${template.slug}" uses port routing, which Fargate envs don't support. ` +
+            `Pick a subdomain-routed template or create the env on "local".`
+          : `Fargate envs require subdomain routing — set routingMode to "subdomain".`
+      );
     }
 
     // Template with repos owns the repo *list*, but the client may still
@@ -431,6 +503,7 @@ export class EnvsService {
         routingMode,
         routingBaseDomain,
         qaBrowserMode,
+        computeTarget,
         createdById: userId,
         envRepos: {
           create: repos.map((r) => ({
@@ -741,7 +814,8 @@ export class EnvsService {
             }
           }
           this.logger.info(`Demo auto-start: building + starting env ${env.id}`);
-          await this.docker.startEnvironment(env.id);
+          const driver = await this.compute.driverFor(env.id);
+          await driver.startEnvironment(env.id);
         } catch (err) {
           this.logger.error(`env ${env.id} setup/auto-start failed: ${err}`);
         }
@@ -1014,9 +1088,10 @@ export class EnvsService {
         // purgeVolumes: this is a delete, not a stop — the env's named
         // volumes (db data, caches, node_modules) go with it. Nothing else
         // ever removes them, so skipping this leaks them permanently.
-        await this.docker.stopEnvironment(envId, { purgeVolumes: true });
+        const driver = await this.compute.driverFor(envId);
+        await driver.stopEnvironment(envId, { purgeVolumes: true });
       } catch {
-        // already logged by docker service
+        // already logged by the compute driver
       }
       try {
         await this.portAllocator.releaseForEnv(envId);

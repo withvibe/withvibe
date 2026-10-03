@@ -1,0 +1,275 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  WithVibe client compute - everything a client AWS account needs so a
+  WithVibe platform can deploy sandbox envs into it as Fargate tasks.
+  Creates an isolated VPC (public subnets, no NAT), an ECS cluster, a
+  CloudWatch log group, task roles, and a cross-account role the platform
+  assumes (guarded by ExternalId). The platform never receives credentials;
+  it only gets sts:AssumeRole on the role defined here, and that role can
+  only drive ECS/logs inside this stack's resources.
+
+Parameters:
+  PlatformAccountId:
+    Type: String
+    AllowedPattern: "^[0-9]{12}$"
+    Description: >-
+      The 12-digit AWS account id of the WithVibe platform (shown in the
+      workspace's Settings -> AWS compute panel).
+  ExternalId:
+    Type: String
+    MinLength: 8
+    Description: >-
+      The external id issued by the WithVibe workspace (Settings -> AWS
+      compute). Prevents any other WithVibe tenant from pointing at this role.
+  AllowedIngressCidr:
+    Type: String
+    Default: "0.0.0.0/0"
+    AllowedPattern: "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}/\\d{1,2}$"
+    Description: >-
+      CIDR allowed to reach sandbox tasks directly (set this to the platform
+      server's public IP /32 so sandboxes are only reachable through the
+      platform's proxy). Default is open; tighten it for production.
+  VpcCidr:
+    Type: String
+    Default: "10.90.0.0/16"
+    AllowedPattern: "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}/\\d{1,2}$"
+    Description: CIDR for the sandbox VPC.
+
+Resources:
+  # ---------------------------------------------------------------- network
+  SandboxVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: withvibe-sandbox }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: withvibe-sandbox }]
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref SandboxVpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public subnets in two AZs. Tasks get public IPs (that's how the platform
+  # proxy reaches them and how they pull images) - no NAT gateway to pay for.
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SandboxVpc
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 2, 12]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: withvibe-sandbox-a }]
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SandboxVpc
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 2, 12]]
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: withvibe-sandbox-b }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SandboxVpc
+      Tags: [{ Key: Name, Value: withvibe-sandbox }]
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  SubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # One SG for all sandbox tasks. Ingress only from the platform (or the
+  # operator-chosen CIDR); tasks in the same env share a task network
+  # namespace, so no intra-SG rules are needed.
+  SandboxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: WithVibe sandbox tasks - ingress from the platform only
+      VpcId: !Ref SandboxVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 1
+          ToPort: 65535
+          CidrIp: !Ref AllowedIngressCidr
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags: [{ Key: Name, Value: withvibe-sandbox }]
+
+  # ------------------------------------------------------------------- ecs
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: withvibe-sandbox
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /withvibe/envs
+      RetentionInDays: 30
+
+  # Pulled by ECS itself (image pulls, log writes). Standard managed policy.
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # Assumed by the containers themselves. The ssmmessages permissions are
+  # what make ECS Exec (chat + terminal sessions) work.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ecs-exec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+
+  # ------------------------------------------------- platform access role
+  # The only thing the WithVibe platform can assume. Scoped to: run/stop/
+  # inspect tasks on THIS cluster, exec into them, register task definitions,
+  # read THIS log group, read this stack's exports, and look up task ENI
+  # public IPs. iam:PassRole is limited to the two roles above.
+  PlatformAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: withvibe-platform-access
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${PlatformAccountId}:root"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      Policies:
+        - PolicyName: withvibe-sandbox-compute
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: TasksOnSandboxCluster
+                Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:StopTask
+                  - ecs:DescribeTasks
+                  - ecs:ListTasks
+                  - ecs:ExecuteCommand
+                Resource: "*"
+                Condition:
+                  ArnEquals:
+                    ecs:cluster: !GetAtt Cluster.Arn
+              - Sid: TaskDefinitions
+                Effect: Allow
+                Action:
+                  - ecs:RegisterTaskDefinition
+                  - ecs:DeregisterTaskDefinition
+                  - ecs:DescribeTaskDefinition
+                Resource: "*"
+              # Tagging only at creation time (RunTask stamps the env id tag);
+              # never re-tagging existing resources.
+              - Sid: TagOnCreate
+                Effect: Allow
+                Action: ecs:TagResource
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    ecs:CreateAction:
+                      - RunTask
+                      - RegisterTaskDefinition
+              - Sid: PassOnlySandboxRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt TaskExecutionRole.Arn
+                  - !GetAtt TaskRole.Arn
+              - Sid: ReadSandboxLogs
+                Effect: Allow
+                Action:
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub "${LogGroup.Arn}:*"
+              - Sid: DiscoverStackOutputs
+                Effect: Allow
+                Action:
+                  - cloudformation:ListExports
+                  - cloudformation:DescribeStacks
+                Resource: "*"
+              - Sid: ResolveTaskPublicIp
+                Effect: Allow
+                Action: ec2:DescribeNetworkInterfaces
+                Resource: "*"
+
+Outputs:
+  PlatformAccessRoleArn:
+    Description: Paste this into WithVibe (Settings -> AWS compute -> Connect)
+    Value: !GetAtt PlatformAccessRole.Arn
+    Export: { Name: WithVibe-PlatformAccessRoleArn }
+  ClusterArn:
+    Value: !GetAtt Cluster.Arn
+    Export: { Name: WithVibe-ClusterArn }
+  SubnetIds:
+    Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+    Export: { Name: WithVibe-SubnetIds }
+  SecurityGroupId:
+    Value: !Ref SandboxSecurityGroup
+    Export: { Name: WithVibe-SecurityGroupId }
+  LogGroupName:
+    Value: !Ref LogGroup
+    Export: { Name: WithVibe-LogGroup }
+  TaskExecutionRoleArn:
+    Value: !GetAtt TaskExecutionRole.Arn
+    Export: { Name: WithVibe-TaskExecutionRoleArn }
+  TaskRoleArn:
+    Value: !GetAtt TaskRole.Arn
+    Export: { Name: WithVibe-TaskRoleArn }

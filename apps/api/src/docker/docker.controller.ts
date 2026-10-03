@@ -15,7 +15,9 @@ import { CurrentUser } from "../auth/current-user.decorator";
 import type { AuthUser } from "../auth/jwt.strategy";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
-import { DockerService } from "./docker.service";
+import { EnvComputeService } from "../compute/env-compute.service";
+import { EnvLogBufferService } from "../compute/env-log-buffer.service";
+import type { LogStreamHandle } from "../compute/env-compute-driver";
 
 type Action = "start" | "stop" | "rebuild";
 type ServiceAction = "start" | "stop" | "restart" | "rebuild";
@@ -32,7 +34,8 @@ const SERVICE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 @UseGuards(JwtAuthGuard)
 export class DockerContainerController {
   constructor(
-    private readonly docker: DockerService,
+    private readonly compute: EnvComputeService,
+    private readonly logBuffer: EnvLogBufferService,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService
   ) {}
@@ -45,6 +48,7 @@ export class DockerContainerController {
     @Body() body: { action?: unknown; service?: unknown }
   ) {
     await this.assertEnv(user.id, workspaceId, envId);
+    const driver = await this.compute.driverFor(envId);
     const action = body?.action;
     const rawService = body?.service;
     const service =
@@ -64,11 +68,7 @@ export class DockerContainerController {
       if (!SERVICE_NAME_RE.test(service)) {
         throw new BadRequestException("invalid service name");
       }
-      await this.docker.serviceAction(
-        envId,
-        service,
-        action as ServiceAction
-      );
+      await driver.serviceAction(envId, service, action as ServiceAction);
       return { ok: true };
     }
 
@@ -82,13 +82,14 @@ export class DockerContainerController {
       );
     }
     const envAction = action as Action;
-    if (envAction === "start") await this.docker.startEnvironment(envId);
-    else if (envAction === "stop") await this.docker.stopEnvironment(envId);
-    else await this.docker.rebuildEnvironment(envId);
+    if (envAction === "start") await driver.startEnvironment(envId);
+    else if (envAction === "stop") await driver.stopEnvironment(envId);
+    else await driver.rebuildEnvironment(envId);
     return { ok: true };
   }
 
-  /** SSE log stream — combines in-memory build-log buffer + `docker compose logs -f`. */
+  /** SSE log stream — combines in-memory build-log buffer + the driver's
+   * runtime log follow (`docker compose logs -f` locally). */
   @Sse("logs")
   async logs(
     @CurrentUser() user: AuthUser,
@@ -96,6 +97,7 @@ export class DockerContainerController {
     @Param("envId") envId: string
   ): Promise<Observable<{ data: { type: string; text?: string; error?: string } }>> {
     await this.assertEnv(user.id, workspaceId, envId);
+    const driver = await this.compute.driverFor(envId);
 
     return new Observable((subscriber) => {
       let closed = false;
@@ -104,36 +106,33 @@ export class DockerContainerController {
       };
 
       // 1) Subscribe to the in-memory build/lifecycle log buffer.
-      const unsubscribe = this.docker.subscribeLogs(envId, (chunk) => {
+      const unsubscribe = this.logBuffer.subscribe(envId, (chunk) => {
         send({ type: "log", text: chunk });
       });
 
-      // 2) Spawn `docker compose logs -f` for running container stdout.
-      let child: import("child_process").ChildProcess | null = null;
+      // 2) Follow the running containers' stdout through the driver.
+      let stream: LogStreamHandle | null = null;
       void (async () => {
-        const spawned = await this.docker.spawnLogProcess(envId);
+        const opened = await driver.streamRuntimeLogs(envId, (text) =>
+          send({ type: "log", text })
+        );
+        if ("error" in opened) {
+          if (!closed) send({ type: "error", error: opened.error });
+          return;
+        }
         if (closed) {
-          // Unsubscribed before spawn finished — kill it.
-          if (!("error" in spawned)) spawned.child.kill("SIGTERM");
+          // Unsubscribed before the stream opened — close it.
+          opened.close();
           return;
         }
-        if ("error" in spawned) {
-          send({ type: "error", error: spawned.error });
-          return;
-        }
-        child = spawned.child;
-        const onData = (buf: Buffer) =>
-          send({ type: "log", text: buf.toString("utf-8") });
-        child.stdout?.on("data", onData);
-        child.stderr?.on("data", onData);
-        child.on("error", () => {});
+        stream = opened;
       })();
 
       return () => {
         closed = true;
         unsubscribe();
         try {
-          child?.kill("SIGTERM");
+          stream?.close();
         } catch {}
       };
     });
@@ -146,7 +145,8 @@ export class DockerContainerController {
     @Param("envId") envId: string
   ) {
     await this.assertEnv(user.id, workspaceId, envId);
-    return this.docker.listEnvContainers(envId);
+    const driver = await this.compute.driverFor(envId);
+    return driver.listEnvContainers(envId);
   }
 
   private async assertEnv(

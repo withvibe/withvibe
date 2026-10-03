@@ -20,13 +20,12 @@ import { BrowserSidecarService } from "./browser-sidecar.service";
 import { PlaywrightMcpService } from "./playwright-mcp.service";
 import { CodeServerService } from "./code-server.service";
 import { CodeTunnelService } from "./code-tunnel.service";
+import { EnvLogBufferService } from "../compute/env-log-buffer.service";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const exec = promisify(execFile);
 
 // ---------- constants ------------------------------------------------------
-
-const LOG_BUFFER_MAX = 120_000; // chars per env
 
 const COMPOSE_FILENAMES = [
   "docker-compose.yml",
@@ -47,14 +46,13 @@ const PREFERRED_WEB_PORTS = [
 
 // ---------- types ----------------------------------------------------------
 
-type LogSubscriber = (chunk: string) => void;
 type PsRecord = {
   Service?: string;
   State?: string;
   Publishers?: Array<{ PublishedPort?: number; TargetPort?: number }>;
 };
 type PortCandidate = { published: number; target: number | null };
-type ComposeContext = {
+export type ComposeContext = {
   composeFile: string;
   source: "custom" | "workspace" | "repo";
   repoName?: string;
@@ -66,18 +64,16 @@ type ComposeContext = {
 // ---------- service --------------------------------------------------------
 
 /**
- * Docker-compose lifecycle for envs: start / stop / rebuild, in-memory log
- * buffer with SSE-friendly subscribe semantics, and `spawnLogProcess` for
- * tailing container stdout once services are up.
+ * Docker-compose lifecycle for envs: start / stop / rebuild, and
+ * `spawnLogProcess` for tailing container stdout once services are up.
+ * This is the `local` compute target's engine — reached through
+ * LocalDockerDriver via the EnvComputeService seam.
  *
- * State (logBuffers, logSubs) lives on the singleton. Reset when the Nest
- * process restarts. BullMQ + Redis can replace this for durability later.
+ * Lifecycle output is pushed into the target-agnostic EnvLogBufferService
+ * so the UI/MCP read one stream regardless of compute target.
  */
 @Injectable()
 export class DockerService {
-  private readonly logBuffers = new Map<string, string[]>();
-  private readonly logSubs = new Map<string, Set<LogSubscriber>>();
-
   constructor(
     @InjectPinoLogger(DockerService.name)
     private readonly logger: PinoLogger,
@@ -89,50 +85,12 @@ export class DockerService {
     private readonly playwrightMcp: PlaywrightMcpService,
     private readonly codeServer: CodeServerService,
     private readonly codeTunnel: CodeTunnelService,
-    private readonly plugins: PluginsService
+    private readonly plugins: PluginsService,
+    private readonly logBuffer: EnvLogBufferService
   ) {}
 
-  // ---------- log buffer (public API) --------------------------------------
-
-  subscribeLogs(envId: string, onChunk: LogSubscriber): () => void {
-    // Replay backlog first so new subscribers see what already happened.
-    const buf = this.logBuffers.get(envId) || [];
-    for (const c of buf) onChunk(c);
-    const subs = this.logSubs.get(envId) || new Set();
-    subs.add(onChunk);
-    this.logSubs.set(envId, subs);
-    return () => {
-      subs.delete(onChunk);
-      if (subs.size === 0) this.logSubs.delete(envId);
-    };
-  }
-
-  clearLogBuffer(envId: string) {
-    this.logBuffers.delete(envId);
-  }
-
-  /**
-   * Snapshot of the log buffer as a single string, optionally tail-limited.
-   * Used by the docker MCP server so the agent sees the same logs the user
-   * sees in the UI log panel.
-   */
-  getLogBufferSnapshot(envId: string, maxChars = 8000): string {
-    const joined = (this.logBuffers.get(envId) || []).join("");
-    if (joined.length <= maxChars) return joined;
-    return joined.slice(joined.length - maxChars);
-  }
-
   private pushLog(envId: string, chunk: string) {
-    if (!chunk) return;
-    const buf = this.logBuffers.get(envId) || [];
-    buf.push(chunk);
-    let total = buf.reduce((n, s) => n + s.length, 0);
-    while (total > LOG_BUFFER_MAX && buf.length > 1) {
-      total -= (buf.shift() || "").length;
-    }
-    this.logBuffers.set(envId, buf);
-    const subs = this.logSubs.get(envId);
-    if (subs) for (const s of subs) s(chunk);
+    this.logBuffer.push(envId, chunk);
   }
 
   composeProjectName(envId: string): string {
@@ -452,7 +410,11 @@ export class DockerService {
     return null;
   }
 
-  private async getEnvironmentCompose(
+  /** Public because compose-source resolution is target-agnostic: the
+   * FargateDriver resolves the same compose file (materialized on the
+   * platform host) and translates it to a task definition instead of
+   * running it on the local daemon. */
+  async getEnvironmentCompose(
     envId: string
   ): Promise<ComposeContext | { error: string }> {
     const env = await this.prisma.client.env.findUnique({
@@ -687,7 +649,7 @@ export class DockerService {
   }
 
   private async startBg(envId: string): Promise<void> {
-    this.clearLogBuffer(envId);
+    this.logBuffer.clear(envId);
     this.pushLog(envId, `[start] resolving compose file…\n`);
     const ctx = await this.getEnvironmentCompose(envId);
     if ("error" in ctx) {
@@ -788,7 +750,7 @@ export class DockerService {
   }
 
   private async rebuildBg(envId: string): Promise<void> {
-    this.clearLogBuffer(envId);
+    this.logBuffer.clear(envId);
     this.pushLog(envId, `[rebuild] resolving compose file…\n`);
     const ctx = await this.getEnvironmentCompose(envId);
     if ("error" in ctx) {
