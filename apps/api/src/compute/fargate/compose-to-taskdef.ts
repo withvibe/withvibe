@@ -122,7 +122,7 @@ export function translateComposeToTaskDef(
     // names in env values to 127.0.0.1 (containers share the namespace).
     const peers = serviceNames.filter((s) => s !== name);
     for (const [k, v] of Object.entries(env)) {
-      const rewritten = rewriteServiceHosts(v, peers);
+      const rewritten = rewriteServiceHosts(v, peers, k);
       if (rewritten !== v) {
         env[k] = rewritten;
         notes.push(
@@ -154,7 +154,10 @@ export function translateComposeToTaskDef(
     }
 
     // ---- ports ------------------------------------------------------------
-    const ports = readPorts(raw.ports, raw.expose, name);
+    // Template composes pass through the subdomain rewriter, which STRIPS
+    // ports: and records the routing target in a Traefik label — read that
+    // label first so template envs keep their route on Fargate.
+    const ports = readPorts(raw.ports, raw.expose, raw.labels, name);
     servicePorts[name] = ports;
 
     // ---- command / entrypoint --------------------------------------------
@@ -299,13 +302,28 @@ function readEnvironment(
   );
 }
 
+/** Env keys whose BARE value plausibly names a host. The structural patterns
+ * below (scheme://svc, @svc, svc:port) are safe on any key, but a bare value
+ * equal to a service name is ambiguous — `MARIADB_DATABASE: wordpress` or
+ * `MARIADB_USER: wordpress` must NOT become 127.0.0.1 just because a service
+ * is also called wordpress. */
+const HOSTISH_KEY_RE = /HOST|HOSTNAME|ADDR|ADDRESS|SERVER|ENDPOINT/i;
+
 /** Rewrite peer-service hostnames in an env value to 127.0.0.1. Covers the
- * common shapes: scheme://svc, @svc (connection strings), svc:<port>, and a
- * bare value that IS the service name (DB_HOST=db). */
-export function rewriteServiceHosts(value: string, peers: string[]): string {
+ * common shapes: scheme://svc, @svc (connection strings), svc:<port>, and —
+ * only for host-looking keys — a bare value that IS the service name
+ * (DB_HOST=db). */
+export function rewriteServiceHosts(
+  value: string,
+  peers: string[],
+  key = ""
+): string {
   let out = value;
   for (const svc of peers) {
-    if (out === svc) return "127.0.0.1";
+    if (out === svc) {
+      if (HOSTISH_KEY_RE.test(key)) return "127.0.0.1";
+      continue;
+    }
     const esc = svc.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     out = out
       .replace(new RegExp(`(://)${esc}(?=[:/]|$)`, "g"), `$1127.0.0.1`)
@@ -356,13 +374,31 @@ function parseVolumeEntry(
   throw new ComposeTranslateError("Unparseable volume entry");
 }
 
-function readPorts(ports: unknown, expose: unknown, service: string): number[] {
+function readPorts(
+  ports: unknown,
+  expose: unknown,
+  labels: unknown,
+  service: string
+): number[] {
   const out: number[] = [];
   const push = (n: number) => {
     if (Number.isInteger(n) && n > 0 && n < 65536 && !out.includes(n)) {
       out.push(n);
     }
   };
+  // Traefik loadbalancer port label (injected by the subdomain rewriter) is
+  // the authoritative routing target — read it FIRST so it stays primary.
+  const labelEntries: string[] = Array.isArray(labels)
+    ? labels.filter((l): l is string => typeof l === "string")
+    : isRecord(labels)
+      ? Object.entries(labels).map(([k, v]) => `${k}=${String(v)}`)
+      : [];
+  for (const entry of labelEntries) {
+    const m = entry.match(
+      /^traefik\.http\.services\.[^=]+\.loadbalancer\.server\.port=(\d+)$/
+    );
+    if (m) push(Number(m[1]));
+  }
   if (Array.isArray(ports)) {
     for (const p of ports) {
       if (typeof p === "number") push(p);

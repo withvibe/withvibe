@@ -272,8 +272,20 @@ expect(
   interpolate("img:${TAG:-latest}", { TAG: "v9" }) === "img:v9"
 );
 expect(
-  "rewriteServiceHosts: bare value",
-  rewriteServiceHosts("db", ["db"]) === "127.0.0.1"
+  "rewriteServiceHosts: bare value on host-like key",
+  rewriteServiceHosts("db", ["db"], "DB_HOST") === "127.0.0.1"
+);
+expect(
+  "rewriteServiceHosts: bare value preserved on non-host key",
+  rewriteServiceHosts("wordpress", ["wordpress"], "MARIADB_DATABASE") ===
+    "wordpress" &&
+    rewriteServiceHosts("wordpress", ["wordpress"], "MARIADB_USER") ===
+      "wordpress"
+);
+expect(
+  "rewriteServiceHosts: svc:port still rewritten on any key",
+  rewriteServiceHosts("db:3306", ["db"], "WORDPRESS_DB_HOST") ===
+    "127.0.0.1:3306"
 );
 expect(
   "rewriteServiceHosts: scheme://svc",
@@ -288,6 +300,27 @@ expect(
   "rewriteServiceHosts: no false positive on substrings",
   rewriteServiceHosts("mydb-service.example.com", ["db"]) ===
     "mydb-service.example.com"
+);
+
+// rewriter-shaped service: ports stripped, traefik label carries the target
+const rewritten = translate(`
+services:
+  web:
+    image: nginx
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.env-abc123-web.rule=Host(\`web-abc123.example.com\`)"
+      - "traefik.http.services.env-abc123-web.loadbalancer.server.port=3000"
+    networks: [withvibe-x-edge, internal]
+networks:
+  withvibe-x-edge:
+    external: true
+  internal: {}
+`);
+expect(
+  "traefik label port read when ports: stripped",
+  JSON.stringify(rewritten.servicePorts.web) === JSON.stringify([3000]),
+  JSON.stringify(rewritten.servicePorts)
 );
 
 // env_file: ./.env merge
