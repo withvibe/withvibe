@@ -119,6 +119,10 @@ services:
       WITHVIBE_TCP_EXPOSE_TEMPLATES: ${WITHVIBE_TCP_EXPOSE_TEMPLATES:-}
       WITHVIBE_TCP_BIND: ${WITHVIBE_TCP_BIND:-}
       REPO_BASE_DIR: ${REPO_BASE_DIR:-/root/.withvibe/repos}
+      # Where the api writes Traefik file-provider fragments (Fargate env
+      # routes). Traefik mounts the same host dir read-only; see the
+      # ./traefik-dynamic volume below.
+      TRAEFIK_DYNAMIC_DIR: /var/lib/withvibe/traefik-dynamic
       # Persisted per-user `code tunnel` auth dirs. Mounted volume below.
       CODE_TUNNEL_DATA_DIR: /var/lib/withvibe/code-tunnel
       # Comma-separated extra VS Code extension IDs to preinstall into every
@@ -167,6 +171,10 @@ services:
       # Persist `code tunnel` per-user auth dirs across redeploys so users
       # don't have to re-run the device-code login every time.
       - code-tunnel-data:/var/lib/withvibe/code-tunnel
+      # Traefik dynamic-config fragments for Fargate env routes. The
+      # installer's Traefik service mounts this same host dir read-only at
+      # /etc/traefik/dynamic, so routes the api writes go live immediately.
+      - ${TRAEFIK_DYNAMIC_HOST_DIR:-./traefik-dynamic}:/var/lib/withvibe/traefik-dynamic
       # Persist the Agent SDK chat transcripts (CLAUDE_CONFIG_DIR) so multi-turn
       # conversation memory survives api redeploys/recreates. The image
       # pre-creates this dir owned by `claude` so the volume initializes with the

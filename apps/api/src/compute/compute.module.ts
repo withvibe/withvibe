@@ -6,6 +6,7 @@ import { EnvComputeService } from "./env-compute.service";
 import { AwsClientsService } from "./fargate/aws-clients.service";
 import { AwsConnectionService } from "./fargate/aws-connection.service";
 import { AwsConnectionController } from "./fargate/aws-connection.controller";
+import { TraefikDynamicService } from "./fargate/traefik-dynamic.service";
 import { FargateDriver } from "./fargate/fargate.driver";
 
 /**
@@ -24,6 +25,7 @@ import { FargateDriver } from "./fargate/fargate.driver";
     LocalDockerDriver,
     AwsClientsService,
     AwsConnectionService,
+    TraefikDynamicService,
     FargateDriver,
     EnvComputeService,
   ],

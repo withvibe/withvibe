@@ -20,6 +20,7 @@ import { DockerService } from "../../docker/docker.service";
 import { EnvLogBufferService } from "../env-log-buffer.service";
 import { AwsClientsService } from "./aws-clients.service";
 import { AwsConnectionService } from "./aws-connection.service";
+import { TraefikDynamicService } from "./traefik-dynamic.service";
 import {
   translateComposeToTaskDef,
   ComposeTranslateError,
@@ -60,7 +61,8 @@ export class FargateDriver implements EnvComputeDriver {
     private readonly docker: DockerService,
     private readonly logBuffer: EnvLogBufferService,
     private readonly aws: AwsClientsService,
-    private readonly connections: AwsConnectionService
+    private readonly connections: AwsConnectionService,
+    private readonly traefik: TraefikDynamicService
   ) {}
 
   // ---------- lifecycle ------------------------------------------------------
@@ -111,7 +113,7 @@ export class FargateDriver implements EnvComputeDriver {
     try {
       const env = await this.prisma.client.env.findUnique({
         where: { id: envId },
-        select: { workspaceId: true },
+        select: { workspaceId: true, routingBaseDomain: true },
       });
       if (!env) throw new Error("Environment not found");
       const conn = await this.connections.getVerified(env.workspaceId);
@@ -193,6 +195,26 @@ export class FargateDriver implements EnvComputeDriver {
             data: { fargatePublicIp: publicIp },
           });
           if (publicIp) log(`[fargate] task public IP: ${publicIp}\n`);
+          // Publish Traefik routes (file provider) so the env gets the same
+          // stable `<svc>-<short>.<base>` URLs local subdomain envs get. The
+          // task IP changes on every start; the hostnames never do.
+          if (publicIp && env.routingBaseDomain) {
+            const urls = await this.traefik.publishEnvRoutes({
+              envId,
+              baseDomain: env.routingBaseDomain,
+              taskIp: publicIp,
+              servicePorts: translated.servicePorts,
+            });
+            if (Object.keys(urls).length > 0) {
+              await this.prisma.client.env.update({
+                where: { id: envId },
+                data: { serviceUrls: urls },
+              });
+              for (const [svc, url] of Object.entries(urls)) {
+                log(`[fargate] route: ${svc} → ${url}\n`);
+              }
+            }
+          }
           await this.setStatus(envId, "running", { error: null });
           log(`[fargate] env is running\n`);
           return;
@@ -214,6 +236,8 @@ export class FargateDriver implements EnvComputeDriver {
         err instanceof ComposeTranslateError
           ? err.message
           : `Fargate start failed: ${this.errMsg(err)}`;
+      // Never leave a route pointing at a task that failed to come up.
+      await this.traefik.removeEnvRoutes(envId);
       await this.fail(envId, msg);
     }
   }
@@ -245,6 +269,9 @@ export class FargateDriver implements EnvComputeDriver {
             this.logger.warn(`[fargate] StopTask(${envId}): ${this.errMsg(err)}`);
           });
       }
+      // Drop the Traefik route; serviceUrls stay (the hostnames are stable
+      // and come back alive on the next start).
+      await this.traefik.removeEnvRoutes(envId);
       await this.prisma.client.env.update({
         where: { id: envId },
         data: { fargateTaskArn: null, fargatePublicIp: null },

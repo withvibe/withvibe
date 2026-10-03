@@ -62,3 +62,4 @@ apps/api/smoke-*.js.map
 
 # OS
 .DS_Store
+traefik-dynamic/
