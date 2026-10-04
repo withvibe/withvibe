@@ -153,6 +153,11 @@ services:
       # workspace. In DEMO_MODE the api falls back to the vibe-aquarium repo
       # when this is empty, so the demo works with zero extra config.
       DEMO_TEMPLATE_REPOS: ${DEMO_TEMPLATE_REPOS:-}
+      # "true" closes self-signup (password + first-time Google OAuth) while
+      # existing users keep logging in. For public deploys not running
+      # DEMO_MODE — an open register endpoint lets any visitor run arbitrary
+      # compose envs on this host.
+      DISABLE_REGISTRATION: ${DISABLE_REGISTRATION:-}
       NODE_ENV: production
       PORT: "4000"
     ports:
