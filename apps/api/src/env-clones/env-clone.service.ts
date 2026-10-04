@@ -271,7 +271,25 @@ exit 0
     // A sandbox clones its own repositories, from the git proxy, at start —
     // see SandboxReposService. Making a host copy as well would duplicate the
     // work and, worse, keep the client's code on the platform indefinitely.
-    if (envRepo.env.computeTarget === "fargate") return { skipped: "sandbox" };
+    //
+    // The branch name is still ours to choose, though: it is what the git
+    // panel shows, what push targets, and what the bootstrap script checks
+    // out. Recording it keeps one authority over the name instead of letting
+    // the sandbox and the database each derive their own.
+    if (envRepo.env.computeTarget === "fargate") {
+      const branch =
+        envRepo.branch ||
+        this.envBranchName(envRepo.env.id, envRepo.env.title);
+      const baseBranch =
+        envRepo.baseBranch || envRepo.repo.clone?.branch || "main";
+      if (envRepo.branch !== branch || envRepo.baseBranch !== baseBranch) {
+        await this.prisma.client.envRepo.update({
+          where: { id: envRepoId },
+          data: { branch, baseBranch },
+        });
+      }
+      return { skipped: "sandbox" };
+    }
     if (!envRepo.repo.clone || envRepo.repo.clone.cloneStatus !== "ready") {
       return { error: "Main clone not ready yet — wait for clone to finish" };
     }

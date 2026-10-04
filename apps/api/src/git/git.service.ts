@@ -612,7 +612,10 @@ export class GitService {
   ) {
     await this.assertEnv(userId, workspaceId, envId);
     const ers = await this.prisma.client.envRepo.findMany({
-      where: { envId, envCloneStatus: "ready" },
+      // Readiness is targetFor's call: a sandbox env has no host clone to
+      // be "ready", and filtering on that here would silently skip every
+      // repository in it.
+      where: { envId },
       include: { repo: true },
     });
     const trimmed = message.trim();
@@ -752,7 +755,10 @@ export class GitService {
   ) {
     await this.assertEnv(userId, workspaceId, envId);
     const ers = await this.prisma.client.envRepo.findMany({
-      where: { envId, envCloneStatus: "ready" },
+      // Readiness is targetFor's call: a sandbox env has no host clone to
+      // be "ready", and filtering on that here would silently skip every
+      // repository in it.
+      where: { envId },
       include: { repo: true },
     });
     const results: { envRepoId: string; name: string; ok: boolean; error?: string }[] = [];
@@ -798,7 +804,10 @@ export class GitService {
   ): Promise<{ results: PullResult[] }> {
     await this.assertEnv(userId, workspaceId, envId);
     const ers = await this.prisma.client.envRepo.findMany({
-      where: { envId, envCloneStatus: "ready" },
+      // Readiness is targetFor's call: a sandbox env has no host clone to
+      // be "ready", and filtering on that here would silently skip every
+      // repository in it.
+      where: { envId },
       include: { repo: true, env: { select: { workspaceId: true } } },
     });
     const results: PullResult[] = [];
