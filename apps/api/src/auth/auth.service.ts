@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   UnauthorizedException,
 } from "@nestjs/common";
@@ -32,6 +33,11 @@ export type SessionUser = { id: string; email: string };
 export class AuthService {
   private readonly cookieDomain: string | undefined;
   private readonly cookieSecure: boolean;
+  // DISABLE_REGISTRATION=true closes self-signup (both password and first-time
+  // Google OAuth) while existing users keep logging in. For public-internet
+  // deploys that aren't running DEMO_MODE: an open register endpoint would let
+  // any visitor create accounts and run arbitrary compose envs on the host.
+  private readonly registrationDisabled: boolean;
 
   constructor(
     @InjectPinoLogger(AuthService.name)
@@ -41,6 +47,8 @@ export class AuthService {
     config: ConfigService
   ) {
     this.cookieDomain = config.get<string>("COOKIE_DOMAIN") || undefined;
+    this.registrationDisabled =
+      config.get<string>("DISABLE_REGISTRATION") === "true";
     // Auto-on in production, off in dev (HTTP localhost). Override via env.
     const explicit = config.get<string>("COOKIE_SECURE");
     this.cookieSecure =
@@ -69,6 +77,11 @@ export class AuthService {
   }
 
   async register(input: RegisterInput): Promise<SessionUser> {
+    if (this.registrationDisabled) {
+      throw new ForbiddenException(
+        "Self-registration is disabled on this server. Ask an administrator for an account."
+      );
+    }
     const existing = await this.prisma.client.user.findUnique({
       where: { email: input.email },
     });
@@ -138,6 +151,11 @@ export class AuthService {
     });
     if (existing) return existing;
 
+    if (this.registrationDisabled) {
+      throw new ForbiddenException(
+        "Self-registration is disabled on this server. Ask an administrator for an account."
+      );
+    }
     const created = await this.prisma.client.user.create({
       data: { email: normalized, name },
       select: { id: true, email: true },
