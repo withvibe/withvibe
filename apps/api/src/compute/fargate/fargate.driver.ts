@@ -24,6 +24,8 @@ import { AwsClientsService } from "./aws-clients.service";
 import { AwsConnectionService } from "./aws-connection.service";
 import { TraefikDynamicService } from "./traefik-dynamic.service";
 import { EfsStorageService } from "./efs-storage.service";
+import { GitProxyService } from "../../git-proxy/git-proxy.service";
+import { SandboxReposService } from "./sandbox-repos.service";
 import { DEPLOYMENT_TAG_KEY, deploymentId } from "./deployment-id";
 import {
   FargateExecService,
@@ -81,7 +83,9 @@ export class FargateDriver implements EnvComputeDriver {
     private readonly connections: AwsConnectionService,
     private readonly traefik: TraefikDynamicService,
     private readonly efs: EfsStorageService,
-    private readonly bridge: FargateExecService
+    private readonly bridge: FargateExecService,
+    private readonly gitProxy: GitProxyService,
+    private readonly sandboxRepos: SandboxReposService
   ) {}
 
   // ---------- lifecycle ------------------------------------------------------
@@ -302,6 +306,13 @@ export class FargateDriver implements EnvComputeDriver {
               }
             }
           }
+          // Repositories are cloned by the task itself, from the git proxy —
+          // see SandboxReposService. Done before the env is declared running
+          // so the agent never opens on a half-populated /workspace, and
+          // deliberately non-fatal: a repo that will not clone is a problem to
+          // show someone, not a reason to throw away a working sandbox.
+          await this.sandboxRepos.bootstrap(envId, log);
+
           await this.setStatus(envId, "running", { error: null });
           log(`[fargate] env is running\n`);
           return;
@@ -701,6 +712,26 @@ export class FargateDriver implements EnvComputeDriver {
       );
     }
 
+    // Git in the sandbox authenticates against the proxy, never against
+    // GitHub. Putting it in the container environment rather than in a repo's
+    // config means the agent's own ad-hoc `git` commands are covered too, and
+    // that nothing is left behind on the EFS volume when the task dies.
+    // Attributed to the env's creator — the only identity that exists before
+    // anyone has acted in the env.
+    const creator = await this.prisma.client.env.findUnique({
+      where: { id: envId },
+      select: { createdById: true },
+    });
+    const gitEnv = creator?.createdById
+      ? this.gitProxy.gitConfigEnvFor(envId, creator.createdById)
+      : {};
+    if (!creator?.createdById) {
+      log(
+        `[fargate] note: this env has no recorded creator, so git inside the sandbox ` +
+          `has no credential — repositories will not be cloned\n`
+      );
+    }
+
     const { cert, key: tlsKey } = await this.bridge.generateBridgeCert(envId);
     const image = `${process.env.WITHVIBE_IMAGE_NAMESPACE || "ghcr.io/withvibe"}/claude-runner:${
       process.env.CLAUDE_RUNNER_FARGATE_TAG ||
@@ -735,6 +766,8 @@ export class FargateDriver implements EnvComputeDriver {
         // escape hatch so bypassPermissions works in containerized hosts.
         { name: "IS_SANDBOX", value: "1" },
         { name: "HOME", value: "/workspace/.withvibe/home" },
+        { name: "GIT_TERMINAL_PROMPT", value: "0" },
+        ...Object.entries(gitEnv).map(([name, value]) => ({ name, value })),
         ...keyEnv,
       ],
       portMappings: [{ containerPort: FARGATE_BRIDGE_PORT, protocol: "tcp" }],

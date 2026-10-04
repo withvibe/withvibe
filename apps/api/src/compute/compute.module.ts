@@ -1,5 +1,6 @@
 import { Global, Module } from "@nestjs/common";
 import { AuthModule } from "../auth/auth.module";
+import { GitProxyModule } from "../git-proxy/git-proxy.module";
 import { EnvLogBufferService } from "./env-log-buffer.service";
 import { LocalDockerDriver } from "./local-docker.driver";
 import { EnvComputeService } from "./env-compute.service";
@@ -10,6 +11,7 @@ import { FargatePublicController } from "./fargate/fargate-public.controller";
 import { TraefikDynamicService } from "./fargate/traefik-dynamic.service";
 import { FargateExecService } from "./fargate/fargate-exec.service";
 import { EfsStorageService } from "./fargate/efs-storage.service";
+import { SandboxReposService } from "./fargate/sandbox-repos.service";
 import { FargateDriver } from "./fargate/fargate.driver";
 import { FargateReaperService } from "./fargate/fargate-reaper.service";
 
@@ -22,7 +24,7 @@ import { FargateReaperService } from "./fargate/fargate-reaper.service";
  */
 @Global()
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, GitProxyModule],
   controllers: [AwsConnectionController, FargatePublicController],
   providers: [
     EnvLogBufferService,
@@ -32,6 +34,7 @@ import { FargateReaperService } from "./fargate/fargate-reaper.service";
     TraefikDynamicService,
     FargateExecService,
     EfsStorageService,
+    SandboxReposService,
     FargateDriver,
     EnvComputeService,
     FargateReaperService,

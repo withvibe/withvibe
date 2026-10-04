@@ -19,6 +19,7 @@
     "check:fargate-reaper": "ts-node -r tsconfig-paths/register src/compute/fargate/fargate-reaper.check.ts",
     "check:saas-mode": "ts-node -r tsconfig-paths/register src/common/saas-mode.check.ts",
     "check:env-spec": "ts-node -r tsconfig-paths/register src/env-spec/env-spec.check.ts",
+    "check:sandbox-repos": "ts-node -r tsconfig-paths/register src/compute/fargate/sandbox-repos.check.ts",
     "check:git-proxy": "ts-node -r tsconfig-paths/register src/git-proxy/git-proxy.check.ts"
   },
   "dependencies": {
