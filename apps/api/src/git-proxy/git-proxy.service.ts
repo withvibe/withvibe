@@ -296,6 +296,21 @@ export class GitProxyService {
                 `${resolved.repoName} (env ${resolved.envId}, user ${resolved.userId})`
             );
           }
+          // An upstream 401 with nothing to authenticate WITH is a
+          // configuration problem, not a credential problem — and relaying it
+          // verbatim sends git looking for a username for *this* host, so the
+          // error names the proxy and reads as if we rejected them. Answer in
+          // our own words, and with a status git will not try to retry.
+          if (status === 401 && !resolved.credential) {
+            upstreamRes.resume();
+            res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+            res.end(
+              `${url.host} requires authentication, but this workspace has no ` +
+                `GitHub token configured. Add one under Workspace -> Settings.\n`
+            );
+            resolve();
+            return;
+          }
           res.writeHead(status, out);
           upstreamRes.pipe(res);
           upstreamRes.on("end", () => resolve());
