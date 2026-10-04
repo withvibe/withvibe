@@ -66,8 +66,13 @@ export class StartupCleanupService implements OnApplicationBootstrap {
 
   private async reconcileRunningEnvs(): Promise<void> {
     const c = this.prisma.client;
+    // `local` only. A fargate env's containers run in the client's AWS
+    // account, so `docker ps` finds nothing for it and this would flip a
+    // perfectly healthy sandbox to "stopped" — while the ECS task keeps
+    // running and billing, now orphaned because the DB forgot about it.
+    // FargateReaperService reconciles those against ECS instead.
     const runningEnvs = await c.env.findMany({
-      where: { containerStatus: "running" },
+      where: { containerStatus: "running", computeTarget: "local" },
       select: { id: true },
     });
     if (runningEnvs.length === 0) return;

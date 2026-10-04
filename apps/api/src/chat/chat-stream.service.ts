@@ -14,6 +14,7 @@ import {
 } from "./pending-questions.service";
 import { SideChannel, merge } from "./side-channel";
 import { PrismaService } from "../prisma/prisma.service";
+import { EnvComputeService } from "../compute/env-compute.service";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /**
@@ -40,6 +41,9 @@ export function friendlyAuthError(
   if (httpStatus) return `AI request failed (HTTP ${httpStatus}).`;
   return "AI request failed.";
 }
+
+/** Min gap between env activity touches while a turn streams. */
+const ACTIVITY_TOUCH_INTERVAL_MS = 60_000;
 
 /**
  * Maps a non-success SDK `result` (subtype + terminal_reason + errors[]) to a
@@ -249,10 +253,50 @@ export class ChatStreamService {
     private readonly claudeCode: ClaudeCodeEngineService,
     private readonly prisma: PrismaService,
     private readonly modelRouter: ModelRouterService,
-    private readonly pendingQuestions: PendingQuestionsService
+    private readonly pendingQuestions: PendingQuestionsService,
+    private readonly compute: EnvComputeService
   ) {}
 
+  /**
+   * Public entry point for a turn. Wraps the engine generator to keep the
+   * env's activity timestamp fresh while the turn runs — an agent run can
+   * easily outlive the Fargate idle timeout, and reaping a sandbox mid-run
+   * would kill the very work keeping it busy. Throttled, so a chatty token
+   * stream doesn't become a write storm.
+   */
   async *stream(opts: {
+    prompt: string;
+    context: ChatContext;
+    signal?: AbortSignal;
+    marks?: {
+      receivedAt: number;
+      dispatchAt: number;
+      ctxBuildStartAt: number;
+      ctxBuildDoneAt: number;
+    };
+  }): AsyncGenerator<ChatEvent, void> {
+    const envId = opts.context.envId;
+    let lastTouch = 0;
+    const touch = () => {
+      const now = Date.now();
+      if (now - lastTouch < ACTIVITY_TOUCH_INTERVAL_MS) return;
+      lastTouch = now;
+      void this.compute.touchActivity(envId);
+    };
+
+    touch();
+    try {
+      for await (const event of this.runTurn(opts)) {
+        touch();
+        yield event;
+      }
+    } finally {
+      lastTouch = 0;
+      touch();
+    }
+  }
+
+  private async *runTurn(opts: {
     prompt: string;
     context: ChatContext;
     /** Aborted by ActiveRunsService.interrupt() — both engines wire it through. */

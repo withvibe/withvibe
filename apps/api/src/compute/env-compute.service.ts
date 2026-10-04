@@ -44,4 +44,22 @@ export class EnvComputeService {
     }
     return driver;
   }
+
+  /**
+   * Mark the env as in use, right now. Drives the Fargate idle reaper (see
+   * FargateReaperService), which bills per second and so can't rely on a user
+   * remembering to stop a sandbox. Call it from user-initiated work on the
+   * env — a chat turn, a terminal session, a lifecycle action — NOT from
+   * polling reads, or an open browser tab would keep a sandbox alive forever.
+   *
+   * Best-effort: a failed touch must never break the action it accompanies.
+   */
+  async touchActivity(envId: string): Promise<void> {
+    await this.prisma.client.env
+      .update({
+        where: { id: envId },
+        data: { lastActivityAt: new Date() },
+      })
+      .catch(() => undefined);
+  }
 }

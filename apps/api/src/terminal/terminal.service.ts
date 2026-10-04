@@ -10,6 +10,9 @@ import type { ShellSession } from "../compute/env-compute-driver";
 import type { BridgeJwtPayload } from "../auth/jwt.strategy";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
+/** Min gap between env activity touches while a shell session is open. */
+const ACTIVITY_TOUCH_INTERVAL_MS = 60_000;
+
 /**
  * WebSocket terminal — browser xterm.js ↔ this handler ↔ a shell inside one
  * of the env's containers, opened through the env's compute driver
@@ -129,7 +132,7 @@ export class TerminalService {
     );
     try {
       this.wss.handleUpgrade(req, socket, head, (ws) => {
-        this.bridge(ws, shell);
+        this.bridge(ws, shell, envId);
       });
     } catch (err) {
       // Upgrade failed after the shell was already opened — don't leak it.
@@ -149,7 +152,18 @@ export class TerminalService {
     } catch {}
   }
 
-  private bridge(ws: WebSocket, shell: ShellSession): void {
+  private bridge(ws: WebSocket, shell: ShellSession, envId: string): void {
+    // Someone typing in a shell is using the env, even if the chat is idle.
+    // Throttled so a key-by-key stream doesn't hammer the DB.
+    let lastTouch = 0;
+    const touch = () => {
+      const now = Date.now();
+      if (now - lastTouch < ACTIVITY_TOUCH_INTERVAL_MS) return;
+      lastTouch = now;
+      void this.compute.touchActivity(envId);
+    };
+    touch();
+
     shell.onData((data) => {
       try {
         ws.send(data);
@@ -168,6 +182,7 @@ export class TerminalService {
     });
 
     ws.on("message", (data: Buffer, isBinary: boolean) => {
+      touch();
       if (isBinary) {
         shell.write(data.toString("utf-8"));
         return;

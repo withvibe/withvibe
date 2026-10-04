@@ -10,6 +10,7 @@ import { FargatePublicController } from "./fargate/fargate-public.controller";
 import { TraefikDynamicService } from "./fargate/traefik-dynamic.service";
 import { FargateExecService } from "./fargate/fargate-exec.service";
 import { FargateDriver } from "./fargate/fargate.driver";
+import { FargateReaperService } from "./fargate/fargate-reaper.service";
 
 /**
  * The compute-target seam: per-env driver resolution (local docker, Fargate)
@@ -31,6 +32,7 @@ import { FargateDriver } from "./fargate/fargate.driver";
     FargateExecService,
     FargateDriver,
     EnvComputeService,
+    FargateReaperService,
   ],
   exports: [
     EnvLogBufferService,

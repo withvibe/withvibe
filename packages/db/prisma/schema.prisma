@@ -394,6 +394,10 @@ model Env {
   serviceUrls      Json?          // subdomain-mode only: { [serviceName]: "https://..." }
   containerError   String?
   lastContainerAt  DateTime?
+  // Last user-initiated use (chat turn, terminal session, lifecycle action).
+  // Drives the Fargate idle reaper; null means "never used since start", in
+  // which case lastContainerAt is the clock.
+  lastActivityAt   DateTime?
   composeFile      String?
   assetFiles       Json?         // [{path, content}] — materialized under envDir alongside the compose
   template         EnvTemplate?  @relation(fields: [templateId], references: [id], onDelete: SetNull)

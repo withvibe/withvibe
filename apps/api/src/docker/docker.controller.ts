@@ -82,6 +82,9 @@ export class DockerContainerController {
       );
     }
     const envAction = action as Action;
+    // Starting or rebuilding is deliberate use — don't let the idle reaper
+    // judge a freshly started env by a stale timestamp from its last run.
+    if (envAction !== "stop") await this.compute.touchActivity(envId);
     if (envAction === "start") await driver.startEnvironment(envId);
     else if (envAction === "stop") await driver.stopEnvironment(envId);
     else await driver.rebuildEnvironment(envId);
