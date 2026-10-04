@@ -442,6 +442,9 @@ export class DockerService {
           error: `Env clone for ${er.repo.name} failed: ${res.error}`,
         };
       }
+      // Sandbox envs have no host clone to bind-mount — the task clones its
+      // own repositories. Nothing to add to the compose file.
+      if ("skipped" in res) continue;
       envClonePaths.set(er.id, res.localPath);
     }
 

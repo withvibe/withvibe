@@ -170,7 +170,7 @@ export class TemplateMaterializerService {
       where: { id: args.templateId },
       include: {
         assets: true,
-        repos: { include: { repo: { select: { name: true } } } },
+        repos: { include: { repo: { include: { clone: true } } } },
       },
     });
     if (!tpl || tpl.workspaceId !== args.workspaceId) {
@@ -189,19 +189,30 @@ export class TemplateMaterializerService {
         );
       }
       const repoName = tpl.repos[0].repo.name;
-      const clonePath = this.envClones.envClonePath(
-        args.workspaceId,
-        args.envId,
-        repoName
-      );
-      const composePath = path.join(clonePath, "docker-compose.yml");
-      try {
-        sourceComposeYaml = await readFile(composePath, "utf8");
-      } catch (err) {
+      // Normally the env's own clone, which env-create makes synchronously for
+      // exactly this reason. A sandbox env has no host clone — it clones
+      // inside the task — so fall back to the workspace's source clone, which
+      // exists for every repo regardless of where the env runs.
+      const candidates = [
+        this.envClones.envClonePath(args.workspaceId, args.envId, repoName),
+        tpl.repos[0].repo.clone?.localPath ?? null,
+      ].filter((p): p is string => Boolean(p));
+
+      let found: string | null = null;
+      for (const dir of candidates) {
+        const composePath = path.join(dir, "docker-compose.yml");
+        try {
+          sourceComposeYaml = await readFile(composePath, "utf8");
+          found = composePath;
+          break;
+        } catch {
+          // Try the next candidate; the error below names them all.
+        }
+      }
+      if (!found) {
         throw new BadRequestException(
           `Template "${tpl.slug}" expects ${repoName}/docker-compose.yml, ` +
-            `but it could not be read at ${composePath}: ` +
-            (err instanceof Error ? err.message : String(err))
+            `but it could not be read from any of: ${candidates.join(", ")}`
         );
       }
       // The repo's compose was authored to be run from the repo root. Once

@@ -915,6 +915,8 @@ export class EnvsService {
       try {
         const res = await this.envClones.ensureEnvClone(envRepoId);
         if (res && "localPath" in res) return true;
+        // Nothing to wait for: a sandbox env clones inside its own task.
+        if (res && "skipped" in res) return true;
         if (i === 0 || i % 5 === 0) {
           this.logger.info(
             `Waiting on env clone ${envRepoId} for env ${envId}: ${

@@ -14,6 +14,7 @@ import {
   type ChatEngine,
   type ComputeTarget,
 } from "@withvibe/db";
+import { sandboxRepoPath } from "../git/git-exec";
 import { PrismaService } from "../prisma/prisma.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { AgentChatService } from "../agents/agent-chat.service";
@@ -970,6 +971,19 @@ export class ChatContextService {
         if (er.repo.clone?.cloneStatus !== "ready") continue;
         const res = await this.envClones.ensureEnvClone(er.id);
         if ("error" in res) continue;
+        if ("skipped" in res) {
+          // Sandbox env: the repositories are inside the task, cloned there at
+          // start. Telling the agent a host path would send it looking in a
+          // filesystem it cannot see — and the agent runs IN the sandbox, so
+          // the path it needs is the one the sandbox uses.
+          readyRepos.push({
+            name: er.repo.name,
+            url: er.repo.url,
+            localPath: sandboxRepoPath(er.repo.name),
+            branch: er.branch ?? "(env branch)",
+          });
+          continue;
+        }
         readyRepos.push({
           name: er.repo.name,
           url: er.repo.url,

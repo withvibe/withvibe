@@ -26,6 +26,18 @@ const exec = promisify(execFile);
  * The path is stored on `EnvRepo.envClonePath`, so the idempotency check in
  * `ensureEnvClone` follows the DB-recorded path.
  */
+/**
+ * Outcome of asking for an env clone. `skipped` is not a failure: a Fargate
+ * env's repositories live inside its task, so there is nothing for the host to
+ * clone — and cloning anyway would leave a working copy of the client's source
+ * on the platform, which is the thing running the sandbox in their own account
+ * is meant to avoid.
+ */
+export type EnsureEnvCloneResult =
+  | { localPath: string; branch: string }
+  | { error: string }
+  | { skipped: "sandbox" };
+
 @Injectable()
 export class EnvCloneService {
   private get baseDir(): string {
@@ -160,18 +172,13 @@ exit 0
    * the second call awaits the first's promise instead of stomping on its
    * partially-created directory.
    */
-  private readonly inflight = new Map<
-    string,
-    Promise<{ localPath: string; branch: string } | { error: string }>
-  >();
+  private readonly inflight = new Map<string, Promise<EnsureEnvCloneResult>>();
 
   /**
    * Ensure a per-env clone exists for this envRepo. Idempotent — safe to call
    * on every docker-up / AI-edit. Returns the clone path + branch.
    */
-  async ensureEnvClone(
-    envRepoId: string
-  ): Promise<{ localPath: string; branch: string } | { error: string }> {
+  async ensureEnvClone(envRepoId: string): Promise<EnsureEnvCloneResult> {
     const existing = this.inflight.get(envRepoId);
     if (existing) return existing;
     const p = this.doEnsureEnvClone(envRepoId).finally(() =>
@@ -245,15 +252,26 @@ exit 0
 
   private async doEnsureEnvClone(
     envRepoId: string
-  ): Promise<{ localPath: string; branch: string } | { error: string }> {
+  ): Promise<EnsureEnvCloneResult> {
     const envRepo = await this.prisma.client.envRepo.findUnique({
       where: { id: envRepoId },
       include: {
-        env: { select: { id: true, title: true, workspaceId: true } },
+        env: {
+          select: {
+            id: true,
+            title: true,
+            workspaceId: true,
+            computeTarget: true,
+          },
+        },
         repo: { include: { clone: true } },
       },
     });
     if (!envRepo) return { error: "EnvRepo not found" };
+    // A sandbox clones its own repositories, from the git proxy, at start —
+    // see SandboxReposService. Making a host copy as well would duplicate the
+    // work and, worse, keep the client's code on the platform indefinitely.
+    if (envRepo.env.computeTarget === "fargate") return { skipped: "sandbox" };
     if (!envRepo.repo.clone || envRepo.repo.clone.cloneStatus !== "ready") {
       return { error: "Main clone not ready yet — wait for clone to finish" };
     }
