@@ -45,6 +45,14 @@ import type {
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /** How long to wait for a RunTask'd task to reach RUNNING + get an IP. */
+/**
+ * The runner's working directory volume. Declared by the driver rather than by
+ * the compose file, so it has to be given persistence explicitly — without
+ * that, anything the AI writes (and, once repos clone in-task, the checkout
+ * itself) is destroyed every time the env stops, including by the idle timeout.
+ */
+const WORKSPACE_VOLUME = "withvibe-workspace";
+
 const START_TIMEOUT_MS = 5 * 60_000;
 const POLL_MS = 4_000;
 
@@ -160,6 +168,18 @@ export class FargateDriver implements EnvComputeDriver {
       // One access point per volume, created on first start and reused after.
       // Without a filesystem (a stack that predates EFS) this stays empty and
       // the volumes remain the scratch space they always were.
+      // The runner's /workspace is declared by us, not by the compose file,
+      // so it needs its own access point — and it is the one that matters most
+      // once repositories are cloned inside the task.
+      let workspaceAccessPointId: string | null = null;
+      if (conn.fileSystemId) {
+        workspaceAccessPointId = await this.efs.ensureAccessPoint(
+          conn,
+          envId,
+          WORKSPACE_VOLUME
+        );
+      }
+
       const volumeAccessPoints: Record<string, string> = {};
       if (conn.fileSystemId && volumeNames.length > 0) {
         log(`[fargate] attaching persistent storage for ${volumeNames.join(", ")}\n`);
@@ -196,7 +216,9 @@ export class FargateDriver implements EnvComputeDriver {
         envId,
         env.workspaceId,
         translated.taskDefinition,
-        log
+        log,
+        conn.fileSystemId,
+        workspaceAccessPointId
       );
 
       const { ecs } = this.clients(conn);
@@ -637,7 +659,9 @@ export class FargateDriver implements EnvComputeDriver {
     envId: string,
     workspaceId: string,
     taskDef: import("@aws-sdk/client-ecs").RegisterTaskDefinitionCommandInput,
-    log: (line: string) => void
+    log: (line: string) => void,
+    fileSystemId: string | null,
+    workspaceAccessPointId: string | null
   ): Promise<string> {
     const containers = taskDef.containerDefinitions ?? [];
     if (containers.some((c) => c.name === "withvibe-runner")) {
@@ -715,7 +739,7 @@ export class FargateDriver implements EnvComputeDriver {
       ],
       portMappings: [{ containerPort: FARGATE_BRIDGE_PORT, protocol: "tcp" }],
       mountPoints: [
-        { sourceVolume: "withvibe-workspace", containerPath: "/workspace" },
+        { sourceVolume: WORKSPACE_VOLUME, containerPath: "/workspace" },
       ],
       healthCheck: {
         command: [
@@ -732,7 +756,19 @@ export class FargateDriver implements EnvComputeDriver {
     taskDef.containerDefinitions = containers;
     taskDef.volumes = [
       ...(taskDef.volumes ?? []),
-      { name: "withvibe-workspace" },
+      workspaceAccessPointId && fileSystemId
+        ? {
+            name: WORKSPACE_VOLUME,
+            efsVolumeConfiguration: {
+              fileSystemId,
+              transitEncryption: "ENABLED" as const,
+              authorizationConfig: {
+                accessPointId: workspaceAccessPointId,
+                iam: "ENABLED" as const,
+              },
+            },
+          }
+        : { name: WORKSPACE_VOLUME },
     ];
     log(`[fargate] runner container added (${image})\n`);
     return cert;
