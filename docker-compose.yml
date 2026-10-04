@@ -158,6 +158,14 @@ services:
       # DEMO_MODE — an open register endpoint lets any visitor run arbitrary
       # compose envs on this host.
       DISABLE_REGISTRATION: ${DISABLE_REGISTRATION:-}
+      # Platform AWS credentials for the Fargate compute target (assume-role
+      # into client accounts). Use a least-privilege IAM user that can ONLY
+      # sts:AssumeRole into roles named withvibe-platform-access. Empty on
+      # installs that don't use Fargate.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION: ${AWS_REGION:-}
       NODE_ENV: production
       PORT: "4000"
     ports:
