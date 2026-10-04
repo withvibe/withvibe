@@ -166,6 +166,11 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       AWS_REGION: ${AWS_REGION:-}
+      # Minutes without user activity (chat turn, terminal input, lifecycle
+      # action) before a Fargate sandbox is stopped. Fargate bills per second,
+      # so a forgotten env is a running bill. 0 disables the sweep; the
+      # orphaned-task reconcile always runs. Default 60.
+      FARGATE_IDLE_TIMEOUT_MINUTES: ${FARGATE_IDLE_TIMEOUT_MINUTES:-}
       NODE_ENV: production
       PORT: "4000"
     ports:
