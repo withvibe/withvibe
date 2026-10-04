@@ -37,6 +37,7 @@ import { cn } from "@/lib/utils";
 import { EnvironmentChat } from "./_chat";
 import { EnvPanel, LogsPanel, PreviewPanel } from "./_runtime";
 import { ComposeDialog } from "./_compose-dialog";
+import { SpecDialog, type EnvSpec } from "./_spec-dialog";
 import { TerminalPanel } from "./_terminal";
 import { AgentsPanel } from "./_agents-panel";
 import { GitPanel } from "./_git-panel";
@@ -76,6 +77,11 @@ type Environment = {
   containerError: string | null;
   lastContainerAt: string | null;
   composeFile: string | null;
+  /** Present only when the env was authored as a service spec. */
+  serviceSpec: EnvSpec | null;
+  /** Credentials the compiler generated for managed services. */
+  specCredentials: Record<string, Record<string, string>> | null;
+  computeTarget?: string;
   assetFiles: { path: string; size: number; updatedAt: string }[];
   detectedDatabases: DetectedDatabase[] | null;
   dbViewerPort: number | null;
@@ -159,6 +165,7 @@ export default function EnvironmentDetailPage(
   const [acting, setActing] = useState(false);
   const [errorExpanded, setErrorExpanded] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
+  const [specOpen, setSpecOpen] = useState(false);
   const [activePanel, setActivePanel] = useState<
     "preview" | "logs" | "env" | "terminal" | "agents" | "git" | "database" | "qa-browser" | "context" | "security" | null
   >(null);
@@ -599,6 +606,12 @@ export default function EnvironmentDetailPage(
                     envId={envId}
                     repos={env.repos}
                     composeFile={env.composeFile}
+                    onOpenSpec={() => setSpecOpen(true)}
+                    specServiceCount={
+                      env.serviceSpec
+                        ? Object.keys(env.serviceSpec.services ?? {}).length
+                        : null
+                    }
                     chatEngine={env.chatEngine}
                     qaBrowserMode={env.qaBrowserMode}
                     modelChoice={env.modelChoice}
@@ -770,6 +783,15 @@ export default function EnvironmentDetailPage(
         </nav>
       </div>
 
+      <SpecDialog
+        open={specOpen}
+        onOpenChange={setSpecOpen}
+        workspaceId={id}
+        envId={envId}
+        initialSpec={env.serviceSpec}
+        computeTarget={env.computeTarget ?? "local"}
+        onSaved={load}
+      />
       <ComposeDialog
         open={composeOpen}
         onOpenChange={setComposeOpen}

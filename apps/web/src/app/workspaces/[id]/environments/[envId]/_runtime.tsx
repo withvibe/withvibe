@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Boxes,
   ExternalLink,
   FileCode,
   GitBranch,
@@ -203,6 +204,8 @@ export function EnvPanel({
   serviceUrls,
   containerPorts,
   onOpenCompose,
+  onOpenSpec,
+  specServiceCount,
   onUpdated,
   pluginPrefsCount,
   pluginsEnabledCount,
@@ -222,6 +225,9 @@ export function EnvPanel({
   serviceUrls: Record<string, string> | null;
   containerPorts: Record<string, number> | null;
   onOpenCompose: () => void;
+  onOpenSpec: () => void;
+  /** null when the env isn't spec-authored. */
+  specServiceCount: number | null;
   onUpdated: () => void | Promise<void>;
   /** Total plugins installed in this workspace. 0 hides the Plugins section. */
   pluginPrefsCount: number;
@@ -727,6 +733,32 @@ export function EnvPanel({
 
       <section className="space-y-2">
         <h3 className="text-xs font-mono font-semibold uppercase tracking-wide text-muted-foreground">
+          Services
+        </h3>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onOpenSpec}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border bg-card hover:border-primary/40 text-xs font-mono transition-smooth"
+          >
+            <Boxes className="size-3.5" />
+            Services:{" "}
+            <span className="text-foreground">
+              {specServiceCount === null
+                ? "not configured"
+                : `${specServiceCount} defined`}
+            </span>
+          </button>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Describe what the env needs — a database, an image, a public port —
+          and WithVibe writes the compose file, wires the services together and
+          generates the passwords.
+        </p>
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="text-xs font-mono font-semibold uppercase tracking-wide text-muted-foreground">
           Compose
         </h3>
         <div className="flex flex-wrap gap-2">
@@ -738,14 +770,28 @@ export function EnvPanel({
             <FileCode className="size-3.5" />
             Compose:{" "}
             <span className="text-foreground">
-              {composeFile ? "custom" : "auto-detected"}
+              {specServiceCount !== null
+                ? "generated"
+                : composeFile
+                  ? "custom"
+                  : "auto-detected"}
             </span>
           </button>
         </div>
         <p className="text-[11px] text-muted-foreground">
-          The env picks up a compose file in this order: custom override → env
-          root → first attached repo. Need help setting one up? Ask the
-          pinned <strong>DevOps</strong>&nbsp;agent in chat — that&apos;s what it&apos;s for.
+          {specServiceCount !== null ? (
+            <>
+              Generated from the services above. Editing it by hand detaches it
+              from them, and the service list stops being the source of truth.
+            </>
+          ) : (
+            <>
+              The env picks up a compose file in this order: custom override →
+              env root → first attached repo. Need help setting one up? Ask the
+              pinned <strong>DevOps</strong>&nbsp;agent in chat — that&apos;s what
+              it&apos;s for.
+            </>
+          )}
         </p>
       </section>
 

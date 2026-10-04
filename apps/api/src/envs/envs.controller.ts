@@ -43,6 +43,7 @@ export class EnvsController {
       templateVars?: unknown;
       qaBrowserMode?: unknown;
       computeTarget?: unknown;
+      serviceSpec?: unknown;
     }
   ) {
     return this.envs.create(user.id, workspaceId, body);
@@ -73,6 +74,7 @@ export class EnvsController {
       qaBrowserMode?: unknown;
       modelChoice?: unknown;
       sandboxBypass?: unknown;
+      serviceSpec?: unknown;
     }
   ) {
     return this.envs.update(user.id, workspaceId, envId, body);
