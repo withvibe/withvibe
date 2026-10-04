@@ -17,6 +17,7 @@ import {
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { DemoModeService } from "../common/demo-mode.service";
+import { SaasModeService } from "../common/saas-mode.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { AgentSeedService } from "../agents/agent-seed.service";
 import { EnvComputeService } from "../compute/env-compute.service";
@@ -75,6 +76,7 @@ export class EnvsService {
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
     private readonly demo: DemoModeService,
+    private readonly saas: SaasModeService,
     private readonly envClones: EnvCloneService,
     private readonly agentSeed: AgentSeedService,
     private readonly compute: EnvComputeService,
@@ -240,7 +242,18 @@ export class EnvsService {
         where: { id: workspaceId },
         select: { defaultComputeTarget: true },
       });
-      target = ws?.defaultComputeTarget ?? "local";
+      // In SAAS_MODE an unconfigured workspace still carries the `local`
+      // column default, which would make every tenant's first env fail with
+      // the refusal below. Default them to the only target they can actually
+      // use, so the error they see is the actionable "connect an AWS account".
+      const columnDefault: ComputeTarget =
+        this.saas.enabled && !this.saas.localAllowedFor(workspaceId)
+          ? "fargate"
+          : "local";
+      target = ws?.defaultComputeTarget ?? columnDefault;
+      if (target === "local" && !this.saas.localAllowedFor(workspaceId)) {
+        target = "fargate";
+      }
     } else if (
       typeof requested === "string" &&
       (VALID_COMPUTE_TARGETS as string[]).includes(requested)
@@ -249,6 +262,16 @@ export class EnvsService {
     } else {
       throw new BadRequestException(
         `Invalid computeTarget. Expected one of: ${VALID_COMPUTE_TARGETS.join(", ")}`
+      );
+    }
+    if (target === "local" && !this.saas.localAllowedFor(workspaceId)) {
+      // SAAS_MODE: a tenant's Compose file would run on the platform's own
+      // Docker host, next to every other tenant's clones and the platform's
+      // secrets. Refuse at creation rather than trying to sandbox it after
+      // the fact — see SaasModeService.
+      throw new BadRequestException(
+        `This deployment only runs environments in your own AWS account. ` +
+          `Connect one in Settings → AWS compute, then create the environment with "fargate".`
       );
     }
     if (target === "fargate") {

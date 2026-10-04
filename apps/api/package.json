@@ -16,7 +16,8 @@
     "check:compose-security": "ts-node -r tsconfig-paths/register src/docker/compose-security.check.ts",
     "check:compose-rewriter": "ts-node -r tsconfig-paths/register src/templates/compose-rewriter.check.ts",
     "check:compose-to-taskdef": "ts-node -r tsconfig-paths/register src/compute/fargate/compose-to-taskdef.check.ts",
-    "check:fargate-reaper": "ts-node -r tsconfig-paths/register src/compute/fargate/fargate-reaper.check.ts"
+    "check:fargate-reaper": "ts-node -r tsconfig-paths/register src/compute/fargate/fargate-reaper.check.ts",
+    "check:saas-mode": "ts-node -r tsconfig-paths/register src/common/saas-mode.check.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",

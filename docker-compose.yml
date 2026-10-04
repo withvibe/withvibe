@@ -171,6 +171,15 @@ services:
       # so a forgotten env is a running bill. 0 disables the sweep; the
       # orphaned-task reconcile always runs. Default 60.
       FARGATE_IDLE_TIMEOUT_MINUTES: ${FARGATE_IDLE_TIMEOUT_MINUTES:-}
+      # "true" = this deployment hosts tenants who do not trust each other.
+      # Refuses the `local` compute target (a tenant's compose would run on
+      # THIS host, beside every other tenant's clones and the platform's
+      # secrets) and blocks host-side sidecars. Leaves `fargate`, where the
+      # tenant's containers run in the tenant's own AWS account.
+      SAAS_MODE: ${SAAS_MODE:-}
+      # Comma-separated workspace ids still permitted to use `local` in
+      # SAAS_MODE - the operator's own team. Empty means nobody.
+      SAAS_LOCAL_WORKSPACE_IDS: ${SAAS_LOCAL_WORKSPACE_IDS:-}
       NODE_ENV: production
       PORT: "4000"
     ports:

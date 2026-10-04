@@ -16,6 +16,7 @@ import type { AuthUser } from "../auth/jwt.strategy";
 import { PrismaService } from "../prisma/prisma.service";
 import { DemoModeService } from "../common/demo-mode.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
+import { SaasModeService } from "../common/saas-mode.service";
 import { CodeTunnelService } from "./code-tunnel.service";
 
 type Action = "start" | "stop";
@@ -27,6 +28,7 @@ export class CodeTunnelController {
     private readonly tunnel: CodeTunnelService,
     private readonly prisma: PrismaService,
     private readonly access: WorkspaceAccessService,
+    private readonly saas: SaasModeService,
     private readonly demo: DemoModeService
   ) {}
 
@@ -37,7 +39,7 @@ export class CodeTunnelController {
     @Param("envId") envId: string,
     @Body() body: { action?: unknown }
   ) {
-    await this.assertEnv(user.id, workspaceId, envId);
+    const env = await this.assertEnv(user.id, workspaceId, envId);
     const action = body?.action as Action | undefined;
     if (!action || !["start", "stop"].includes(action)) {
       throw new BadRequestException("action must be 'start' or 'stop'");
@@ -57,6 +59,15 @@ export class CodeTunnelController {
         "Opening VS Code via tunnel is disabled in demo mode"
       );
     }
+    // Same reason generalized beyond demo mode, plus: for a fargate env the
+    // tunnel would open on the platform host rather than in the sandbox, so
+    // the user would be editing our copy of the files and running commands on
+    // our machine while believing they were inside their environment.
+    this.saas.assertHostSidecarAllowed({
+      workspaceId,
+      computeTarget: env.computeTarget,
+      sidecar: "The VS Code tunnel",
+    });
 
     const result = await this.tunnel.start(user.id, envId);
     if (result.status === "running") {
@@ -111,10 +122,11 @@ export class CodeTunnelController {
     await this.access.member(userId, workspaceId);
     const env = await this.prisma.client.env.findUnique({
       where: { id: envId },
-      select: { workspaceId: true, deletedAt: true },
+      select: { workspaceId: true, deletedAt: true, computeTarget: true },
     });
     if (!env || env.workspaceId !== workspaceId || env.deletedAt) {
       throw new NotFoundException("Env not found");
     }
+    return env;
   }
 }

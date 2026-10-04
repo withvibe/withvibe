@@ -14,6 +14,7 @@ import { CurrentUser } from "../auth/current-user.decorator";
 import type { AuthUser } from "../auth/jwt.strategy";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
+import { SaasModeService } from "../common/saas-mode.service";
 import { BrowserSidecarService } from "./browser-sidecar.service";
 
 type Action = "start" | "stop";
@@ -24,7 +25,8 @@ export class BrowserSidecarController {
   constructor(
     private readonly sidecar: BrowserSidecarService,
     private readonly prisma: PrismaService,
-    private readonly access: WorkspaceAccessService
+    private readonly access: WorkspaceAccessService,
+    private readonly saas: SaasModeService
   ) {}
 
   // GET — read-only status. The frontend "QA Browser" tab polls this to
@@ -67,17 +69,24 @@ export class BrowserSidecarController {
     @Param("envId") envId: string,
     @Body() body: { action?: unknown }
   ) {
-    await this.assertEnv(user.id, workspaceId, envId);
+    const env = await this.assertEnv(user.id, workspaceId, envId);
     const action = body?.action as Action | undefined;
     if (!action || !["start", "stop"].includes(action)) {
       throw new BadRequestException("action must be 'start' or 'stop'");
     }
 
+    // `stop` stays open in every mode so an already-running sidecar can always
+    // be cleaned up; only starting a new one is gated.
     if (action === "stop") {
       await this.sidecar.stop(envId);
       return { ok: true };
     }
 
+    this.saas.assertHostSidecarAllowed({
+      workspaceId,
+      computeTarget: env.computeTarget,
+      sidecar: "The QA browser",
+    });
     const result = await this.sidecar.start(envId);
     if (!result.ok) {
       throw new HttpException(result.error, 409);
@@ -97,10 +106,11 @@ export class BrowserSidecarController {
     await this.access.member(userId, workspaceId);
     const env = await this.prisma.client.env.findUnique({
       where: { id: envId },
-      select: { workspaceId: true, deletedAt: true },
+      select: { workspaceId: true, deletedAt: true, computeTarget: true },
     });
     if (!env || env.workspaceId !== workspaceId || env.deletedAt) {
       throw new NotFoundException("Env not found");
     }
+    return env;
   }
 }
