@@ -27,6 +27,7 @@ import { AgentsModule } from "./agents/agents.module";
 import { ChatModule } from "./chat/chat.module";
 import { TerminalModule } from "./terminal/terminal.module";
 import { GitModule } from "./git/git.module";
+import { GitProxyModule } from "./git-proxy/git-proxy.module";
 import { McpBridgeModule } from "./mcp-bridge/mcp-bridge.module";
 import { RunnerModule } from "./runner/runner.module";
 import { SlackModule } from "./slack/slack.module";
@@ -115,6 +116,7 @@ import { RequestContextInterceptor } from "./common/request-context.interceptor"
     ChatModule,
     TerminalModule,
     GitModule,
+    GitProxyModule,
     McpBridgeModule,
     RunnerModule,
     SlackModule,
