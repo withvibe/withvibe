@@ -31,6 +31,10 @@ export type TranslateInput = {
   region: string;
   executionRoleArn: string;
   taskRoleArn: string;
+  /** EFS filesystem for persistent volumes; omit for ephemeral-only. */
+  fileSystemId?: string | null;
+  /** volume name -> EFS access point id. Volumes absent here stay ephemeral. */
+  volumeAccessPoints?: Record<string, string>;
 };
 
 export type TranslateResult = {
@@ -251,7 +255,23 @@ export function translateComposeToTaskDef(
       },
       containerDefinitions: containers,
       ...(usedVolumes.size > 0
-        ? { volumes: [...usedVolumes].map((name) => ({ name })) }
+        ? {
+            volumes: [...usedVolumes].map((name) => {
+              const accessPointId = input.volumeAccessPoints?.[name];
+              // With no access point the volume is task-scoped scratch that
+              // dies with the task. With one, the same name resolves to a
+              // directory on EFS that outlives every stop.
+              if (!accessPointId || !input.fileSystemId) return { name };
+              return {
+                name,
+                efsVolumeConfiguration: {
+                  fileSystemId: input.fileSystemId,
+                  transitEncryption: "ENABLED" as const,
+                  authorizationConfig: { accessPointId, iam: "ENABLED" as const },
+                },
+              };
+            }),
+          }
         : {}),
     },
     servicePorts,

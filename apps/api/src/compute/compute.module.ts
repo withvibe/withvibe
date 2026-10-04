@@ -9,6 +9,7 @@ import { AwsConnectionController } from "./fargate/aws-connection.controller";
 import { FargatePublicController } from "./fargate/fargate-public.controller";
 import { TraefikDynamicService } from "./fargate/traefik-dynamic.service";
 import { FargateExecService } from "./fargate/fargate-exec.service";
+import { EfsStorageService } from "./fargate/efs-storage.service";
 import { FargateDriver } from "./fargate/fargate.driver";
 import { FargateReaperService } from "./fargate/fargate-reaper.service";
 
@@ -30,6 +31,7 @@ import { FargateReaperService } from "./fargate/fargate-reaper.service";
     AwsConnectionService,
     TraefikDynamicService,
     FargateExecService,
+    EfsStorageService,
     FargateDriver,
     EnvComputeService,
     FargateReaperService,

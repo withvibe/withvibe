@@ -132,10 +132,11 @@ export function compileToCompose(
         );
       }
       if (opts.target === "fargate") {
-        // Honesty beats a silent surprise: on Fargate a task volume dies with
-        // the task, so "storage" is scratch space until EFS backing lands.
+        // Whether this actually persists depends on the client's AWS stack
+        // having an EFS filesystem, which only the driver can see. It says so
+        // precisely at start time; here we can only point at the dependency.
         notes.push(
-          `service "${name}": ${svc.storage} of storage is scratch space on this target — a Fargate task volume is discarded when the environment stops`
+          `service "${name}": ${svc.storage} of storage persists across stops when the AWS stack has EFS (deployed by the current infra template); on an older stack it is scratch space discarded with the task`
         );
       }
     }

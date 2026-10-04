@@ -208,6 +208,10 @@ model AwsComputeConnection {
   subnetIds            String?   // JSON array of public subnet ids
   securityGroupId      String?
   logGroupName         String?
+  // EFS filesystem backing persistent env storage (export WithVibe-FileSystemId).
+  // Null for stacks deployed before EFS existed: those envs keep the ephemeral
+  // task volumes they already had rather than failing to start.
+  fileSystemId         String?
   taskExecutionRoleArn String?
   taskRoleArn          String?
   // pending (externalId issued, stack not verified) | ok | error

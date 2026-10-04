@@ -242,8 +242,10 @@ const WORDPRESS = {
     JSON.stringify(doc["x-withvibe"])
   );
   expect(
-    "FARGATE: ephemeral storage is called out rather than silently lost",
-    r.notes.some((n) => n.includes("discarded when the environment stops")),
+    "FARGATE: storage durability is stated, not left to be discovered",
+    r.notes.some(
+      (n) => n.includes("persists across stops") && n.includes("EFS")
+    ),
     JSON.stringify(r.notes)
   );
 }

@@ -23,6 +23,7 @@ import { EnvLogBufferService } from "../env-log-buffer.service";
 import { AwsClientsService } from "./aws-clients.service";
 import { AwsConnectionService } from "./aws-connection.service";
 import { TraefikDynamicService } from "./traefik-dynamic.service";
+import { EfsStorageService } from "./efs-storage.service";
 import { DEPLOYMENT_TAG_KEY, deploymentId } from "./deployment-id";
 import {
   FargateExecService,
@@ -71,6 +72,7 @@ export class FargateDriver implements EnvComputeDriver {
     private readonly aws: AwsClientsService,
     private readonly connections: AwsConnectionService,
     private readonly traefik: TraefikDynamicService,
+    private readonly efs: EfsStorageService,
     private readonly bridge: FargateExecService
   ) {}
 
@@ -83,12 +85,14 @@ export class FargateDriver implements EnvComputeDriver {
 
   async stopEnvironment(
     envId: string,
-    // purgeVolumes is meaningless here: task volumes are ephemeral and die
-    // with the task, so a fargate stop always "purges".
-    _options: { purgeVolumes?: boolean } = {}
+    // `purgeVolumes` is the DELETE path. A plain stop must leave EFS-backed
+    // storage alone — that is the whole point of it — but deleting the env
+    // should take its access points (and so its data) with it, or a workspace
+    // accumulates orphaned directories nobody can reach.
+    options: { purgeVolumes?: boolean } = {}
   ): Promise<void> {
     await this.setStatus(envId, "stopping", { error: null });
-    void this.stopBg(envId);
+    void this.stopBg(envId, { purgeVolumes: options.purgeVolumes === true });
   }
 
   async rebuildEnvironment(envId: string): Promise<void> {
@@ -137,6 +141,40 @@ export class FargateDriver implements EnvComputeDriver {
       const dotEnv = await this.readDotEnv(ctx.envDir);
 
       log(`[fargate] translating compose → ECS task definition…\n`);
+      // Which named volumes this compose uses — resolved by translating once
+      // with no storage, so the access points we create match exactly the
+      // volumes that will be mounted.
+      const probe = translateComposeToTaskDef({
+        composeYaml,
+        dotEnv,
+        family: this.family(envId),
+        logGroupName: conn.logGroupName!,
+        region: conn.region!,
+        executionRoleArn: conn.taskExecutionRoleArn!,
+        taskRoleArn: conn.taskRoleArn!,
+      });
+      const volumeNames = (probe.taskDefinition.volumes ?? [])
+        .map((v) => v.name)
+        .filter((n): n is string => !!n);
+
+      // One access point per volume, created on first start and reused after.
+      // Without a filesystem (a stack that predates EFS) this stays empty and
+      // the volumes remain the scratch space they always were.
+      const volumeAccessPoints: Record<string, string> = {};
+      if (conn.fileSystemId && volumeNames.length > 0) {
+        log(`[fargate] attaching persistent storage for ${volumeNames.join(", ")}\n`);
+        for (const name of volumeNames) {
+          const ap = await this.efs.ensureAccessPoint(conn, envId, name);
+          if (ap) volumeAccessPoints[name] = ap;
+        }
+      } else if (volumeNames.length > 0) {
+        log(
+          `[fargate] note: ${volumeNames.length} volume(s) are scratch space - ` +
+            `this AWS stack has no EFS filesystem, so their contents are lost when the env stops. ` +
+            `Redeploy infra/aws/withvibe-client-compute.cfn.yaml to add persistence.\n`
+        );
+      }
+
       const translated = translateComposeToTaskDef({
         composeYaml,
         dotEnv,
@@ -145,6 +183,8 @@ export class FargateDriver implements EnvComputeDriver {
         region: conn.region!,
         executionRoleArn: conn.taskExecutionRoleArn!,
         taskRoleArn: conn.taskRoleArn!,
+        fileSystemId: conn.fileSystemId,
+        volumeAccessPoints,
       });
       for (const note of translated.notes) log(`[fargate] note: ${note}\n`);
 
@@ -269,7 +309,7 @@ export class FargateDriver implements EnvComputeDriver {
 
   private async stopBg(
     envId: string,
-    opts: { silent?: boolean } = {}
+    opts: { silent?: boolean; purgeVolumes?: boolean } = {}
   ): Promise<void> {
     const log = (line: string) => this.logBuffer.push(envId, line);
     try {
@@ -294,6 +334,20 @@ export class FargateDriver implements EnvComputeDriver {
             this.logger.warn(`[fargate] StopTask(${envId}): ${this.errMsg(err)}`);
           });
       }
+      if (opts.purgeVolumes && env) {
+        try {
+          const conn = await this.connections.getVerified(env.workspaceId);
+          const n = await this.efs.deleteForEnv(conn, envId);
+          if (n > 0) log(`[fargate] removed ${n} persistent volume(s)\n`);
+        } catch (err) {
+          // Never let storage cleanup block a delete; the env row going away
+          // matters more than a leftover directory.
+          this.logger.warn(
+            `[fargate] purge volumes for ${envId}: ${this.errMsg(err)}`
+          );
+        }
+      }
+
       // Drop the Traefik route; serviceUrls stay (the hostnames are stable
       // and come back alive on the next start).
       await this.traefik.removeEnvRoutes(envId);

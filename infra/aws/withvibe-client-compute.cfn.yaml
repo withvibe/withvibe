@@ -120,6 +120,54 @@ Resources:
           CidrIp: "0.0.0.0/0"
       Tags: [{ Key: Name, Value: withvibe-sandbox }]
 
+  # ------------------------------------------------------------------- efs
+  # Persistent storage for sandbox environments. A Fargate task volume is
+  # discarded when the task stops, so without this an environment loses its
+  # database the moment it is stopped - including by the platform's own idle
+  # timeout. One filesystem serves the whole cluster; each environment gets its
+  # own access point, which pins a POSIX uid/gid and a subdirectory, so one
+  # sandbox cannot read another's files even though they share the filesystem.
+  SandboxFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - { Key: Name, Value: withvibe-sandbox }
+      # Move anything untouched for a month to infrequent access, and bring it
+      # back on first read. Sandboxes are bursty by nature.
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+        - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
+
+  # NFS is reachable only from inside the VPC, and only from the sandbox SG.
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: WithVibe sandbox EFS - NFS from sandbox tasks only
+      VpcId: !Ref SandboxVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref SandboxSecurityGroup
+      Tags: [{ Key: Name, Value: withvibe-sandbox-efs }]
+
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref SandboxFileSystem
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroups: [!Ref EfsSecurityGroup]
+
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref SandboxFileSystem
+      SubnetId: !Ref PublicSubnetB
+      SecurityGroups: [!Ref EfsSecurityGroup]
+
   # ------------------------------------------------------------------- ecs
   Cluster:
     Type: AWS::ECS::Cluster
@@ -171,6 +219,21 @@ Resources:
                   - ssmmessages:OpenControlChannel
                   - ssmmessages:OpenDataChannel
                 Resource: "*"
+        - PolicyName: efs-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Scoped to this stack's filesystem, and only through an access
+              # point - which is what confines a task to its own subdirectory.
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                Resource: !GetAtt SandboxFileSystem.Arn
+                Condition:
+                  StringEquals:
+                    elasticfilesystem:AccessPointArn:
+                      - !Sub "arn:aws:elasticfilesystem:${AWS::Region}:${AWS::AccountId}:access-point/*"
 
   # ------------------------------------------------- platform access role
   # The only thing the WithVibe platform can assume. Scoped to: run/stop/
@@ -226,6 +289,24 @@ Resources:
                     ecs:CreateAction:
                       - RunTask
                       - RegisterTaskDefinition
+              # One access point per environment, created at first start and
+              # deleted with the env. Create is filesystem-scoped; delete and
+              # describe can't be (the access point arn isn't known until it
+              # exists) so they are gated on the withvibe-env tag instead.
+              - Sid: EnvAccessPointsOnSandboxFs
+                Effect: Allow
+                Action: elasticfilesystem:CreateAccessPoint
+                Resource: !GetAtt SandboxFileSystem.Arn
+              - Sid: ManageEnvAccessPoints
+                Effect: Allow
+                Action:
+                  - elasticfilesystem:DeleteAccessPoint
+                  - elasticfilesystem:DescribeAccessPoints
+                  - elasticfilesystem:TagResource
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    elasticfilesystem:FileSystemId: !Ref SandboxFileSystem
               - Sid: PassOnlySandboxRoles
                 Effect: Allow
                 Action: iam:PassRole
@@ -270,6 +351,11 @@ Outputs:
   TaskExecutionRoleArn:
     Value: !GetAtt TaskExecutionRole.Arn
     Export: { Name: WithVibe-TaskExecutionRoleArn }
+  FileSystemId:
+    Description: EFS filesystem backing persistent env storage
+    Value: !Ref SandboxFileSystem
+    Export: { Name: WithVibe-FileSystemId }
+
   TaskRoleArn:
     Value: !GetAtt TaskRole.Arn
     Export: { Name: WithVibe-TaskRoleArn }

@@ -16,6 +16,16 @@ const EXPORTS = {
   taskRole: "WithVibe-TaskRoleArn",
 } as const;
 
+/**
+ * Exports added after the first release. A stack that predates them verifies
+ * fine and simply goes without the feature, so an operator is never forced to
+ * redeploy to keep working.
+ */
+const OPTIONAL_EXPORTS = {
+  /** EFS filesystem for persistent env storage; absent = ephemeral volumes. */
+  fileSystem: "WithVibe-FileSystemId",
+} as const;
+
 const ROLE_ARN_RE = /^arn:aws:iam::\d{12}:role\/[\w+=,.@/-]+$/;
 const REGION_RE = /^[a-z]{2}(-[a-z]+)+-\d$/;
 
@@ -152,6 +162,9 @@ export class AwsConnectionService {
           logGroupName: found.get(EXPORTS.logGroup),
           taskExecutionRoleArn: found.get(EXPORTS.taskExecutionRole),
           taskRoleArn: found.get(EXPORTS.taskRole),
+          // Optional: null here means this stack has no EFS, which the driver
+          // reads as "this env's volumes stay ephemeral".
+          fileSystemId: found.get(OPTIONAL_EXPORTS.fileSystem) ?? null,
           status: "ok",
           lastError: null,
           lastVerifiedAt: new Date(),
@@ -189,6 +202,7 @@ export class AwsConnectionService {
         logGroupName: null,
         taskExecutionRoleArn: null,
         taskRoleArn: null,
+        fileSystemId: null,
         status: "pending",
         lastError: null,
         lastVerifiedAt: null,

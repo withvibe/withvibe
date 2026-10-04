@@ -4,6 +4,7 @@ import { ECSClient } from "@aws-sdk/client-ecs";
 import { EC2Client } from "@aws-sdk/client-ec2";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { CloudWatchLogsClient } from "@aws-sdk/client-cloudwatch-logs";
+import { EFSClient } from "@aws-sdk/client-efs";
 import { fromTemporaryCredentials } from "@aws-sdk/credential-providers";
 import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 
@@ -33,6 +34,7 @@ export class AwsClientsService {
       ec2: EC2Client;
       cfn: CloudFormationClient;
       logs: CloudWatchLogsClient;
+      efs: EFSClient;
     }
   >();
   private platformAccountId: string | null = null;
@@ -91,6 +93,7 @@ export class AwsClientsService {
       ec2: new EC2Client(config),
       cfn: new CloudFormationClient(config),
       logs: new CloudWatchLogsClient(config),
+      efs: new EFSClient(config),
     };
     this.cache.set(key, built);
     return built;
