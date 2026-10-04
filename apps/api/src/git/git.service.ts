@@ -4,14 +4,18 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import Anthropic from "@anthropic-ai/sdk";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
+import { FargateExecService } from "../compute/fargate/fargate-exec.service";
+import { GitProxyService } from "../git-proxy/git-proxy.service";
+import {
+  HostGitTarget,
+  SandboxGitTarget,
+  sandboxRepoPath,
+  type GitRepoTarget,
+} from "./git-exec";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
-
-const exec = promisify(execFile);
 
 type RepoStatus = {
   envRepoId: string;
@@ -78,8 +82,47 @@ export class GitService {
     @InjectPinoLogger(GitService.name)
     private readonly logger: PinoLogger,
     private readonly prisma: PrismaService,
-    private readonly access: WorkspaceAccessService
+    private readonly access: WorkspaceAccessService,
+    private readonly bridge: FargateExecService,
+    private readonly gitProxy: GitProxyService
   ) {}
+
+  /**
+   * Resolve where this repository's git commands should run, or null when it
+   * is not reachable at all.
+   *
+   * For a local env that means the host clone being ready. For a Fargate env
+   * it means the task being up: the clone lives inside it, so a stopped
+   * sandbox has no repository to talk to — which is the honest answer, not an
+   * error, and is why every caller treats null as "not ready yet" rather than
+   * as a failure.
+   */
+  private async targetFor(
+    er: {
+      envId: string;
+      envClonePath: string | null;
+      envCloneStatus: string;
+      repo: { name: string };
+    },
+    userId: string
+  ): Promise<GitRepoTarget | null> {
+    const env = await this.prisma.client.env.findUnique({
+      where: { id: er.envId },
+      select: { computeTarget: true, containerStatus: true },
+    });
+    if (env?.computeTarget === "fargate") {
+      if (env.containerStatus !== "running") return null;
+      return new SandboxGitTarget(
+        sandboxRepoPath(er.repo.name),
+        (job) => this.bridge.execStream(er.envId, job),
+        // Scoped to the person who asked, so a push from the git panel is
+        // attributed to them rather than to whoever started the env.
+        this.gitProxy.gitConfigEnvFor(er.envId, userId)
+      );
+    }
+    if (!er.envClonePath || er.envCloneStatus !== "ready") return null;
+    return new HostGitTarget(er.envClonePath);
+  }
 
   // ---- helpers --------------------------------------------------------
 
@@ -130,6 +173,22 @@ export class GitService {
     }
   }
 
+  /**
+   * Why a repository has no target. The two causes are completely different
+   * from where the user is standing — a clone that has not finished versus a
+   * sandbox that is switched off — and "Env clone not ready" explained
+   * neither.
+   */
+  private async notReadyMessage(er: { envId: string }): Promise<string> {
+    const env = await this.prisma.client.env.findUnique({
+      where: { id: er.envId },
+      select: { computeTarget: true },
+    });
+    return env?.computeTarget === "fargate"
+      ? "This environment isn't running, so its repositories aren't available. Start the environment and try again."
+      : "This repository isn't ready yet — its clone hasn't finished.";
+  }
+
   private parseGithubUrl(url: string): GithubLocator | null {
     // matches https://github.com/owner/repo(.git) or git@github.com:owner/repo(.git)
     const m =
@@ -138,29 +197,26 @@ export class GitService {
     return { owner: m[1], repo: m[2] };
   }
 
+  // Every git operation in this service goes through here, which is what makes
+  // "the repo is on the host" and "the repo is inside a Fargate task" a
+  // difference of one object rather than a difference of thirteen endpoints.
   private async run(
-    cwd: string,
+    git: GitRepoTarget,
     args: string[],
-    timeoutMs = 30_000,
-    env?: Record<string, string>
+    timeoutMs = 30_000
   ): Promise<string> {
-    const { stdout } = await exec("git", ["-C", cwd, ...args], {
-      timeout: timeoutMs,
-      maxBuffer: 50 * 1024 * 1024, // 50 MB — big diffs
-      env: env ? { ...process.env, ...env } : process.env,
-    });
-    return stdout;
+    return git.run(args, { timeoutMs });
   }
 
   // Treats fatal errors as soft failures so status can still report when
   // a repo isn't initialized/ready yet.
   private async tryRun(
-    cwd: string,
+    git: GitRepoTarget,
     args: string[],
     timeoutMs = 30_000
   ): Promise<string | null> {
     try {
-      return await this.run(cwd, args, timeoutMs);
+      return await this.run(git, args, timeoutMs);
     } catch {
       return null;
     }
@@ -176,7 +232,7 @@ export class GitService {
   ): Promise<RepoStatus> {
     await this.assertEnv(userId, workspaceId, envId);
     const er = await this.loadEnvRepo(envId, envRepoId);
-    return this.computeStatus(er);
+    return this.computeStatus(er, userId);
   }
 
   async envSummary(userId: string, workspaceId: string, envId: string) {
@@ -193,7 +249,7 @@ export class GitService {
     ]);
     const repos: RepoStatus[] = [];
     for (const er of ers) {
-      repos.push(await this.computeStatus(er));
+      repos.push(await this.computeStatus(er, userId));
     }
     return {
       repos,
@@ -201,14 +257,19 @@ export class GitService {
     };
   }
 
-  private async computeStatus(er: {
-    id: string;
-    branch: string | null;
-    baseBranch: string | null;
-    envClonePath: string | null;
-    envCloneStatus: string;
-    repo: { name: string; url: string };
-  }): Promise<RepoStatus> {
+  private async computeStatus(
+    er: {
+      id: string;
+      envId: string;
+      branch: string | null;
+      baseBranch: string | null;
+      envClonePath: string | null;
+      envCloneStatus: string;
+      repo: { name: string; url: string };
+    },
+    userId: string
+  ): Promise<RepoStatus> {
+    const git = await this.targetFor(er, userId);
     const locator = this.parseGithubUrl(er.repo.url);
     const branchUrl =
       locator && er.branch
@@ -222,8 +283,11 @@ export class GitService {
       branch: er.branch,
       baseBranch: er.baseBranch,
       branchUrl,
-      envCloneStatus: er.envCloneStatus,
-      ready: er.envCloneStatus === "ready" && Boolean(er.envClonePath),
+      // On a Fargate env the host-clone fields are meaningless — the only
+      // clone is the one inside the task — so report what is actually true of
+      // the repository the user is looking at.
+      envCloneStatus: git?.kind === "sandbox" ? "ready" : er.envCloneStatus,
+      ready: Boolean(git),
       dirty: false,
       staged: 0,
       unstaged: 0,
@@ -233,10 +297,9 @@ export class GitService {
       hasRemote: false,
       files: [],
     };
-    if (!base.ready || !er.envClonePath) return base;
+    if (!git) return base;
 
-    const cwd = er.envClonePath;
-    const porcelain = await this.tryRun(cwd, ["status", "--porcelain=v1"]);
+    const porcelain = await this.tryRun(git, ["status", "--porcelain=v1"]);
     if (porcelain == null) return base;
 
     const files: RepoStatus["files"] = [];
@@ -261,7 +324,7 @@ export class GitService {
     //      rather than a named remote).
     //   3. `origin/<base>` — last-resort fallback so a never-pushed branch
     //      still reports its commits-vs-base count.
-    const upstream = await this.tryRun(cwd, [
+    const upstream = await this.tryRun(git, [
       "rev-parse",
       "--abbrev-ref",
       "--symbolic-full-name",
@@ -273,7 +336,7 @@ export class GitService {
       compareRef = upstream.trim();
       remoteKnown = true;
     } else if (er.branch) {
-      const sameName = await this.tryRun(cwd, [
+      const sameName = await this.tryRun(git, [
         "rev-parse",
         "--verify",
         "-q",
@@ -289,7 +352,7 @@ export class GitService {
     }
 
     if (compareRef) {
-      const counts = await this.tryRun(cwd, [
+      const counts = await this.tryRun(git, [
         "rev-list",
         "--left-right",
         "--count",
@@ -316,16 +379,16 @@ export class GitService {
   ): Promise<{ text: string; baseRef: string }> {
     await this.assertEnv(userId, workspaceId, envId);
     const er = await this.loadEnvRepo(envId, envRepoId);
-    if (!er.envClonePath || er.envCloneStatus !== "ready") {
+    const git = await this.targetFor(er, userId);
+    if (!git) {
       return { text: "", baseRef: "" };
     }
-    const cwd = er.envClonePath;
     const baseRef = er.baseBranch ? `origin/${er.baseBranch}` : "HEAD";
     // Only currently-uncommitted changes: working tree vs HEAD + untracked.
     // Committed-since-base lives in the History view, not the diff.
     const working =
-      (await this.tryRun(cwd, ["diff", "HEAD", "--no-color"])) ?? "";
-    const untracked = await this.untrackedAsDiff(cwd);
+      (await this.tryRun(git, ["diff", "HEAD", "--no-color"])) ?? "";
+    const untracked = await this.untrackedAsDiff(git);
     const combined = [working, untracked].filter(Boolean).join("\n");
     // git diff drops content for some file kinds (binaries, mode-only changes,
     // some symlink swaps) — they appear in `git status` but produce no
@@ -333,7 +396,7 @@ export class GitService {
     // status against the produced diff and synthesize placeholder blocks for
     // anything missing, so the file shows up in the diff list (with an
     // empty-hunks "No preview" body on the FE).
-    const placeholders = await this.synthesizeMissingDiffEntries(cwd, combined);
+    const placeholders = await this.synthesizeMissingDiffEntries(git, combined);
     const text = placeholders ? `${combined}\n${placeholders}` : combined;
     return { text, baseRef };
   }
@@ -345,10 +408,10 @@ export class GitService {
    * renders an explanatory empty-state instead of silently hiding the file.
    */
   private async synthesizeMissingDiffEntries(
-    cwd: string,
+    git: GitRepoTarget,
     existingDiff: string
   ): Promise<string> {
-    const porcelain = await this.tryRun(cwd, ["status", "--porcelain=v1"]);
+    const porcelain = await this.tryRun(git, ["status", "--porcelain=v1"]);
     if (!porcelain) return "";
 
     // Paths that already appear in the diff text (extracted from
@@ -390,8 +453,8 @@ export class GitService {
       .join("\n");
   }
 
-  private async untrackedAsDiff(cwd: string): Promise<string> {
-    const lsFiles = await this.tryRun(cwd, [
+  private async untrackedAsDiff(git: GitRepoTarget): Promise<string> {
+    const lsFiles = await this.tryRun(git, [
       "ls-files",
       "--others",
       "--exclude-standard",
@@ -404,7 +467,7 @@ export class GitService {
     if (paths.length === 0) return "";
     const parts: string[] = [];
     for (const p of paths) {
-      const piece = await this.tryRun(cwd, [
+      const piece = await this.tryRun(git, [
         "diff",
         "--no-index",
         "--no-color",
@@ -435,13 +498,13 @@ export class GitService {
   }> {
     await this.assertEnv(userId, workspaceId, envId);
     const er = await this.loadEnvRepo(envId, envRepoId);
-    if (!er.envClonePath || er.envCloneStatus !== "ready" || !er.baseBranch) {
+    const git = await this.targetFor(er, userId);
+    if (!git || !er.baseBranch) {
       return { commits: [] };
     }
-    const cwd = er.envClonePath;
     // NUL separator between records + ASCII Unit Separator (\x1f) between
     // fields so commit subjects containing any other char pass through clean.
-    const raw = await this.tryRun(cwd, [
+    const raw = await this.tryRun(git, [
       "log",
       `origin/${er.baseBranch}..HEAD`,
       "--pretty=format:%H%x1f%h%x1f%an%x1f%at%x1f%s%x00",
@@ -482,36 +545,34 @@ export class GitService {
   ) {
     await this.assertEnv(userId, workspaceId, envId);
     const er = await this.loadEnvRepo(envId, envRepoId);
-    if (!er.envClonePath || er.envCloneStatus !== "ready") {
-      throw new BadRequestException("Env clone not ready");
-    }
+    const git = await this.targetFor(er, userId);
+    if (!git) throw new BadRequestException(await this.notReadyMessage(er));
     const trimmed = message.trim();
     if (!trimmed) throw new BadRequestException("Commit message required");
 
-    const cwd = er.envClonePath;
     const safePaths = paths && paths.length > 0
-      ? await this.validatePathsFromStatus(cwd, paths)
+      ? await this.validatePathsFromStatus(git, paths)
       : null;
 
     if (safePaths) {
       // Partial commit: stage only the requested paths (includes untracked
       // and tracked-but-deleted). `-A` scopes the stage to those paths.
-      await this.run(cwd, ["add", "-A", "--", ...safePaths]);
+      await this.run(git, ["add", "-A", "--", ...safePaths]);
     } else {
-      await this.run(cwd, ["add", "-A"]);
+      await this.run(git, ["add", "-A"]);
     }
 
-    const status = await this.tryRun(cwd, ["status", "--porcelain"]);
+    const status = await this.tryRun(git, ["status", "--porcelain"]);
     if (!status || !status.trim()) {
       throw new BadRequestException("Nothing to commit");
     }
-    await this.ensureCommitterIdentity(cwd, userId);
+    await this.ensureCommitterIdentity(git, userId);
     if (safePaths) {
-      await this.run(cwd, ["commit", "-m", trimmed, "--", ...safePaths]);
+      await this.run(git, ["commit", "-m", trimmed, "--", ...safePaths]);
     } else {
-      await this.run(cwd, ["commit", "-m", trimmed]);
+      await this.run(git, ["commit", "-m", trimmed]);
     }
-    const sha = (await this.run(cwd, ["rev-parse", "HEAD"])).trim();
+    const sha = (await this.run(git, ["rev-parse", "HEAD"])).trim();
     return { ok: true, sha };
   }
 
@@ -519,10 +580,10 @@ export class GitService {
   // Prevents flag-injection ("-foo"), directory-escape ("../x"), or committing
   // paths the user shouldn't be able to touch via this endpoint.
   private async validatePathsFromStatus(
-    cwd: string,
+    git: GitRepoTarget,
     requested: string[]
   ): Promise<string[]> {
-    const porcelain = await this.tryRun(cwd, ["status", "--porcelain=v1"]);
+    const porcelain = await this.tryRun(git, ["status", "--porcelain=v1"]);
     const known = new Set<string>();
     if (porcelain) {
       for (const line of porcelain.split("\n")) {
@@ -560,21 +621,26 @@ export class GitService {
     const results: { envRepoId: string; name: string; ok: boolean; sha?: string; error?: string }[] =
       [];
     for (const er of ers) {
-      if (!er.envClonePath) {
-        results.push({ envRepoId: er.id, name: er.repo.name, ok: false, error: "no env clone" });
+      const git = await this.targetFor(er, userId);
+      if (!git) {
+        results.push({
+          envRepoId: er.id,
+          name: er.repo.name,
+          ok: false,
+          error: await this.notReadyMessage(er),
+        });
         continue;
       }
       try {
-        const cwd = er.envClonePath;
-        await this.run(cwd, ["add", "-A"]);
-        const status = await this.tryRun(cwd, ["status", "--porcelain"]);
+        await this.run(git, ["add", "-A"]);
+        const status = await this.tryRun(git, ["status", "--porcelain"]);
         if (!status || !status.trim()) {
           results.push({ envRepoId: er.id, name: er.repo.name, ok: true });
           continue;
         }
-        await this.ensureCommitterIdentity(cwd, userId);
-        await this.run(cwd, ["commit", "-m", trimmed]);
-        const sha = (await this.run(cwd, ["rev-parse", "HEAD"])).trim();
+        await this.ensureCommitterIdentity(git, userId);
+        await this.run(git, ["commit", "-m", trimmed]);
+        const sha = (await this.run(git, ["rev-parse", "HEAD"])).trim();
         results.push({ envRepoId: er.id, name: er.repo.name, ok: true, sha });
       } catch (err) {
         results.push({
@@ -588,7 +654,7 @@ export class GitService {
     return { results };
   }
 
-  private async ensureCommitterIdentity(cwd: string, userId: string) {
+  private async ensureCommitterIdentity(git: GitRepoTarget, userId: string) {
     const user = await this.prisma.client.user.findUnique({
       where: { id: userId },
       select: { name: true, email: true },
@@ -596,8 +662,8 @@ export class GitService {
     const name = user?.name || user?.email?.split("@")[0] || "withvibe";
     const email = user?.email || `${userId}@withvibe.local`;
     // Local-only git identity — never overrides system config outside this repo.
-    await this.tryRun(cwd, ["config", "user.name", name]);
-    await this.tryRun(cwd, ["config", "user.email", email]);
+    await this.tryRun(git, ["config", "user.name", name]);
+    await this.tryRun(git, ["config", "user.email", email]);
   }
 
   // ---- push -----------------------------------------------------------
@@ -610,29 +676,44 @@ export class GitService {
   ) {
     await this.assertEnv(userId, workspaceId, envId);
     const er = await this.loadEnvRepo(envId, envRepoId);
-    if (!er.envClonePath || er.envCloneStatus !== "ready" || !er.branch) {
-      throw new BadRequestException("Env clone not ready");
+    const git = await this.targetFor(er, userId);
+    if (!git || !er.branch) {
+      throw new BadRequestException(await this.notReadyMessage(er));
     }
     await this.assertNotProtectedBranch(workspaceId, er.branch, er.baseBranch);
-    const token = await this.workspaceGithubToken(workspaceId);
-    if (!token) {
-      throw new BadRequestException(
-        "No GitHub token configured for this workspace"
-      );
+
+    // Who holds the credential is the one real difference between the two
+    // targets. On the host we inject the workspace's GitHub token into the
+    // remote URL for this one command. In a sandbox we must not: the token
+    // would be handed to infrastructure we do not control, which is the exact
+    // thing the git proxy exists to prevent. There, `origin` already points at
+    // the proxy and the credential is the per-(env, user) token in the
+    // command's environment — so the push is also attributed to the person who
+    // clicked, rather than to whoever owns the shared token.
+    let destination = "origin";
+    let token: string | null = null;
+    if (git.kind === "host") {
+      token = await this.workspaceGithubToken(workspaceId);
+      if (!token) {
+        throw new BadRequestException(
+          "No GitHub token configured for this workspace"
+        );
+      }
+      const remoteUrl = await this.run(git, [
+        "config",
+        "--get",
+        "remote.origin.url",
+      ]);
+      const authedUrl = this.injectTokenIntoRemote(remoteUrl.trim(), token);
+      if (!authedUrl) throw new BadRequestException("Unsupported remote URL");
+      destination = authedUrl;
     }
-    const remoteUrl = await this.run(er.envClonePath, [
-      "config",
-      "--get",
-      "remote.origin.url",
-    ]);
-    const authedUrl = this.injectTokenIntoRemote(remoteUrl.trim(), token);
-    if (!authedUrl) throw new BadRequestException("Unsupported remote URL");
 
     try {
-      await this.run(er.envClonePath, [
+      await this.run(git, [
         "push",
         "--set-upstream",
-        authedUrl,
+        destination,
         `HEAD:refs/heads/${er.branch}`,
       ], 120_000);
       // Wire up the named-remote tracking ref so later ahead/behind checks
@@ -642,16 +723,14 @@ export class GitService {
       // SHA we just pushed (HEAD) and point the local branch's upstream at
       // that named ref. No network needed. Soft-fail — a successful push
       // shouldn't turn into an error if these cleanup steps hiccup.
-      const headSha = (
-        await this.tryRun(er.envClonePath, ["rev-parse", "HEAD"])
-      )?.trim();
+      const headSha = (await this.tryRun(git, ["rev-parse", "HEAD"]))?.trim();
       if (headSha) {
-        await this.tryRun(er.envClonePath, [
+        await this.tryRun(git, [
           "update-ref",
           `refs/remotes/origin/${er.branch}`,
           headSha,
         ]);
-        await this.tryRun(er.envClonePath, [
+        await this.tryRun(git, [
           "branch",
           "--set-upstream-to",
           `origin/${er.branch}`,
@@ -661,7 +740,7 @@ export class GitService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // Strip the token from any error message so it can't leak to the client.
-      const safe = msg.replace(token, "***");
+      const safe = token ? msg.split(token).join("***") : msg;
       throw new BadRequestException(`Push failed: ${safe}`);
     }
   }
@@ -736,6 +815,7 @@ export class GitService {
     workspaceId: string,
     er: {
       id: string;
+      envId: string;
       branch: string | null;
       baseBranch: string | null;
       envClonePath: string | null;
@@ -756,12 +836,13 @@ export class GitService {
       stashRestored: false,
       backupRef: null,
     };
-    if (!er.envClonePath || er.envCloneStatus !== "ready" || !er.branch) {
+    const git = await this.targetFor(er, userId);
+    if (!git || !er.branch) {
       return {
         ...base,
         needsAttention: {
           kind: "no-remote",
-          message: "This repository isn't ready to pull yet.",
+          message: await this.notReadyMessage(er),
           suggestedActions: [
             {
               id: "ask-devops",
@@ -797,72 +878,79 @@ export class GitService {
       };
     }
 
-    const cwd = er.envClonePath;
     const branch = er.branch;
 
-    const token = await this.workspaceGithubToken(workspaceId);
-    if (!token) {
-      return {
-        ...base,
-        needsAttention: {
-          kind: "no-remote",
-          message: "No GitHub token is configured for this workspace.",
-          suggestedActions: [
-            {
-              id: "open-settings",
-              label: "Open workspace settings",
-              description: "Add a GitHub token under Workspace → Settings.",
-            },
-          ],
-        },
-      };
-    }
-    const remoteUrl = (
-      await this.tryRun(cwd, ["config", "--get", "remote.origin.url"])
-    )?.trim();
-    if (!remoteUrl) {
-      return {
-        ...base,
-        needsAttention: {
-          kind: "no-remote",
-          message: "This repository doesn't have a GitHub remote configured.",
-          suggestedActions: [
-            {
-              id: "ask-devops",
-              label: "Ask DevOps agent",
-              description: "The DevOps agent can wire up the remote for you.",
-            },
-          ],
-        },
-      };
-    }
-    const authedUrl = this.injectTokenIntoRemote(remoteUrl, token);
-    if (!authedUrl) {
-      return {
-        ...base,
-        needsAttention: {
-          kind: "no-remote",
-          message: "The repository's remote URL isn't a recognized GitHub URL.",
-          suggestedActions: [
-            {
-              id: "ask-devops",
-              label: "Ask DevOps agent",
-              description: "The DevOps agent can help fix the remote URL.",
-            },
-          ],
-        },
-      };
+    // Same split as push: on the host the workspace token goes into the URL
+    // for this one fetch; in a sandbox it must never travel there, and
+    // `origin` already points at the git proxy.
+    let source = "origin";
+    let token: string | null = null;
+    if (git.kind === "host") {
+      token = await this.workspaceGithubToken(workspaceId);
+      if (!token) {
+        return {
+          ...base,
+          needsAttention: {
+            kind: "no-remote",
+            message: "No GitHub token is configured for this workspace.",
+            suggestedActions: [
+              {
+                id: "open-settings",
+                label: "Open workspace settings",
+                description: "Add a GitHub token under Workspace → Settings.",
+              },
+            ],
+          },
+        };
+      }
+      const remoteUrl = (
+        await this.tryRun(git, ["config", "--get", "remote.origin.url"])
+      )?.trim();
+      if (!remoteUrl) {
+        return {
+          ...base,
+          needsAttention: {
+            kind: "no-remote",
+            message: "This repository doesn't have a GitHub remote configured.",
+            suggestedActions: [
+              {
+                id: "ask-devops",
+                label: "Ask DevOps agent",
+                description: "The DevOps agent can wire up the remote for you.",
+              },
+            ],
+          },
+        };
+      }
+      const authedUrl = this.injectTokenIntoRemote(remoteUrl, token);
+      if (!authedUrl) {
+        return {
+          ...base,
+          needsAttention: {
+            kind: "no-remote",
+            message: "The repository's remote URL isn't a recognized GitHub URL.",
+            suggestedActions: [
+              {
+                id: "ask-devops",
+                label: "Ask DevOps agent",
+                description: "The DevOps agent can help fix the remote URL.",
+              },
+            ],
+          },
+        };
+      }
+      source = authedUrl;
     }
 
     // Backup ref BEFORE any mutation. Lives under refs/withvibe-backup/ so it
     // doesn't pollute tag listings and is easy to clean up later.
-    const headSha = (await this.tryRun(cwd, ["rev-parse", "HEAD"]))?.trim();
+    const headSha = (await this.tryRun(git, ["rev-parse", "HEAD"]))?.trim();
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backupRef = headSha
       ? `refs/withvibe-backup/pre-pull/${stamp}`
       : null;
     if (headSha && backupRef) {
-      await this.tryRun(cwd, ["update-ref", backupRef, headSha]);
+      await this.tryRun(git, ["update-ref", backupRef, headSha]);
       base.backupRef = backupRef;
     }
 
@@ -870,13 +958,13 @@ export class GitService {
     // status calls resolve ahead/behind correctly.
     try {
       await this.run(
-        cwd,
-        ["fetch", authedUrl, `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+        git,
+        ["fetch", source, `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
         120_000
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const safe = msg.replace(token, "***");
+      const safe = token ? msg.split(token).join("***") : msg;
       return {
         ...base,
         needsAttention: {
@@ -903,12 +991,12 @@ export class GitService {
     // ---- DISCARD MODE: reset to remote, drop everything ----
     if (mode === "discard") {
       try {
-        await this.run(cwd, ["reset", "--hard", remoteRef]);
-        await this.tryRun(cwd, ["clean", "-fd"]);
+        await this.run(git, ["reset", "--hard", remoteRef]);
+        await this.tryRun(git, ["clean", "-fd"]);
         const newHead = (
-          await this.tryRun(cwd, ["rev-parse", "HEAD"])
+          await this.tryRun(git, ["rev-parse", "HEAD"])
         )?.trim();
-        const pulled = await this.countCommitsBetween(cwd, headSha, newHead);
+        const pulled = await this.countCommitsBetween(git, headSha, newHead);
         return {
           ...base,
           ok: true,
@@ -941,7 +1029,7 @@ export class GitService {
     // ---- AUTO-STASH MODE ----
 
     // Bail out cheap if there's nothing to pull.
-    const counts = await this.tryRun(cwd, [
+    const counts = await this.tryRun(git, [
       "rev-list",
       "--left-right",
       "--count",
@@ -965,12 +1053,12 @@ export class GitService {
 
     // Stash dirty/untracked changes if any, before merging.
     const dirty = (
-      await this.tryRun(cwd, ["status", "--porcelain=v1"])
+      await this.tryRun(git, ["status", "--porcelain=v1"])
     )?.trim();
     let stashed = false;
     if (dirty) {
       const stashMsg = `withvibe pre-pull ${stamp}`;
-      const stashOut = await this.tryRun(cwd, [
+      const stashOut = await this.tryRun(git, [
         "stash",
         "push",
         "-u",
@@ -992,10 +1080,10 @@ export class GitService {
     let conflictedFiles: string[] = [];
     try {
       if (ahead === 0) {
-        await this.run(cwd, ["merge", "--ff-only", remoteRef]);
+        await this.run(git, ["merge", "--ff-only", remoteRef]);
       } else {
-        await this.ensureCommitterIdentity(cwd, userId);
-        await this.run(cwd, [
+        await this.ensureCommitterIdentity(git, userId);
+        await this.run(git, [
           "merge",
           "--no-edit",
           "-m",
@@ -1006,7 +1094,7 @@ export class GitService {
       mergedCleanly = true;
     } catch (err) {
       // Capture conflicted files BEFORE aborting — abort wipes them.
-      const unmerged = await this.tryRun(cwd, [
+      const unmerged = await this.tryRun(git, [
         "diff",
         "--name-only",
         "--diff-filter=U",
@@ -1017,14 +1105,14 @@ export class GitService {
           .map((s) => s.trim())
           .filter(Boolean);
       }
-      await this.tryRun(cwd, ["merge", "--abort"]);
+      await this.tryRun(git, ["merge", "--abort"]);
       // Restore the user's stash so they're back to where they started.
       if (stashed) {
-        const popped = await this.tryRun(cwd, ["stash", "pop"]);
+        const popped = await this.tryRun(git, ["stash", "pop"]);
         base.stashRestored = popped !== null;
       }
       const errMsg = err instanceof Error ? err.message : String(err);
-      const safe = errMsg.replace(token, "***");
+      const safe = token ? errMsg.split(token).join("***") : errMsg;
       return {
         ...base,
         error: safe.slice(0, 300),
@@ -1061,11 +1149,11 @@ export class GitService {
     let stashPopConflicted = false;
     if (stashed && mergedCleanly) {
       try {
-        await this.run(cwd, ["stash", "pop"]);
+        await this.run(git, ["stash", "pop"]);
         base.stashRestored = true;
       } catch {
         stashPopConflicted = true;
-        const unmerged = await this.tryRun(cwd, [
+        const unmerged = await this.tryRun(git, [
           "diff",
           "--name-only",
           "--diff-filter=U",
@@ -1079,8 +1167,8 @@ export class GitService {
       }
     }
 
-    const newHead = (await this.tryRun(cwd, ["rev-parse", "HEAD"]))?.trim();
-    const pulled = await this.countCommitsBetween(cwd, headSha, newHead);
+    const newHead = (await this.tryRun(git, ["rev-parse", "HEAD"]))?.trim();
+    const pulled = await this.countCommitsBetween(git, headSha, newHead);
 
     if (stashPopConflicted) {
       return {
@@ -1127,15 +1215,14 @@ export class GitService {
   ): Promise<{ ok: boolean; restoredTo: string | null; message?: string }> {
     await this.assertEnv(userId, workspaceId, envId);
     const er = await this.loadEnvRepo(envId, envRepoId);
-    if (!er.envClonePath || er.envCloneStatus !== "ready") {
-      throw new BadRequestException("Env clone not ready");
-    }
+    const git = await this.targetFor(er, userId);
+    if (!git) throw new BadRequestException(await this.notReadyMessage(er));
     // Only allow refs we created — block arbitrary input.
     if (!/^refs\/withvibe-backup\/pre-pull\/[A-Za-z0-9._-]+$/.test(backupRef)) {
       throw new BadRequestException("Invalid backup reference");
     }
     const sha = (
-      await this.tryRun(er.envClonePath, ["rev-parse", "--verify", backupRef])
+      await this.tryRun(git, ["rev-parse", "--verify", backupRef])
     )?.trim();
     if (!sha) {
       return {
@@ -1145,7 +1232,7 @@ export class GitService {
       };
     }
     try {
-      await this.run(er.envClonePath, ["reset", "--hard", sha]);
+      await this.run(git, ["reset", "--hard", sha]);
       return { ok: true, restoredTo: sha };
     } catch (err) {
       throw new BadRequestException(
@@ -1155,12 +1242,12 @@ export class GitService {
   }
 
   private async countCommitsBetween(
-    cwd: string,
+    git: GitRepoTarget,
     from: string | null | undefined,
     to: string | null | undefined
   ): Promise<number> {
     if (!from || !to || from === to) return 0;
-    const out = await this.tryRun(cwd, [
+    const out = await this.tryRun(git, [
       "rev-list",
       "--count",
       `${from}..${to}`,
