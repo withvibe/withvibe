@@ -399,6 +399,13 @@ model Env {
   // which case lastContainerAt is the clock.
   lastActivityAt   DateTime?
   composeFile      String?
+  // EnvSpec this env was built from, when it was authored as a spec. The
+  // compiled result lives in composeFile above; editing the spec recompiles.
+  serviceSpec      Json?
+  // Credentials the compiler generated for managed services, keyed by
+  // service name. Persisted rather than re-derived so recompiling a spec
+  // never changes a password out from under a running database.
+  specSecrets      Json?
   assetFiles       Json?         // [{path, content}] — materialized under envDir alongside the compose
   template         EnvTemplate?  @relation(fields: [templateId], references: [id], onDelete: SetNull)
   templateId       String?
@@ -786,6 +793,11 @@ model EnvTemplate {
   name        String
   description String?
   composeFile String    // docker-compose.yml with ${VAR} placeholders
+  // EnvSpec (apps/api/src/env-spec/env-spec.ts) when the template is
+  // authored as a service spec rather than raw compose. When set it is the
+  // source of truth and composeFile is compiled from it per env, because
+  // the compilation depends on the env's compute target.
+  serviceSpec Json?
   variables   Json      // TemplateVariable[] — see apps/api/src/templates/template.types.ts
   routingMode       RoutingMode @default(port)
   routingBaseDomain String?     // used when routingMode = subdomain; e.g. "localhost" or "envs.example.com"

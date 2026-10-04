@@ -20,6 +20,7 @@ import { AgentSeedModule } from "./agents/agent-seed.module";
 import { EnvsModule } from "./envs/envs.module";
 import { DockerModule } from "./docker/docker.module";
 import { ComputeModule } from "./compute/compute.module";
+import { EnvSpecModule } from "./env-spec/env-spec.module";
 import { PortsModule } from "./ports/ports.module";
 import { TemplatesModule } from "./templates/templates.module";
 import { AgentsModule } from "./agents/agents.module";
@@ -109,6 +110,7 @@ import { RequestContextInterceptor } from "./common/request-context.interceptor"
     EnvsModule,
     DockerModule,
     ComputeModule,
+    EnvSpecModule,
     AgentsModule,
     ChatModule,
     TerminalModule,

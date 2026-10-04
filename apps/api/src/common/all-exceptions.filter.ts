@@ -28,16 +28,31 @@ export class AllExceptionsFilter implements ExceptionFilter {
       ? exception.getStatus()
       : HttpStatus.INTERNAL_SERVER_ERROR;
 
+    const httpBody = isHttp ? exception.getResponse() : null;
+
     const message = isHttp
-      ? (() => {
-          const r = exception.getResponse();
-          return typeof r === "string"
-            ? r
-            : ((r as { message?: string }).message ?? exception.message);
-        })()
+      ? typeof httpBody === "string"
+        ? httpBody
+        : ((httpBody as { message?: string }).message ?? exception.message)
       : exception instanceof Error
         ? exception.message
         : String(exception);
+
+    /**
+     * Extra fields a thrower attached to a structured HttpException body —
+     * e.g. the full list of problems in an environment spec. Without this the
+     * client gets one sentence and has to fix mistakes one round-trip at a
+     * time. `statusCode`/`message` are dropped because this object is merged
+     * UNDER the canonical ones below.
+     */
+    const details =
+      httpBody && typeof httpBody === "object" && !Array.isArray(httpBody)
+        ? Object.fromEntries(
+            Object.entries(httpBody as Record<string, unknown>).filter(
+              ([k]) => k !== "statusCode" && k !== "message" && k !== "error"
+            )
+          )
+        : {};
 
     const context = `${req.method} ${req.url}`;
 
@@ -51,6 +66,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     }
 
     res.status(status).json({
+      ...details,
       statusCode: status,
       message,
       path: req.url,

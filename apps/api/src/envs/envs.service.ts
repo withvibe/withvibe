@@ -9,6 +9,7 @@ import { promisify } from "util";
 
 const execGit = promisify(execFile);
 import {
+  Prisma,
   type EnvStatus,
   type ChatEngine,
   type QaBrowserMode,
@@ -18,6 +19,8 @@ import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { DemoModeService } from "../common/demo-mode.service";
 import { SaasModeService } from "../common/saas-mode.service";
+import { EnvSpecService } from "../env-spec/env-spec.service";
+import { SERVICE_PRESETS } from "../env-spec/service-presets";
 import { EnvCloneService } from "../env-clones/env-clone.service";
 import { AgentSeedService } from "../agents/agent-seed.service";
 import { EnvComputeService } from "../compute/env-compute.service";
@@ -77,6 +80,7 @@ export class EnvsService {
     private readonly access: WorkspaceAccessService,
     private readonly demo: DemoModeService,
     private readonly saas: SaasModeService,
+    private readonly envSpec: EnvSpecService,
     private readonly envClones: EnvCloneService,
     private readonly agentSeed: AgentSeedService,
     private readonly compute: EnvComputeService,
@@ -173,6 +177,13 @@ export class EnvsService {
       containerError: env.containerError,
       lastContainerAt: env.lastContainerAt,
       composeFile: env.composeFile,
+      // Present only for spec-authored envs. The UI edits this and lets the
+      // compose file be read-only; a null spec means the compose was written
+      // by hand and is the source of truth.
+      serviceSpec: env.serviceSpec ?? null,
+      // Credentials the compiler invented. This is the only place a user can
+      // discover the password of a database they never configured.
+      specCredentials: this.readSpecCredentials(env.specSecrets, env.serviceSpec),
       assetFiles: this.readAssetMeta(env.assetFiles),
       detectedDatabases: env.detectedDatabases,
       dbViewerPort: env.dbViewerPort,
@@ -307,6 +318,7 @@ export class EnvsService {
       routingBaseDomain?: unknown;
       qaBrowserMode?: unknown;
       computeTarget?: unknown;
+      serviceSpec?: unknown;
     }
   ) {
     await this.access.member(userId, workspaceId);
@@ -322,13 +334,23 @@ export class EnvsService {
         ? body.composeFile
         : null;
 
+    // An authored service spec. Compiled into composeFile below, once the
+    // compute target is resolved — the compilation depends on it.
+    const userServiceSpec =
+      body.serviceSpec === undefined || body.serviceSpec === null
+        ? null
+        : this.envSpec.parse(body.serviceSpec);
+
     const templateId =
       typeof body.templateId === "string" && body.templateId.trim()
         ? body.templateId.trim()
         : null;
-    if (templateId && userComposeFile) {
+    const sources = [templateId, userComposeFile, userServiceSpec].filter(
+      (s) => s !== null
+    ).length;
+    if (sources > 1) {
       throw new BadRequestException(
-        "Provide either a template or a custom compose file, not both"
+        "Provide exactly one of: a template, a custom compose file, or a service spec"
       );
     }
 
@@ -511,9 +533,25 @@ export class EnvsService {
       }
     }
 
+    // Compile the spec now that the target is known: the generated compose
+    // differs between targets (peer addressing above all), and the target is
+    // fixed for the life of the env, so compiling once at creation is correct.
+    const compiledSpec = userServiceSpec
+      ? this.envSpec.compile({ spec: userServiceSpec, target: computeTarget })
+      : null;
+    if (compiledSpec) {
+      // The generated file still goes through the same gate a hand-written
+      // one does. The compiler is trusted, but "trusted" is not a thing the
+      // security boundary should have to know about.
+      this.assertComposeOrBadRequest(compiledSpec.composeYaml);
+    }
+
     this.logger.info(
       `Creating env "${title}" in workspace ${workspaceId} by user ${userId}` +
-        (repos.length > 0 ? ` with ${repos.length} repo(s)` : "")
+        (repos.length > 0 ? ` with ${repos.length} repo(s)` : "") +
+        (compiledSpec
+          ? ` from a service spec (${Object.keys(userServiceSpec!.services).length} service(s))`
+          : "")
     );
 
     const env = await this.prisma.client.env.create({
@@ -521,7 +559,13 @@ export class EnvsService {
         workspaceId,
         title,
         description,
-        composeFile: userComposeFile,
+        composeFile: compiledSpec?.composeYaml ?? userComposeFile,
+        ...(userServiceSpec
+          ? {
+              serviceSpec: userServiceSpec as unknown as object,
+              specSecrets: compiledSpec!.secrets as unknown as object,
+            }
+          : {}),
         templateId,
         templateVars: templateVars as unknown as object,
         routingMode,
@@ -900,6 +944,7 @@ export class EnvsService {
       qaBrowserMode?: unknown;
       modelChoice?: unknown;
       sandboxBypass?: unknown;
+      serviceSpec?: unknown;
     }
   ) {
     await this.access.member(userId, workspaceId);
@@ -928,6 +973,8 @@ export class EnvsService {
       qaBrowserMode?: QaBrowserMode;
       modelChoice?: string | null;
       sandboxBypass?: boolean | null;
+      serviceSpec?: object | typeof Prisma.DbNull;
+      specSecrets?: object | typeof Prisma.DbNull;
     } = {};
     if (typeof body.title === "string" && body.title.trim()) {
       data.title = body.title.trim();
@@ -941,12 +988,47 @@ export class EnvsService {
     ) {
       data.status = body.status as EnvStatus;
     }
-    if (body.composeFile === null) {
+    // Editing the spec recompiles it into composeFile. Existing credentials
+    // are carried through: the database container was initialized with the old
+    // password, so rotating it on an edit would look exactly like data loss.
+    if (body.serviceSpec !== undefined) {
+      if (body.composeFile !== undefined) {
+        throw new BadRequestException(
+          "Edit either the service spec or the compose file, not both"
+        );
+      }
+      if (body.serviceSpec === null) {
+        data.serviceSpec = Prisma.DbNull;
+        data.specSecrets = Prisma.DbNull;
+      } else {
+        const spec = this.envSpec.parse(body.serviceSpec);
+        const compiled = this.envSpec.compile({
+          spec,
+          target: existing.computeTarget,
+          existingSecrets: this.envSpec.asSecrets(existing.specSecrets),
+        });
+        this.assertComposeOrBadRequest(compiled.composeYaml);
+        data.serviceSpec = spec as unknown as object;
+        data.specSecrets = compiled.secrets as unknown as object;
+        data.composeFile = compiled.composeYaml;
+      }
+    } else if (body.composeFile === null) {
       data.composeFile = null;
+      // Hand-editing the compose detaches it from the spec that generated it;
+      // keeping the spec would make the UI show something that is no longer
+      // what runs.
+      if (existing.serviceSpec !== null) {
+        data.serviceSpec = Prisma.DbNull;
+        data.specSecrets = Prisma.DbNull;
+      }
     } else if (typeof body.composeFile === "string") {
       data.composeFile = body.composeFile.trim() ? body.composeFile : null;
       if (typeof data.composeFile === "string")
         this.assertComposeOrBadRequest(data.composeFile);
+      if (existing.serviceSpec !== null) {
+        data.serviceSpec = Prisma.DbNull;
+        data.specSecrets = Prisma.DbNull;
+      }
     }
     if (
       typeof body.chatEngine === "string" &&
@@ -1329,6 +1411,42 @@ export class EnvsService {
         ? rr.baseBranch.trim()
         : null;
     return { id: rr.id, baseBranch };
+  }
+
+  /**
+   * Credentials to show for a spec-authored env, recomposed from the stored
+   * secrets plus the spec's own choices (user/database names are authored,
+   * passwords are generated). Returns null for a hand-written compose env,
+   * which has no generated credentials to report.
+   */
+  private readSpecCredentials(
+    secrets: unknown,
+    specValue: unknown
+  ): Record<string, Record<string, string>> | null {
+    const stored = this.envSpec.asSecrets(secrets);
+    if (!stored || !specValue) return null;
+    let spec;
+    try {
+      spec = this.envSpec.asSpec(specValue);
+    } catch {
+      // A spec that no longer parses (hand-edited in the DB, or written by an
+      // older version) must not break the env detail page.
+      return null;
+    }
+    if (!spec) return null;
+    const out: Record<string, Record<string, string>> = {};
+    for (const [service, purposes] of Object.entries(stored)) {
+      const svc = spec.services[service];
+      if (!svc?.type) continue;
+      const preset = SERVICE_PRESETS[svc.type];
+      if (!preset.hasCredentials) continue;
+      out[service] = {
+        user: svc.user ?? preset.defaultUser ?? "app",
+        database: svc.database ?? preset.defaultDatabase ?? "app",
+        password: purposes.password ?? "",
+      };
+    }
+    return Object.keys(out).length > 0 ? out : null;
   }
 
   private readAssetMeta(raw: unknown): EnvAssetMeta[] {
