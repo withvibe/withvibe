@@ -40,8 +40,20 @@ function env(
   return { id, containerStatus, deletedAt, fargateTaskArn };
 }
 
+const OURS = "deploy-ours";
+const THEIRS = "deploy-theirs";
+
+// Tasks started by THIS deployment unless stated otherwise.
 const tasks = (...ids: string[]) =>
-  new Map(ids.map((id) => [id, `arn:aws:ecs:::task/${id}`]));
+  new Map(
+    ids.map((id) => [
+      id,
+      { taskArn: `arn:aws:ecs:::task/${id}`, deploymentId: OURS },
+    ])
+  );
+
+const taskFrom = (id: string, deploymentId: string | null) =>
+  new Map([[id, { taskArn: `arn:aws:ecs:::task/${id}`, deploymentId }]]);
 
 // ---------- isLiveStatus -----------------------------------------------------
 
@@ -59,6 +71,7 @@ expect(
 {
   const d = diffTasksVsEnvs({
     liveTasks: tasks("e1"),
+    deploymentId: OURS,
     envs: [env("e1", "running")],
   });
   expect(
@@ -73,6 +86,7 @@ expect(
 {
   const d = diffTasksVsEnvs({
     liveTasks: tasks("e1"),
+    deploymentId: OURS,
     envs: [env("e1", "stopped")],
   });
   expect(
@@ -88,6 +102,7 @@ expect(
   // task. The reaper has to catch that even after the DB has forgotten.
   const d = diffTasksVsEnvs({
     liveTasks: tasks("e1"),
+    deploymentId: OURS,
     envs: [env("e1", "running", new Date())],
   });
   expect(
@@ -97,7 +112,11 @@ expect(
 }
 
 {
-  const d = diffTasksVsEnvs({ liveTasks: tasks("gone"), envs: [] });
+  const d = diffTasksVsEnvs({
+    liveTasks: tasks("gone"),
+    envs: [],
+    deploymentId: OURS,
+  });
   expect(
     "task with no env row at all → orphan",
     JSON.stringify(d.orphanEnvIds) === JSON.stringify(["gone"])
@@ -109,6 +128,7 @@ expect(
 {
   const d = diffTasksVsEnvs({
     liveTasks: tasks(),
+    deploymentId: OURS,
     envs: [env("e1", "running")],
   });
   expect(
@@ -121,6 +141,7 @@ expect(
 {
   const d = diffTasksVsEnvs({
     liveTasks: tasks(),
+    deploymentId: OURS,
     envs: [env("e1", "stopped"), env("e2", "error")],
   });
   expect(
@@ -136,6 +157,7 @@ expect(
   // self-inflicted race that kills the env the user just asked for.
   const d = diffTasksVsEnvs({
     liveTasks: tasks(),
+    deploymentId: OURS,
     envs: [env("e1", "starting", null, null)],
   });
   expect(
@@ -150,6 +172,7 @@ expect(
   // genuinely gone, so this one really is a ghost.
   const d = diffTasksVsEnvs({
     liveTasks: tasks(),
+    deploymentId: OURS,
     envs: [env("e1", "starting")],
   });
   expect(
@@ -161,6 +184,7 @@ expect(
 {
   const d = diffTasksVsEnvs({
     liveTasks: tasks(),
+    deploymentId: OURS,
     envs: [env("e1", "running", new Date())],
   });
   expect(
@@ -174,6 +198,7 @@ expect(
 {
   const d = diffTasksVsEnvs({
     liveTasks: tasks("keep", "orphan"),
+    deploymentId: OURS,
     envs: [
       env("keep", "running"),
       env("orphan", "stopped"),
@@ -225,6 +250,78 @@ expect(
   "no timestamps at all → idle",
   isIdle({ lastActivityAt: null, lastContainerAt: null }, cutoff)
 );
+
+// ---------- multi-deployment safety ----------------------------------------
+// The bug this prevents: a laptop dev server and the production server both
+// connect to the SAME client AWS account, so each sees the other's tasks as
+// "an env I've never heard of" and stops it mid-session.
+
+{
+  const d = diffTasksVsEnvs({
+    liveTasks: taskFrom("their-env", THEIRS),
+    envs: [],
+    deploymentId: OURS,
+  });
+  expect(
+    "unknown env tagged for ANOTHER deployment is never stopped",
+    d.orphanEnvIds.length === 0 &&
+      JSON.stringify(d.foreignEnvIds) === JSON.stringify(["their-env"]),
+    JSON.stringify(d)
+  );
+}
+
+{
+  const d = diffTasksVsEnvs({
+    liveTasks: taskFrom("untagged-env", null),
+    envs: [],
+    deploymentId: OURS,
+  });
+  expect(
+    "unknown env with NO deployment tag is left alone, not reaped",
+    d.orphanEnvIds.length === 0 &&
+      JSON.stringify(d.foreignEnvIds) === JSON.stringify(["untagged-env"]),
+    JSON.stringify(d)
+  );
+}
+
+{
+  const d = diffTasksVsEnvs({
+    liveTasks: taskFrom("gone", OURS),
+    envs: [],
+    deploymentId: OURS,
+  });
+  expect(
+    "unknown env tagged as OURS is still reaped (a genuine orphan)",
+    JSON.stringify(d.orphanEnvIds) === JSON.stringify(["gone"]) &&
+      d.foreignEnvIds.length === 0
+  );
+}
+
+{
+  // Our own env, stopped in our DB, but the task was started by the other
+  // deployment: our DB row is authoritative for an env we own.
+  const d = diffTasksVsEnvs({
+    liveTasks: taskFrom("e1", THEIRS),
+    envs: [env("e1", "stopped")],
+    deploymentId: OURS,
+  });
+  expect(
+    "a KNOWN env is judged by our DB regardless of the tag",
+    JSON.stringify(d.orphanEnvIds) === JSON.stringify(["e1"])
+  );
+}
+
+{
+  const d = diffTasksVsEnvs({
+    liveTasks: taskFrom("e1", THEIRS),
+    envs: [env("e1", "running")],
+    deploymentId: OURS,
+  });
+  expect(
+    "a known RUNNING env is never stopped, whatever the tag says",
+    d.orphanEnvIds.length === 0
+  );
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

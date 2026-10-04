@@ -23,6 +23,7 @@ import { EnvLogBufferService } from "../env-log-buffer.service";
 import { AwsClientsService } from "./aws-clients.service";
 import { AwsConnectionService } from "./aws-connection.service";
 import { TraefikDynamicService } from "./traefik-dynamic.service";
+import { DEPLOYMENT_TAG_KEY, deploymentId } from "./deployment-id";
 import {
   FargateExecService,
   FARGATE_BRIDGE_PORT,
@@ -182,7 +183,12 @@ export class FargateDriver implements EnvComputeDriver {
               assignPublicIp: "ENABLED",
             },
           },
-          tags: [{ key: "withvibe-env", value: envId }],
+          tags: [
+            { key: "withvibe-env", value: envId },
+            // Which control plane owns this task. The reaper refuses to stop
+            // a task tagged for a different deployment — see deployment-id.ts.
+            { key: DEPLOYMENT_TAG_KEY, value: deploymentId() },
+          ],
         })
       );
       const failure = run.failures?.[0];

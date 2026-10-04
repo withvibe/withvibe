@@ -13,7 +13,12 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { EnvComputeService } from "../env-compute.service";
 import { AwsClientsService } from "./aws-clients.service";
 import { TraefikDynamicService } from "./traefik-dynamic.service";
-import { diffTasksVsEnvs, isIdle } from "./fargate-reap-logic";
+import {
+  diffTasksVsEnvs,
+  isIdle,
+  type LiveTask,
+} from "./fargate-reap-logic";
+import { DEPLOYMENT_TAG_KEY, deploymentId } from "./deployment-id";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 /** Prefix FargateDriver stamps on RunTask's `startedBy`, followed by the env id. */
@@ -115,7 +120,7 @@ export class FargateReaperService
 
     for (const conn of conns) {
       if (!conn.clusterArn || !conn.roleArn || !conn.region) continue;
-      let live: Map<string, string>;
+      let live: Map<string, LiveTask>;
       try {
         live = await this.liveTasksByEnv(conn);
       } catch (err) {
@@ -136,14 +141,20 @@ export class FargateReaperService
           fargateTaskArn: true,
         },
       });
-      const { orphanEnvIds, ghostEnvIds } = diffTasksVsEnvs({
+      const { orphanEnvIds, ghostEnvIds, foreignEnvIds } = diffTasksVsEnvs({
         liveTasks: live,
         envs,
+        deploymentId: deploymentId(),
       });
+      if (foreignEnvIds.length > 0) {
+        this.logger.info(
+          `[fargate-reaper] left ${foreignEnvIds.length} task(s) alone - they belong to another withvibe deployment sharing this cluster`
+        );
+      }
 
       // ECS says running, we don't → orphan. Bills until stopped.
       for (const envId of orphanEnvIds) {
-        const taskArn = live.get(envId)!;
+        const taskArn = live.get(envId)!.taskArn;
         try {
           await this.stopTask(conn, taskArn, "withvibe reaper: orphaned task");
           orphansStopped++;
@@ -237,7 +248,7 @@ export class FargateReaperService
    */
   private async liveTasksByEnv(
     conn: AwsComputeConnection
-  ): Promise<Map<string, string>> {
+  ): Promise<Map<string, LiveTask>> {
     const { ecs } = this.clients(conn);
     const arns: string[] = [];
     let nextToken: string | undefined;
@@ -253,18 +264,29 @@ export class FargateReaperService
       nextToken = page.nextToken;
     } while (nextToken);
 
-    const out = new Map<string, string>();
+    const out = new Map<string, LiveTask>();
     // DescribeTasks caps at 100 per call.
     for (let i = 0; i < arns.length; i += 100) {
       const chunk = arns.slice(i, i + 100);
       const described = await ecs.send(
-        new DescribeTasksCommand({ cluster: conn.clusterArn!, tasks: chunk })
+        new DescribeTasksCommand({
+          cluster: conn.clusterArn!,
+          tasks: chunk,
+          // Tags are not returned unless asked for, and the deployment tag
+          // is what keeps us from stopping another control plane's task.
+          include: ["TAGS"],
+        })
       );
       for (const task of described.tasks ?? []) {
         const startedBy = task.startedBy ?? "";
         // The client's own workloads share this cluster — never touch them.
         if (!startedBy.startsWith(STARTED_BY_PREFIX) || !task.taskArn) continue;
-        out.set(startedBy.slice(STARTED_BY_PREFIX.length), task.taskArn);
+        const tag =
+          task.tags?.find((t) => t.key === DEPLOYMENT_TAG_KEY)?.value ?? null;
+        out.set(startedBy.slice(STARTED_BY_PREFIX.length), {
+          taskArn: task.taskArn,
+          deploymentId: tag,
+        });
       }
     }
     return out;

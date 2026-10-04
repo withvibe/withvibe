@@ -15,6 +15,12 @@ export function isLiveStatus(status: string): boolean {
   );
 }
 
+export type LiveTask = {
+  taskArn: string;
+  /** Value of the withvibe-deployment tag, or null when the task carries none. */
+  deploymentId: string | null;
+};
+
 export type ReapEnvRow = {
   id: string;
   containerStatus: string;
@@ -35,17 +41,35 @@ export type ReapEnvRow = {
  *  - `ghostEnvIds`: an env we call running with no live task → mark stopped.
  */
 export function diffTasksVsEnvs(args: {
-  /** envId → taskArn for live withvibe tasks in the cluster. */
-  liveTasks: Map<string, string>;
+  /** envId → live withvibe task in the cluster. */
+  liveTasks: Map<string, LiveTask>;
   envs: ReapEnvRow[];
-}): { orphanEnvIds: string[]; ghostEnvIds: string[] } {
+  /** Identity of the deployment running this reconcile. */
+  deploymentId: string;
+}): { orphanEnvIds: string[]; ghostEnvIds: string[]; foreignEnvIds: string[] } {
   const byId = new Map(args.envs.map((e) => [e.id, e]));
   const orphanEnvIds: string[] = [];
-  for (const envId of args.liveTasks.keys()) {
+  const foreignEnvIds: string[] = [];
+  for (const [envId, task] of args.liveTasks) {
     const env = byId.get(envId);
-    const shouldBeRunning =
-      !!env && !env.deletedAt && isLiveStatus(env.containerStatus);
-    if (!shouldBeRunning) orphanEnvIds.push(envId);
+    if (env) {
+      // The env is ours. Its recorded state is authoritative, tag or not.
+      if (!env.deletedAt && isLiveStatus(env.containerStatus)) continue;
+      orphanEnvIds.push(envId);
+      continue;
+    }
+    // Unknown env. One client AWS account can be connected to several
+    // deployments (prod + staging, or a developer's laptop), and they share
+    // this cluster — so "I don't recognize this env" usually means the task
+    // belongs to somebody else's control plane, NOT that it is abandoned.
+    // Only reap it when it carries OUR deployment tag; an absent tag is
+    // likewise not ours to judge (it predates tagging, or came from a
+    // deployment that doesn't tag).
+    if (task.deploymentId && task.deploymentId === args.deploymentId) {
+      orphanEnvIds.push(envId);
+    } else {
+      foreignEnvIds.push(envId);
+    }
   }
   const ghostEnvIds = args.envs
     .filter(
@@ -59,7 +83,7 @@ export function diffTasksVsEnvs(args: {
         !args.liveTasks.has(e.id)
     )
     .map((e) => e.id);
-  return { orphanEnvIds, ghostEnvIds };
+  return { orphanEnvIds, ghostEnvIds, foreignEnvIds };
 }
 
 /**
