@@ -14,6 +14,7 @@ import {
   parseTemplateServices,
   parseTemplateVariables,
 } from "./template.types";
+import { defaultRoutingBaseDomain } from "../common/routing-base-domain";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 type AssetInput = { path: string; content: string; isTemplate?: boolean };
@@ -494,10 +495,11 @@ export class TemplatesService {
       }
     }
 
-    // If subdomain mode is set without an explicit base domain, default to
-    // "localhost" so the common dev-on-laptop path works without a second save.
+    // If subdomain mode is set without an explicit base domain, default to the
+    // install's routing domain so a template authored on a deployed server
+    // doesn't hand out dead *.localhost env URLs.
     if (out.routingMode === "subdomain" && out.routingBaseDomain === undefined) {
-      out.routingBaseDomain = "localhost";
+      out.routingBaseDomain = defaultRoutingBaseDomain();
     }
 
     if (body.qaBrowserMode !== undefined) {

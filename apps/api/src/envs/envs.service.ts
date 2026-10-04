@@ -30,6 +30,7 @@ import { ClaudeRunnerService } from "../runner/claude-runner.service";
 import { StorageService } from "../storage/storage.service";
 import { ActiveRunsService } from "../chat/active-runs.service";
 import { isModelChoice } from "../chat/models";
+import { defaultRoutingBaseDomain } from "../common/routing-base-domain";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 
 const VALID_STATUSES: EnvStatus[] = ["todo", "in_progress", "done"];
@@ -433,9 +434,9 @@ export class EnvsService {
         routingBaseDomain = null;
       }
       // Match the template-create default: subdomain without an explicit base
-      // domain falls back to "localhost".
+      // domain falls back to the install's routing domain.
       if (routingMode === "subdomain" && !routingBaseDomain) {
-        routingBaseDomain = "localhost";
+        routingBaseDomain = defaultRoutingBaseDomain();
       }
     }
 

@@ -25,6 +25,7 @@ import { SlackService } from "../slack/slack.service";
 import { DEFAULT_MODEL, isModelChoice } from "../chat/models";
 import { SlackSocketService } from "../slack/slack-socket.service";
 import { getAppVersion } from "../common/version";
+import { defaultRoutingBaseDomain } from "../common/routing-base-domain";
 
 export type CreateWorkspaceInput = {
   name: string;
@@ -120,13 +121,7 @@ const DEMO_TEMPLATE_SPECS: DemoTemplateSpec[] = [
     description: "vibe-aquarium",
     composeFile: VIBE_AQUARIUM_COMPOSE,
     routingMode: "subdomain",
-    // Self-hosters point this at their own wildcard domain via
-    // WITHVIBE_ROUTING_BASE_DOMAIN (the CLI sets it at install time). When
-    // unset we fall back to "localhost" — NOT a vendor domain — so local /
-    // from-source installs don't route env URLs at withvibe.dev. Mirrors the
-    // per-env fallback in EnvsService.
-    routingBaseDomain:
-      process.env.WITHVIBE_ROUTING_BASE_DOMAIN || "localhost",
+    routingBaseDomain: defaultRoutingBaseDomain(),
     services: [],
   },
 ];
