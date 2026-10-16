@@ -8,6 +8,14 @@ import { EFSClient } from "@aws-sdk/client-efs";
 import { fromTemporaryCredentials } from "@aws-sdk/credential-providers";
 import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 
+/**
+ * Cache-key separator. NUL, because it cannot occur in an ARN, an external
+ * id or a region name — so no value can be crafted to collide with a
+ * different triple. Named rather than inlined: a bare control character in
+ * source is invisible, and this one has to match the split in `evict`.
+ */
+const KEY_SEP = "\u0000";
+
 export type ClientAccountTarget = {
   roleArn: string;
   externalId: string;
@@ -22,8 +30,17 @@ export type ClientAccountTarget = {
  * AWS_ACCESS_KEY_ID/SECRET on the api, or an instance profile) and are only
  * ever used for sts:AssumeRole + GetCallerIdentity.
  *
- * Clients are cached per (roleArn, region); `fromTemporaryCredentials`
+ * Clients are cached per (roleArn, externalId, region); `fromTemporaryCredentials`
  * auto-refreshes the session before expiry.
+ *
+ * The externalId belongs in that key even though it never varies for a given
+ * role in practice. The CloudFormation template gives every client the same
+ * role *name*, so two workspaces pointing at one AWS account produce an
+ * identical roleArn while holding different external ids — and the stack
+ * trusts exactly one of them. Keyed without it, whichever workspace built its
+ * clients first lent its credentials to all the others, so a single workspace
+ * with a stale external id turned every workspace's AWS call into an
+ * AccessDenied until the api restarted.
  */
 @Injectable()
 export class AwsClientsService {
@@ -82,8 +99,12 @@ export class AwsClientsService {
     });
   }
 
+  private cacheKey(target: ClientAccountTarget): string {
+    return [target.roleArn, target.externalId, target.region].join(KEY_SEP);
+  }
+
   clientsFor(target: ClientAccountTarget) {
-    const key = `${target.roleArn}@${target.region}`;
+    const key = this.cacheKey(target);
     const hit = this.cache.get(key);
     if (hit) return hit;
     const credentials = this.credentialsFor(target);
@@ -99,8 +120,19 @@ export class AwsClientsService {
     return built;
   }
 
-  /** Drop cached clients (after a disconnect / role change). */
+  /**
+   * Drop cached clients (after a disconnect / role change).
+   *
+   * Every external id for this role and region goes, not just the current one:
+   * the caller is telling us the binding changed, and the entry worth dropping
+   * is precisely the one keyed by the id that is no longer in use.
+   */
   evict(target: Pick<ClientAccountTarget, "roleArn" | "region">) {
-    this.cache.delete(`${target.roleArn}@${target.region}`);
+    for (const key of [...this.cache.keys()]) {
+      const [roleArn, , region] = key.split(KEY_SEP);
+      if (roleArn === target.roleArn && region === target.region) {
+        this.cache.delete(key);
+      }
+    }
   }
 }
