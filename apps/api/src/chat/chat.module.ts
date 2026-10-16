@@ -2,6 +2,7 @@ import { Module, forwardRef } from "@nestjs/common";
 import { McpTokenModule } from "../mcp-bridge/mcp-token.module";
 import { RunnerModule } from "../runner/runner.module";
 import { EnvCloneModule } from "../env-clones/env-clone.module";
+import { GitProxyModule } from "../git-proxy/git-proxy.module";
 import { SlackModule } from "../slack/slack.module";
 import { ChatContextService } from "./chat-context.service";
 import { ChatStreamService } from "./chat-stream.service";
@@ -34,6 +35,9 @@ import { BenchController } from "./bench/bench.controller";
     McpTokenModule,
     RunnerModule,
     EnvCloneModule,
+    // Supplies the per-(env, user) git credential the engine stamps onto each
+    // turn, so the agent's git runs as whoever is speaking.
+    GitProxyModule,
     forwardRef(() => SlackModule),
   ],
   controllers: [

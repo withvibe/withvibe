@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EnvCloneService } from "../../env-clones/env-clone.service";
 import { GitProxyService } from "../../git-proxy/git-proxy.service";
+import { committerIdentity } from "../../git-proxy/github-credential";
 import { FargateExecService } from "./fargate-exec.service";
 import {
   buildRepoBootstrapScript,
@@ -49,27 +50,32 @@ export class SandboxReposService {
    *
    * The env's creator, because that is the only per-user identity available at
    * start time — nobody has acted in the env yet. Commits are attributed to
-   * them; authentication is still the workspace's GitHub token, which the
-   * proxy attaches and the sandbox never sees.
+   * them, and the proxy authenticates with *their* GitHub token: a clone at
+   * start has no acting user, so the creator stands in for one. The sandbox
+   * still never sees the token itself.
    */
   private async committerFor(envId: string) {
     const env = await this.prisma.client.env.findUnique({
       where: { id: envId },
       select: {
         createdById: true,
-        createdBy: { select: { id: true, name: true, email: true } },
+        createdBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            githubLogin: true,
+            githubUserId: true,
+          },
+        },
       },
     });
     if (!env?.createdById || !env.createdBy) return null;
-    const user = env.createdBy;
-    return {
-      userId: user.id,
-      // Same derivation as GitService.ensureCommitterIdentity, so a commit
-      // made by the agent in the sandbox is attributed exactly as one made
-      // through the git panel.
-      name: user.name || user.email?.split("@")[0] || "withvibe",
-      email: user.email || `${user.id}@withvibe.local`,
-    };
+    // Same derivation as GitService.ensureCommitterIdentity, so a commit made
+    // by the agent in the sandbox is attributed exactly as one made through the
+    // git panel — including the GitHub noreply address, when the creator has
+    // connected their account.
+    return { userId: env.createdBy.id, ...committerIdentity(env.createdBy) };
   }
 
   /**

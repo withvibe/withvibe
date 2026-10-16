@@ -66,6 +66,18 @@ model User {
   // user → workspace → server ANTHROPIC_API_KEY). Set on the /account page,
   // never in workspace settings. Stored as-is, mirroring Workspace.anthropicApiKey.
   anthropicApiKey     String?
+  // Personal GitHub token. Git work in an env authenticates with the token of
+  // whoever is doing it, not with a shared workspace one, so a push is the
+  // person's own push: their access decides what they can reach and their
+  // account is what GitHub records. Resolution is user → workspace, and for
+  // git operations a user without one is refused rather than quietly falling
+  // back to the shared token. Stored as-is, mirroring anthropicApiKey.
+  githubToken         String?
+  // Captured from GitHub when the token is set (GET /user), not typed: the
+  // committer email GitHub attributes to an account is
+  // `<id>+<login>@users.noreply.github.com`, which needs both.
+  githubLogin         String?
+  githubUserId        Int?
   createdAt           DateTime          @default(now())
 
   memberships     WorkspaceMember[]

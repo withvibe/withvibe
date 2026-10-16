@@ -24,6 +24,7 @@ export class AccountController {
       bio?: unknown;
       defaultWorkspaceId?: unknown;
       anthropicApiKey?: unknown;
+      githubToken?: unknown;
     }
   ) {
     return this.account.update(user.id, body);

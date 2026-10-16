@@ -9,6 +9,7 @@ import {
   fargateApiBaseUrl,
 } from "../compute/fargate/fargate-exec.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
+import { GitProxyService } from "../git-proxy/git-proxy.service";
 import { PluginMcpBridgeService } from "../plugins/plugin-mcp-bridge.service";
 import type { ChatContext } from "./chat-context.service";
 import type { ChatEvent } from "./chat-stream.service";
@@ -122,7 +123,8 @@ export class ClaudeCodeEngineService {
     private readonly runner: ClaudeRunnerService,
     private readonly fargateExec: FargateExecService,
     private readonly envClones: EnvCloneService,
-    private readonly pluginMcp: PluginMcpBridgeService
+    private readonly pluginMcp: PluginMcpBridgeService,
+    private readonly gitProxy: GitProxyService
   ) {}
 
   /**
@@ -259,6 +261,18 @@ export class ClaudeCodeEngineService {
     if (isFargate) {
       // The key was baked into the runner container's environment at task
       // start — never send it over the bridge connection per-turn.
+      //
+      // Git, though, IS scoped per turn. The container-level GIT_CONFIG_* was
+      // stamped at task start with the env's creator, because that is the only
+      // identity that exists before anyone has acted. Overriding it here binds
+      // this turn's git to whoever is actually speaking: their GitHub token
+      // decides what the agent can reach, and their account is what a push is
+      // recorded against. GIT_CONFIG_* applies to the whole process tree, so it
+      // covers every git command the agent runs during the turn.
+      Object.assign(
+        execEnv,
+        this.gitProxy.gitConfigEnvFor(context.envId, context.speakerUserId)
+      );
     } else if (key) {
       if (key.startsWith("sk-ant-oat")) {
         execEnv.CLAUDE_CODE_OAUTH_TOKEN = key;

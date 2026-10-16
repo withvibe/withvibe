@@ -8,6 +8,11 @@ import * as https from "https";
 import type { Request, Response } from "express";
 import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
 import { PrismaService } from "../prisma/prisma.service";
+import {
+  personalCredential,
+  missingCredentialMessage,
+  type GitHubCredential,
+} from "./github-credential";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { fargateApiBaseUrl } from "../compute/fargate/fargate-exec.service";
 import { mintGitProxyToken, verifyGitProxyToken, tokenFromAuthHeader } from "./git-proxy-token";
@@ -56,7 +61,7 @@ type ResolvedRequest = {
   repoName: string;
   /** Upstream repository, normalised to https and without credentials. */
   upstream: URL;
-  credential: string | null;
+  credential: GitHubCredential | null;
   policy: PushPolicy;
 };
 
@@ -232,8 +237,18 @@ export class GitProxyService {
 
     const workspace = await this.prisma.client.workspace.findUnique({
       where: { id: env.workspaceId },
-      select: { githubToken: true, protectBaseBranch: true },
+      select: { protectBaseBranch: true },
     });
+
+    // The token in the request names a person, and this is that person's git
+    // work — so it goes out with their GitHub token. Not the workspace's: a
+    // shared token would give them whatever access it has rather than their
+    // own, and record every push against the same account.
+    const user = await this.prisma.client.user.findUnique({
+      where: { id: claims.userId },
+      select: { githubToken: true, githubLogin: true, githubUserId: true },
+    });
+    const credential = personalCredential({ user, workspace: null });
 
     return {
       envId,
@@ -241,7 +256,7 @@ export class GitProxyService {
       workspaceId: env.workspaceId,
       repoName,
       upstream: toHttpsRemote(envRepo.repo.url),
-      credential: workspace?.githubToken || process.env.GITHUB_TOKEN || null,
+      credential,
       policy: {
         protectBaseBranch: Boolean(workspace?.protectBaseBranch),
         baseBranch: envRepo.baseBranch,
@@ -268,7 +283,9 @@ export class GitProxyService {
       if (typeof value === "string") headers[name] = value;
     }
     if (resolved.credential) {
-      const basic = Buffer.from(`x-access-token:${resolved.credential}`).toString("base64");
+      const basic = Buffer.from(
+        `x-access-token:${resolved.credential.token}`
+      ).toString("base64");
       headers.authorization = `Basic ${basic}`;
     }
 
@@ -304,10 +321,7 @@ export class GitProxyService {
           if (status === 401 && !resolved.credential) {
             upstreamRes.resume();
             res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
-            res.end(
-              `${url.host} requires authentication, but this workspace has no ` +
-                `GitHub token configured. Add one under Workspace -> Settings.\n`
-            );
+            res.end(`${missingCredentialMessage(url.host)}\n`);
             resolve();
             return;
           }

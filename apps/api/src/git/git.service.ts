@@ -9,6 +9,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
 import { FargateExecService } from "../compute/fargate/fargate-exec.service";
 import { GitProxyService } from "../git-proxy/git-proxy.service";
+import { committerIdentity } from "../git-proxy/github-credential";
 import {
   HostGitTarget,
   SandboxGitTarget,
@@ -660,10 +661,21 @@ export class GitService {
   private async ensureCommitterIdentity(git: GitRepoTarget, userId: string) {
     const user = await this.prisma.client.user.findUnique({
       where: { id: userId },
-      select: { name: true, email: true },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        githubLogin: true,
+        githubUserId: true,
+      },
     });
-    const name = user?.name || user?.email?.split("@")[0] || "withvibe";
-    const email = user?.email || `${userId}@withvibe.local`;
+    // A user who has connected their GitHub account commits under the address
+    // GitHub attributes to it, so the commit shows up as theirs there and not
+    // only in `git log`. Shared derivation with the sandbox clone, so a commit
+    // the agent makes is attributed exactly like one made from the git panel.
+    const { name, email } = committerIdentity(
+      user ?? { id: userId, name: null, email: null }
+    );
     // Local-only git identity — never overrides system config outside this repo.
     await this.tryRun(git, ["config", "user.name", name]);
     await this.tryRun(git, ["config", "user.email", email]);

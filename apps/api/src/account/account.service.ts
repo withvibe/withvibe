@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -22,6 +23,8 @@ export class AccountService {
         createdAt: true,
         defaultWorkspaceId: true,
         anthropicApiKey: true,
+        githubToken: true,
+        githubLogin: true,
       },
     });
     if (!user) throw new NotFoundException("User not found");
@@ -30,7 +33,7 @@ export class AccountService {
     });
     // Never return the raw personal key — only whether it's set and a masked
     // hint (last 4 chars) so the UI can show "sk-…abcd" without exposing it.
-    const { anthropicApiKey, ...safe } = user;
+    const { anthropicApiKey, githubToken, ...safe } = user;
     return {
       ...safe,
       isDeploymentAdmin: adminMemberships > 0,
@@ -38,6 +41,8 @@ export class AccountService {
       anthropicKeyHint: anthropicApiKey
         ? `…${anthropicApiKey.slice(-4)}`
         : null,
+      githubTokenSet: Boolean(githubToken),
+      githubTokenHint: githubToken ? `…${githubToken.slice(-4)}` : null,
     };
   }
 
@@ -49,6 +54,7 @@ export class AccountService {
       bio?: unknown;
       defaultWorkspaceId?: unknown;
       anthropicApiKey?: unknown;
+      githubToken?: unknown;
     }
   ) {
     const data: {
@@ -57,6 +63,9 @@ export class AccountService {
       bio?: string | null;
       defaultWorkspaceId?: string | null;
       anthropicApiKey?: string | null;
+      githubToken?: string | null;
+      githubLogin?: string | null;
+      githubUserId?: number | null;
     } = {};
 
     if (typeof body.name === "string") {
@@ -73,6 +82,31 @@ export class AccountService {
       } else if (typeof body.anthropicApiKey === "string") {
         const trimmed = body.anthropicApiKey.trim();
         data.anthropicApiKey = trimmed || null;
+      }
+    }
+
+    // Personal GitHub token. Unlike the Anthropic key this IS validated here,
+    // by asking GitHub who it belongs to: a token that does not work is worth
+    // saying so about immediately rather than at the next push, and the answer
+    // carries the login and numeric id that make a commit appear as this
+    // person's on GitHub rather than only in `git log`.
+    if (body.githubToken !== undefined) {
+      if (body.githubToken === null || body.githubToken === "") {
+        data.githubToken = null;
+        data.githubLogin = null;
+        data.githubUserId = null;
+      } else if (typeof body.githubToken === "string") {
+        const trimmed = body.githubToken.trim();
+        if (!trimmed) {
+          data.githubToken = null;
+          data.githubLogin = null;
+          data.githubUserId = null;
+        } else {
+          const identity = await this.resolveGithubIdentity(trimmed);
+          data.githubToken = trimmed;
+          data.githubLogin = identity.login;
+          data.githubUserId = identity.id;
+        }
       }
     }
 
@@ -108,13 +142,57 @@ export class AccountService {
         bio: true,
         defaultWorkspaceId: true,
         anthropicApiKey: true,
+        githubToken: true,
+        githubLogin: true,
       },
     });
-    const { anthropicApiKey, ...safe } = updated;
+    const { anthropicApiKey, githubToken, ...safe } = updated;
     return {
       ...safe,
       anthropicKeySet: Boolean(anthropicApiKey),
       anthropicKeyHint: anthropicApiKey ? `…${anthropicApiKey.slice(-4)}` : null,
+      githubTokenSet: Boolean(githubToken),
+      githubTokenHint: githubToken ? `…${githubToken.slice(-4)}` : null,
     };
+  }
+
+  /** Ask GitHub who a token belongs to. Throws with GitHub's own reason. */
+  private async resolveGithubIdentity(
+    token: string
+  ): Promise<{ login: string; id: number }> {
+    let res: Response;
+    try {
+      res = await fetch("https://api.github.com/user", {
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "withvibe",
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (err) {
+      throw new BadRequestException(
+        `Could not reach GitHub to check the token: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+    if (res.status === 401) {
+      throw new BadRequestException(
+        "GitHub rejected that token. Check it was copied in full and has not expired."
+      );
+    }
+    if (!res.ok) {
+      throw new BadRequestException(
+        `GitHub returned ${res.status} when checking the token.`
+      );
+    }
+    const body = (await res.json()) as { login?: unknown; id?: unknown };
+    if (typeof body.login !== "string" || typeof body.id !== "number") {
+      throw new BadRequestException(
+        "GitHub did not return an account for that token."
+      );
+    }
+    return { login: body.login, id: body.id };
   }
 }

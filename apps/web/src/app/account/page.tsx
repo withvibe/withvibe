@@ -30,6 +30,9 @@ type Account = {
   bio: string | null;
   anthropicKeySet?: boolean;
   anthropicKeyHint?: string | null;
+  githubTokenSet?: boolean;
+  githubTokenHint?: string | null;
+  githubLogin?: string | null;
 };
 
 export default function AccountPage() {
@@ -42,6 +45,8 @@ export default function AccountPage() {
   const [saving, setSaving] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [savingKey, setSavingKey] = useState(false);
+  const [githubToken, setGithubToken] = useState("");
+  const [savingGithub, setSavingGithub] = useState(false);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -75,6 +80,33 @@ export default function AccountPage() {
       toast.success("Account updated");
     } else {
       toast.error("Failed to save");
+    }
+  }
+
+  async function saveGithubToken(value: string | null) {
+    setSavingGithub(true);
+    const res = await fetch("/api/account", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ githubToken: value }),
+    });
+    setSavingGithub(false);
+    if (res.ok) {
+      const updated = await res.json();
+      setAccount(updated);
+      setGithubToken("");
+      toast.success(
+        value
+          ? updated.githubLogin
+            ? `Connected as @${updated.githubLogin}`
+            : "GitHub token saved"
+          : "GitHub token removed"
+      );
+    } else {
+      // The api checks the token with GitHub, so there is a real reason to show
+      // instead of a generic failure.
+      const err = await res.json().catch(() => null);
+      toast.error(err?.message ?? "Failed to save token");
     }
   }
 
@@ -235,6 +267,79 @@ export default function AccountPage() {
                   <p className="text-xs text-muted-foreground">
                     Stored securely and never shown again. Accepts a standard
                     key (sk-ant-api…) or an OAuth token (sk-ant-oat…).
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="font-mono text-base">GitHub</CardTitle>
+                <CardDescription>
+                  Git in an environment runs as you. Cloning, pulling and
+                  pushing use your own access token, and commits are recorded
+                  against your GitHub account — including the ones the agent
+                  makes while you’re talking to it.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {account.githubTokenSet ? (
+                  <div className="flex items-center justify-between rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+                    <span className="font-mono text-sm">
+                      {account.githubLogin ? (
+                        <>
+                          Connected as{" "}
+                          <span className="text-muted-foreground">
+                            @{account.githubLogin}
+                          </span>
+                        </>
+                      ) : (
+                        "Token set"
+                      )}{" "}
+                      <span className="text-muted-foreground">
+                        (…{account.githubTokenHint?.replace(/^…/, "")})
+                      </span>
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={savingGithub}
+                      onClick={() => saveGithubToken(null)}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-xs text-amber-500">
+                    No token set — git in an environment will refuse to reach
+                    anything private, and pushes will fail.
+                  </p>
+                )}
+                <div className="space-y-2">
+                  <Label htmlFor="githubToken">
+                    {account.githubTokenSet ? "Replace token" : "Add token"}
+                  </Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="githubToken"
+                      type="password"
+                      autoComplete="off"
+                      value={githubToken}
+                      onChange={(e) => setGithubToken(e.target.value)}
+                      placeholder="ghp_… or github_pat_…"
+                      className="font-mono"
+                    />
+                    <Button
+                      onClick={() => saveGithubToken(githubToken.trim())}
+                      disabled={savingGithub || !githubToken.trim()}
+                    >
+                      {savingGithub ? "Checking…" : "Save"}
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    A personal access token with <code>repo</code> scope. We
+                    check it with GitHub when you save it, so a wrong or expired
+                    token is reported here rather than at your next push.
                   </p>
                 </div>
               </CardContent>
