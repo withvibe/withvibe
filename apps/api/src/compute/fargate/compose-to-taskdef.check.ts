@@ -520,5 +520,85 @@ try {
   ok("a bare . is refused rather than guessed at");
 }
 
+// ---- healthcheck limits ----------------------------------------------------
+// Compose has no bounds on these; ECS does, and RegisterTaskDefinition refuses
+// the whole task definition rather than clamping. The aquarium template ships
+// retries: 60 because its dev server runs npm install on first boot.
+
+const health = translate(`
+services:
+  web:
+    image: node:20
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 5s
+      timeout: 8s
+      retries: 60
+      start_period: 30s
+`);
+const hc = health.taskDefinition.containerDefinitions?.[0]?.healthCheck;
+expect(
+  "retries above the ECS maximum are clamped to 10",
+  hc?.retries === 10,
+  JSON.stringify(hc)
+);
+expect(
+  "the grace period is bought back on start_period, not silently lost",
+  // compose asked for 30 + 60*5 = 330s; 10 retries * 5s = 50s, so 280s of
+  // start period keeps the same total.
+  hc?.startPeriod === 280,
+  JSON.stringify(hc)
+);
+expect(
+  "and the substitution is reported rather than done quietly",
+  health.notes.some((n) => n.includes("retries 60 → 10")),
+  JSON.stringify(health.notes)
+);
+
+const tight = translate(`
+services:
+  web:
+    image: node:20
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 1s
+      timeout: 1s
+      retries: 3
+`);
+const tightHc = tight.taskDefinition.containerDefinitions?.[0]?.healthCheck;
+expect(
+  "an interval below the ECS minimum is raised",
+  tightHc?.interval === 5,
+  JSON.stringify(tightHc)
+);
+expect(
+  "a timeout below the ECS minimum is raised",
+  tightHc?.timeout === 2,
+  JSON.stringify(tightHc)
+);
+expect(
+  "retries already within range are left alone",
+  tightHc?.retries === 3,
+  JSON.stringify(tightHc)
+);
+
+const huge = translate(`
+services:
+  web:
+    image: node:20
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 600s
+      timeout: 600s
+      start_period: 900s
+      retries: 3
+`);
+const hugeHc = huge.taskDefinition.containerDefinitions?.[0]?.healthCheck;
+expect(
+  "values above every ECS maximum are clamped down",
+  hugeHc?.interval === 300 && hugeHc?.timeout === 120 && hugeHc?.startPeriod === 300,
+  JSON.stringify(hugeHc)
+);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

@@ -252,7 +252,7 @@ export function translateComposeToTaskDef(
     }
 
     // ---- healthcheck ------------------------------------------------------
-    const healthCheck = readHealthcheck(raw.healthcheck);
+    const healthCheck = readHealthcheck(raw.healthcheck, name, notes);
 
     // ---- depends_on -------------------------------------------------------
     const dependsOn = readDependsOn(raw.depends_on, serviceNames, name);
@@ -580,7 +580,27 @@ function parseDurationSec(raw: unknown): number | null {
   return Math.max(1, Math.round(sec));
 }
 
-function readHealthcheck(raw: unknown): {
+/**
+ * ECS healthcheck limits. Compose has none, so a compose file written for
+ * Docker can carry values ECS refuses outright (RegisterTaskDefinition fails
+ * with "retries must be less than or equal to the maximum allowed value 10").
+ */
+const HEALTH_LIMITS = {
+  interval: { min: 5, max: 300 },
+  timeout: { min: 2, max: 120 },
+  retries: { min: 1, max: 10 },
+  startPeriod: { min: 0, max: 300 },
+} as const;
+
+function clamp(value: number, limit: { min: number; max: number }): number {
+  return Math.min(limit.max, Math.max(limit.min, value));
+}
+
+function readHealthcheck(
+  raw: unknown,
+  service: string,
+  notes: string[]
+): {
   command: string[];
   interval?: number;
   timeout?: number;
@@ -597,11 +617,63 @@ function readHealthcheck(raw: unknown): {
     command = ["CMD-SHELL", test];
   }
   if (!command || command.length === 0) return null;
-  const interval = parseDurationSec(raw.interval);
-  const timeout = parseDurationSec(raw.timeout);
-  const startPeriod = parseDurationSec(raw.start_period);
-  const retries =
+
+  const rawInterval = parseDurationSec(raw.interval);
+  const rawTimeout = parseDurationSec(raw.timeout);
+  const rawStartPeriod = parseDurationSec(raw.start_period);
+  const rawRetries =
     typeof raw.retries === "number" ? Math.round(raw.retries) : null;
+
+  const interval = rawInterval ? clamp(rawInterval, HEALTH_LIMITS.interval) : null;
+  const timeout = rawTimeout ? clamp(rawTimeout, HEALTH_LIMITS.timeout) : null;
+  const retries = rawRetries ? clamp(rawRetries, HEALTH_LIMITS.retries) : null;
+  let startPeriod = rawStartPeriod
+    ? clamp(rawStartPeriod, HEALTH_LIMITS.startPeriod)
+    : null;
+
+  // Clamping retries alone would quietly shorten how long a service is given
+  // to come up — and a container that is still installing dependencies when
+  // its grace runs out is reported UNHEALTHY, which for an essential container
+  // stops the task. So when retries are cut, buy the time back on the start
+  // period, which is what it is for. (Capped at its own ECS maximum, so a
+  // compose file asking for more than ECS can express still loses some.)
+  if (rawRetries && retries && rawRetries > retries && interval) {
+    const wanted = (rawStartPeriod ?? 0) + rawRetries * interval;
+    const have = retries * interval;
+    const compensated = clamp(wanted - have, HEALTH_LIMITS.startPeriod);
+    if (compensated > (startPeriod ?? 0)) {
+      startPeriod = compensated;
+      notes.push(
+        `service ${service}: healthcheck retries ${rawRetries} → ${retries} ` +
+          `(ECS maximum); start_period raised to ${startPeriod}s to keep roughly ` +
+          `the same ${wanted}s grace before the container counts as unhealthy`
+      );
+    }
+  } else if (rawRetries && retries && rawRetries > retries) {
+    notes.push(
+      `service ${service}: healthcheck retries ${rawRetries} → ${retries} (ECS maximum)`
+    );
+  }
+  if (rawInterval && interval && rawInterval !== interval) {
+    notes.push(
+      `service ${service}: healthcheck interval ${rawInterval}s → ${interval}s (ECS limit)`
+    );
+  }
+  if (rawTimeout && timeout && rawTimeout !== timeout) {
+    notes.push(
+      `service ${service}: healthcheck timeout ${rawTimeout}s → ${timeout}s (ECS limit)`
+    );
+  }
+  if (
+    rawStartPeriod &&
+    startPeriod === HEALTH_LIMITS.startPeriod.max &&
+    rawStartPeriod > HEALTH_LIMITS.startPeriod.max
+  ) {
+    notes.push(
+      `service ${service}: healthcheck start_period ${rawStartPeriod}s → ${startPeriod}s (ECS limit)`
+    );
+  }
+
   return {
     command,
     ...(interval ? { interval } : {}),
