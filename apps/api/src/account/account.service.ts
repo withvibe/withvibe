@@ -6,6 +6,10 @@ import {
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { parseUserProfileInput } from "../common/profile-input";
+import {
+  verifyAnthropicKey,
+  AnthropicKeyError,
+} from "../common/anthropic-key";
 
 @Injectable()
 export class AccountService {
@@ -74,14 +78,27 @@ export class AccountService {
     }
 
     // Personal Anthropic key: a non-empty string sets it, an empty string or
-    // null clears it. We don't validate the format here — Anthropic rejects a
-    // bad key at request time and the chat surfaces that error.
+    // null clears it. Checked with Anthropic before storing — a key that will
+    // not work is worth saying so about here, rather than as "AI request
+    // failed" in a chat two steps later, which names neither the key nor which
+    // of the three it was.
     if (body.anthropicApiKey !== undefined) {
       if (body.anthropicApiKey === null) {
         data.anthropicApiKey = null;
       } else if (typeof body.anthropicApiKey === "string") {
         const trimmed = body.anthropicApiKey.trim();
-        data.anthropicApiKey = trimmed || null;
+        if (!trimmed) {
+          data.anthropicApiKey = null;
+        } else {
+          try {
+            await verifyAnthropicKey(trimmed);
+          } catch (err) {
+            throw new BadRequestException(
+              err instanceof AnthropicKeyError ? err.message : String(err)
+            );
+          }
+          data.anthropicApiKey = trimmed;
+        }
       }
     }
 

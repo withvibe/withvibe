@@ -859,13 +859,32 @@ export class FargateDriver implements EnvComputeDriver {
       );
     }
 
-    // Same key routing as the chat engines: workspace key wins, sk-ant-oat*
-    // is an OAuth token. Resolved at task start; turns rely on container env.
-    const ws = await this.prisma.client.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { anthropicApiKey: true },
-    });
+    // Same key routing as the chat engines — user, then workspace, then the
+    // deployment — except that the "user" here can only be the env's creator.
+    // A turn cannot carry its own key the way it carries its own git
+    // credential: the key is baked into the container at task start and
+    // deliberately never travels over the bridge per-turn, so the identity
+    // that exists at start time is the one available. Same reasoning as the
+    // sandbox clone's committer.
+    //
+    // Reading only the workspace here used to contradict what the account page
+    // promises ("your sessions use this key in preference to the workspace
+    // key") — true for local envs, silently false for Fargate ones.
+    const [ws, creator] = await Promise.all([
+      this.prisma.client.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { anthropicApiKey: true },
+      }),
+      this.prisma.client.env.findUnique({
+        where: { id: envId },
+        select: {
+          createdById: true,
+          createdBy: { select: { anthropicApiKey: true } },
+        },
+      }),
+    ]);
     const key =
+      creator?.createdBy?.anthropicApiKey ||
       ws?.anthropicApiKey ||
       process.env.ANTHROPIC_API_KEY ||
       process.env.CLAUDE_CODE_OAUTH_TOKEN ||
@@ -888,11 +907,8 @@ export class FargateDriver implements EnvComputeDriver {
     // config means the agent's own ad-hoc `git` commands are covered too, and
     // that nothing is left behind on the EFS volume when the task dies.
     // Attributed to the env's creator — the only identity that exists before
-    // anyone has acted in the env.
-    const creator = await this.prisma.client.env.findUnique({
-      where: { id: envId },
-      select: { createdById: true },
-    });
+    // anyone has acted in the env. (Read above, alongside their Anthropic key:
+    // both answers come off the same row.)
     const gitEnv = creator?.createdById
       ? this.gitProxy.gitConfigEnvFor(envId, creator.createdById)
       : {};

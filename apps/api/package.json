@@ -23,7 +23,8 @@
     "check:git-exec": "ts-node -r tsconfig-paths/register src/git/git-exec.check.ts",
     "check:git-proxy": "ts-node -r tsconfig-paths/register src/git-proxy/git-proxy.check.ts",
     "check:aws-clients": "ts-node -r tsconfig-paths/register src/compute/fargate/aws-clients.check.ts",
-    "check:github-credential": "ts-node -r tsconfig-paths/register src/git-proxy/github-credential.check.ts"
+    "check:github-credential": "ts-node -r tsconfig-paths/register src/git-proxy/github-credential.check.ts",
+    "check:anthropic-key": "ts-node -r tsconfig-paths/register src/common/anthropic-key.check.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",

@@ -16,6 +16,10 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkspaceAccessService } from "../common/workspace-access.service";
+import {
+  verifyAnthropicKey,
+  AnthropicKeyError,
+} from "../common/anthropic-key";
 import { DemoModeService } from "../common/demo-mode.service";
 import { AgentSeedService } from "../agents/agent-seed.service";
 import { EnvCloneService } from "../env-clones/env-clone.service";
@@ -465,11 +469,26 @@ export class WorkspacesService {
     } = {};
     let slackTokenChanged = false;
 
+    // Checked against Anthropic before storing, for the same reason the Slack
+    // token below is: a key that will not work should fail here, where someone
+    // is looking at the field they just filled in, rather than as "AI request
+    // failed" in a chat — which names neither the key nor which of the three
+    // (user, workspace, deployment) was actually in play.
     if (body.anthropicApiKey !== undefined) {
-      data.anthropicApiKey =
-        typeof body.anthropicApiKey === "string" && body.anthropicApiKey.trim()
+      const raw =
+        typeof body.anthropicApiKey === "string"
           ? body.anthropicApiKey.trim()
-          : null;
+          : "";
+      if (raw) {
+        try {
+          await verifyAnthropicKey(raw);
+        } catch (err) {
+          throw new BadRequestException(
+            err instanceof AnthropicKeyError ? err.message : String(err)
+          );
+        }
+      }
+      data.anthropicApiKey = raw || null;
     }
     if (body.githubToken !== undefined) {
       data.githubToken =
