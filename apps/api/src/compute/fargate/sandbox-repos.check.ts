@@ -225,6 +225,56 @@ async function behaviourChecks() {
       (await git(clone, "log", "-1", "--pretty=%s")).stdout.trim() === "work from the sandbox"
     );
 
+    // ---- the directory inode must survive a clone -------------------------
+    // An EFS access point creates its root directory when it is created, and
+    // Fargate mounts every task volume before any container runs — so by the
+    // time this script executes, a repo a compose service mounts is already an
+    // empty, mounted directory. Replacing it (rm -rf + git clone) gives it a
+    // new inode and leaves that mount pointing at a dead one; the service then
+    // fails to start with "stale file handle", reported against whatever
+    // mountpoint it tried to create next. Cloning in place is the only version
+    // of this that works.
+    const mounted = path.join(workspace, "mounted");
+    await mkdir(mounted, { recursive: true });
+    const inodeOf = async (p: string) =>
+      (await exec("ls", ["-di", p])).stdout.trim().split(/\s+/)[0];
+    const inodeBefore = await inodeOf(mounted);
+    const intoMounted = await runWithExit(
+      [repo({ name: "mounted", remote: origin, branch: "env/m", baseBranch: "main" })],
+      ["mounted"]
+    );
+    expect(
+      "a pre-created empty directory is cloned into, not replaced",
+      intoMounted.exitCode === 0 && intoMounted.output.includes("[repo] mounted: on env/m"),
+      `exit=${intoMounted.exitCode} ${intoMounted.output}`
+    );
+    expect(
+      "and keeps its inode, so a mount of it does not go stale",
+      (await inodeOf(mounted)) === inodeBefore,
+      `${inodeBefore} -> ${await inodeOf(mounted)}`
+    );
+    expect(
+      "the clone really landed in that same directory",
+      (await readFile(path.join(mounted, "README.md"), "utf-8")).trim() === "seed"
+    );
+
+    // Same for a directory holding junk from a clone that died halfway: the
+    // contents go, the directory does not.
+    const halfway = path.join(workspace, "halfway");
+    await mkdir(halfway, { recursive: true });
+    await writeFile(path.join(halfway, "stale-junk.txt"), "left over\n");
+    const halfwayInode = await inodeOf(halfway);
+    const recovered = await runWithExit([
+      repo({ name: "halfway", remote: origin, branch: "env/h", baseBranch: "main" }),
+    ]);
+    expect(
+      "a half-written directory is recovered in place",
+      recovered.exitCode === 0 &&
+        (await inodeOf(halfway)) === halfwayInode &&
+        recovered.output.includes("[repo] halfway: on env/h"),
+      `exit=${recovered.exitCode} ${recovered.output}`
+    );
+
     // A base branch that does not exist is reported, not silently ignored.
     const bad = await run([
       repo({ name: "nope", remote: origin, branch: "env/x", baseBranch: "no-such-branch" }),

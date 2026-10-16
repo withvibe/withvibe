@@ -107,10 +107,23 @@ export function buildRepoBootstrapScript(
     '    git -C "$dir" remote set-url origin "$remote" || return 1',
     "  else",
     '    echo "[repo] $name: cloning"',
-    // Only ever remove a path that is NOT a git repository: a leftover from a
-    // clone that died halfway. Anything with a .git took the branch above.
-    '    rm -rf "$dir"',
-    '    git clone "$remote" "$dir" || return 1',
+    // Never replace the directory itself — only what is inside it.
+    //
+    // A compose service that bind-mounts this repo has it mounted from an EFS
+    // access point rooted here, and Fargate prepares every task volume at task
+    // start, before any container runs. So by the time this script executes the
+    // directory is already mounted: `rm -rf "$dir"` followed by a fresh clone
+    // would give it a new inode and leave that mount pointing at a dead one.
+    // The container then fails to start with "stale file handle" — on creating
+    // a nested mountpoint, which names the wrong thing entirely.
+    //
+    // Clearing the contents and building the repository in place keeps the
+    // inode. Only ever applied to a path with no .git: anything with one took
+    // the branch above, so a working tree is never discarded.
+    '    mkdir -p "$dir"',
+    '    find "$dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true',
+    '    git -C "$dir" init -q || return 1',
+    '    git -C "$dir" remote add origin "$remote" || return 1',
     "  fi",
     `  git -C "$dir" config user.name ${q(committer.name)}`,
     `  git -C "$dir" config user.email ${q(committer.email)}`,
