@@ -152,16 +152,35 @@ async function behaviourChecks() {
     const workspace = path.join(root, "workspace");
     await mkdir(workspace, { recursive: true });
 
-    const run = async (repos: SandboxRepo[]) => {
-      const script = buildRepoBootstrapScript(repos, COMMITTER)
+    /** Output only — the common case, where every repo is best-effort. */
+    const run = async (repos: SandboxRepo[]) => (await runWithExit(repos)).output;
+
+    /**
+     * Output plus exit code. The exit code is the contract the init container
+     * depends on: ECS starts the services that mount a repo only when this
+     * script exits zero.
+     */
+    const runWithExit = async (
+      repos: SandboxRepo[],
+      requiredRepos: string[] = []
+    ): Promise<{ output: string; exitCode: number }> => {
+      const script = buildRepoBootstrapScript(repos, COMMITTER, requiredRepos)
         // The script hardcodes /workspace; point it at the sandbox we can write.
         .split("'/workspace'")
         .join(shellQuote(workspace));
-      const { stdout, stderr } = await exec("sh", ["-c", script], {
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", HOME: root },
-        maxBuffer: 10 * 1024 * 1024,
-      });
-      return `${stdout}${stderr}`;
+      try {
+        const { stdout, stderr } = await exec("sh", ["-c", script], {
+          env: { ...process.env, GIT_TERMINAL_PROMPT: "0", HOME: root },
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        return { output: `${stdout}${stderr}`, exitCode: 0 };
+      } catch (err) {
+        const e = err as { stdout?: string; stderr?: string; code?: number };
+        return {
+          output: `${e.stdout ?? ""}${e.stderr ?? ""}`,
+          exitCode: typeof e.code === "number" ? e.code : -1,
+        };
+      }
     };
 
     const spec = repo({ name: "app", remote: origin, branch: "env/work-abc", baseBranch: "main" });
@@ -222,6 +241,66 @@ async function behaviourChecks() {
       repo({ name: "bad", remote: origin, branch: "env/y", baseBranch: "missing" }),
     ]);
     expect("a broken repo does not stop a healthy one", mixed.includes("[repo] good: on env/y"));
+
+    // ---- required repos: the init container's exit-code contract ----------
+    // A repo a compose service bind-mounts cannot be best-effort. The service
+    // depends on this script exiting zero, so a failure here has to be fatal —
+    // otherwise the container starts on an empty directory and fails in a way
+    // that no longer mentions git at all.
+
+    const requiredOk = await runWithExit(
+      [repo({ name: "mounted", remote: origin, branch: "env/z", baseBranch: "main" })],
+      ["mounted"]
+    );
+    expect(
+      "a required repo that clones exits zero",
+      requiredOk.exitCode === 0 && requiredOk.output.includes("[repo] mounted: on env/z"),
+      `exit=${requiredOk.exitCode} ${requiredOk.output}`
+    );
+
+    const requiredBad = await runWithExit(
+      [repo({ name: "mounted2", remote: origin, branch: "env/z", baseBranch: "missing" })],
+      ["mounted2"]
+    );
+    expect(
+      "a required repo that fails exits non-zero",
+      requiredBad.exitCode !== 0,
+      `exit=${requiredBad.exitCode}`
+    );
+    expect(
+      "and says why the env will not start",
+      requiredBad.output.includes("mounted by a service"),
+      requiredBad.output
+    );
+
+    // The distinction has to hold both ways round, or marking repos required
+    // would just make every clone failure fatal.
+    const optionalBad = await runWithExit(
+      [
+        repo({ name: "mountedok", remote: origin, branch: "env/z", baseBranch: "main" }),
+        repo({ name: "sidecar", remote: origin, branch: "env/z", baseBranch: "missing" }),
+      ],
+      ["mountedok"]
+    );
+    expect(
+      "a non-required repo failing alongside a required one stays non-fatal",
+      optionalBad.exitCode === 0 && optionalBad.output.includes("[repo] sidecar: FAILED"),
+      `exit=${optionalBad.exitCode} ${optionalBad.output}`
+    );
+
+    // A mount naming a repo the env does not have is a translation bug, not a
+    // runtime one — catch it while building the script, not in the sandbox.
+    let threw = false;
+    try {
+      buildRepoBootstrapScript(
+        [repo({ name: "app", remote: origin, branch: "env/z", baseBranch: "main" })],
+        COMMITTER,
+        ["absent"]
+      );
+    } catch {
+      threw = true;
+    }
+    expect("a required repo that is not attached is refused up front", threw);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -8,9 +8,13 @@ import type { RegisterTaskDefinitionCommandInput } from "@aws-sdk/client-ecs";
  * Scope (Phase 1, images-only):
  *   - `build:` is rejected: Fargate cannot build; images must come from a
  *     registry the client account can pull (public, or ECR in that account).
- *   - Bind mounts are rejected: there is no shared host filesystem — that's
- *     the whole point of the sandbox. Named volumes become task-scoped
- *     ephemeral volumes (data lives for the task, not across restarts).
+ *   - A bind mount of an env repository (`./<repo>`, optionally a subdirectory
+ *     of it) resolves to that repo's clone on the task's EFS workspace: the
+ *     task clones its own repos into /workspace, so the files a compose file
+ *     expects to find next to it genuinely exist — just not on a host. Every
+ *     other bind mount is still rejected; there is no shared host filesystem,
+ *     and that is the whole point of the sandbox. Named volumes become
+ *     task-scoped ephemeral volumes (data lives for the task, not restarts).
  *   - All containers share the task's network namespace (awsvpc), so
  *     cross-service traffic rides localhost. Compose service DNS names don't
  *     resolve, so service-name references inside environment values are
@@ -35,6 +39,26 @@ export type TranslateInput = {
   fileSystemId?: string | null;
   /** volume name -> EFS access point id. Volumes absent here stay ephemeral. */
   volumeAccessPoints?: Record<string, string>;
+  /**
+   * Directory names of the repositories attached to this env, as the task
+   * clones them under /workspace. A bind mount of one of these resolves to
+   * the clone; one of anything else cannot be satisfied and is rejected.
+   */
+  repoNames?: string[];
+};
+
+/**
+ * A bind mount that was resolved to a path inside the task's workspace. The
+ * translator is pure, so it only names the volume — the driver backs each one
+ * with an EFS access point rooted at `workspacePath`.
+ */
+export type RepoMount = {
+  /** Task volume name the container's mountPoint references. */
+  volumeName: string;
+  /** Repository this path belongs to (its directory under /workspace). */
+  repoName: string;
+  /** Path relative to the workspace root, e.g. `app` or `app/public`. */
+  workspacePath: string;
 };
 
 export type TranslateResult = {
@@ -43,6 +67,16 @@ export type TranslateResult = {
   servicePorts: Record<string, number[]>;
   /** Human-readable translation decisions worth surfacing in the env log. */
   notes: string[];
+  /** Repo-backed volumes the driver must create access points for. */
+  repoMounts: RepoMount[];
+  /**
+   * Repositories a container bind-mounts, so the clone that populates them is
+   * a hard prerequisite: a service started against an empty directory fails in
+   * ways far more confusing than a start that refuses to finish.
+   */
+  requiredRepos: string[];
+  /** Compose services that mount a repo — these wait for the clone. */
+  servicesNeedingRepos: string[];
 };
 
 // Valid Fargate cpu/memory pairs (cpu units → allowed MiB range step-checked
@@ -85,6 +119,28 @@ export function translateComposeToTaskDef(
     isRecord(doc.volumes) ? Object.keys(doc.volumes) : []
   );
   const usedVolumes = new Set<string>();
+
+  // Repo-backed bind mounts. Keyed by workspace path so two services mounting
+  // the same directory share one volume (and so one access point) instead of
+  // racing two mounts of the same inode.
+  const repoNames = input.repoNames ?? [];
+  const repoMountsByPath = new Map<string, RepoMount>();
+  const requiredRepos = new Set<string>();
+  const servicesNeedingRepos = new Set<string>();
+  const repoVolume = (workspacePath: string, repoName: string): string => {
+    const existing = repoMountsByPath.get(workspacePath);
+    if (existing) return existing.volumeName;
+    const base = `wv-repo-${workspacePath.replace(/[^a-zA-Z0-9]+/g, "-")}`
+      .replace(/-+$/, "")
+      .slice(0, 190);
+    const taken = new Set(
+      [...repoMountsByPath.values()].map((m) => m.volumeName)
+    );
+    let volumeName = base;
+    for (let i = 2; taken.has(volumeName); i++) volumeName = `${base}-${i}`;
+    repoMountsByPath.set(workspacePath, { volumeName, repoName, workspacePath });
+    return volumeName;
+  };
   const servicePorts: Record<string, number[]> = {};
   const containers: NonNullable<
     RegisterTaskDefinitionCommandInput["containerDefinitions"]
@@ -143,10 +199,32 @@ export function translateComposeToTaskDef(
       for (const v of vols) {
         const parsed = parseVolumeEntry(v, namedVolumes);
         if (parsed.kind === "bind") {
-          throw new ComposeTranslateError(
-            `Service "${name}" bind-mounts "${parsed.source}" — host paths don't exist on Fargate. ` +
-              `Use a named volume (task-scoped) or bake the files into the image.`
+          const repo = resolveRepoBind(parsed.source, repoNames);
+          if (!repo) {
+            throw new ComposeTranslateError(
+              `Service "${name}" bind-mounts "${parsed.source}" — host paths don't exist on Fargate. ` +
+                (repoNames.length > 0
+                  ? `Only a path inside an attached repository works here (${repoNames
+                      .map((r) => `./${r}`)
+                      .join(", ")}); otherwise use a named volume (task-scoped) ` +
+                    `or bake the files into the image.`
+                  : `This env has no repositories attached, so use a named volume ` +
+                    `(task-scoped) or bake the files into the image.`)
+            );
+          }
+          const volumeName = repoVolume(repo.workspacePath, repo.repoName);
+          requiredRepos.add(repo.repoName);
+          servicesNeedingRepos.add(name);
+          mountPoints.push({
+            sourceVolume: volumeName,
+            containerPath: parsed.target,
+            ...(parsed.readOnly ? { readOnly: true } : {}),
+          });
+          notes.push(
+            `service ${name}: "${parsed.source}" resolved to the ${repo.repoName} ` +
+              `clone on the sandbox workspace`
           );
+          continue;
         }
         usedVolumes.add(parsed.source);
         mountPoints.push({
@@ -276,6 +354,12 @@ export function translateComposeToTaskDef(
     },
     servicePorts,
     notes,
+    // The volume entries these name are appended by the driver, which is the
+    // only layer that can turn a workspace path into an access point — same
+    // arrangement as the workspace volume and the runner container.
+    repoMounts: [...repoMountsByPath.values()],
+    requiredRepos: [...requiredRepos],
+    servicesNeedingRepos: [...servicesNeedingRepos],
   };
 }
 
@@ -353,12 +437,38 @@ export function rewriteServiceHosts(
   return out;
 }
 
+/**
+ * Resolve a compose bind source to a path inside the sandbox workspace, or
+ * null when it cannot be satisfied there.
+ *
+ * Only a relative path whose first segment names an attached repository
+ * resolves — that is the one case where the files a compose file asks for
+ * genuinely exist in the task. Absolute paths, `~` and anything climbing out
+ * with `..` are host paths by definition and have no sandbox equivalent; `.`
+ * is ambiguous (the env directory for a template compose, the repository root
+ * for a compose read out of a repo) so it is left to fail loudly rather than
+ * guessed at.
+ */
+function resolveRepoBind(
+  source: string,
+  repoNames: string[]
+): { repoName: string; workspacePath: string } | null {
+  if (!source || source.startsWith("/") || source.startsWith("~")) return null;
+  const rel = source.replace(/^\.\//, "").replace(/\/+$/, "");
+  if (!rel || rel === "." || rel.startsWith("..")) return null;
+  const segments = rel.split("/");
+  if (segments.some((s) => s === "" || s === "." || s === "..")) return null;
+  const repoName = segments[0];
+  if (!repoNames.includes(repoName)) return null;
+  return { repoName, workspacePath: segments.join("/") };
+}
+
 function parseVolumeEntry(
   v: unknown,
   named: Set<string>
 ):
   | { kind: "named"; source: string; target: string; readOnly: boolean }
-  | { kind: "bind"; source: string; target: string } {
+  | { kind: "bind"; source: string; target: string; readOnly: boolean } {
   if (typeof v === "string") {
     const parts = v.split(":");
     if (parts.length === 1) {
@@ -372,10 +482,18 @@ function parseVolumeEntry(
       };
     }
     const [source, target, mode] = parts;
+    // A bare `.` is a path, not a volume name — compose's own shorthand for
+    // "the directory this file is in". Without it here it fell through to the
+    // named-volume branch and became a task-scoped scratch volume called ".",
+    // so a service asking for the project directory silently got an empty one.
     const isBind =
-      source.startsWith("/") || source.startsWith("./") || source.startsWith("..") || source.startsWith("~");
+      source === "." ||
+      source.startsWith("/") ||
+      source.startsWith("./") ||
+      source.startsWith("..") ||
+      source.startsWith("~");
     if (isBind && !named.has(source)) {
-      return { kind: "bind", source, target };
+      return { kind: "bind", source, target, readOnly: mode === "ro" };
     }
     return { kind: "named", source, target, readOnly: mode === "ro" };
   }
@@ -383,7 +501,9 @@ function parseVolumeEntry(
     const type = typeof v.type === "string" ? v.type : "volume";
     const source = typeof v.source === "string" ? v.source : "";
     const target = typeof v.target === "string" ? v.target : "";
-    if (type === "bind") return { kind: "bind", source, target };
+    if (type === "bind") {
+      return { kind: "bind", source, target, readOnly: v.read_only === true };
+    }
     return {
       kind: "named",
       source: source || "anon",

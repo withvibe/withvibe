@@ -54,7 +54,14 @@ export function shellQuote(value: string): string {
 
 export function buildRepoBootstrapScript(
   repos: SandboxRepo[],
-  committer: Committer
+  committer: Committer,
+  /**
+   * Repositories a compose service bind-mounts. Their failure is fatal: the
+   * service would otherwise start against an empty directory, which fails
+   * later and far less legibly than the clone did. Every other repo stays
+   * best-effort — the rest of the environment is still worth having.
+   */
+  requiredRepos: string[] = []
 ): string {
   for (const repo of repos) {
     if (!SAFE_NAME_RE.test(repo.name)) {
@@ -68,10 +75,20 @@ export function buildRepoBootstrapScript(
     }
   }
 
+  const required = new Set(requiredRepos);
+  for (const name of required) {
+    if (!repos.some((r) => r.name === name)) {
+      throw new SandboxRepoScriptError(
+        `repository "${name}" is bind-mounted by a service but is not attached to this env`
+      );
+    }
+  }
+
   const q = shellQuote;
   const lines: string[] = [
     "set -u",
     "failed=0",
+    "required_failed=0",
     `mkdir -p ${q(SANDBOX_WORKSPACE_DIR)}`,
     // Every repo lives on an EFS mount owned by uid 0 via the access point,
     // while git's ownership check compares against the running user. Marking
@@ -118,10 +135,13 @@ export function buildRepoBootstrapScript(
   ];
 
   for (const repo of repos) {
+    const bump = required.has(repo.name)
+      ? "failed=$((failed+1)); required_failed=$((required_failed+1));"
+      : "failed=$((failed+1));";
     lines.push(
       `setup_repo ${q(repo.name)} ${q(repo.remote)} ${q(repo.branch)} ${q(
         repo.baseBranch
-      )} || { echo "[repo] ${repo.name}: FAILED" >&2; failed=$((failed+1)); }`
+      )} || { echo "[repo] ${repo.name}: FAILED" >&2; ${bump} }`
     );
   }
 
@@ -131,6 +151,13 @@ export function buildRepoBootstrapScript(
     // down with it — the rest of the environment is still usable, and the
     // error is more useful in front of someone than as a failed start.
     'if [ "$failed" -gt 0 ]; then echo "[repo] $failed repository/repositories failed" >&2; fi',
+    // Unless a service mounts it. Then there is nothing to come back to: the
+    // container would start on an empty directory, so exiting non-zero stops
+    // the task here, where the git error is still the thing being reported.
+    'if [ "$required_failed" -gt 0 ]; then',
+    '  echo "[repo] $required_failed of them are mounted by a service — refusing to start the env without them" >&2',
+    "  exit 1",
+    "fi",
     "exit 0"
   );
   return lines.join("\n");

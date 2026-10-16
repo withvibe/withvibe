@@ -90,15 +90,29 @@ export class SandboxReposService {
     }
   }
 
-  private async doBootstrap(
+  /**
+   * Everything needed to materialise this env's repos, without running it.
+   *
+   * The driver bakes this into an init container so the clone is a step of the
+   * task itself rather than something done to the task from outside — which is
+   * what lets compose services declare a dependency on it and so never start
+   * against an empty directory. The same plan drives `bootstrap()`, the repair
+   * pass that runs after the task is up.
+   *
+   * Returns a reason instead when there is nothing to do or no way to do it.
+   */
+  async plan(
     envId: string,
-    log: (line: string) => void
-  ): Promise<void> {
+    requiredRepos: string[] = []
+  ): Promise<
+    | { ok: true; script: string; env: Record<string, string>; repoCount: number; committer: { name: string; email: string } }
+    | { ok: false; reason: string | null }
+  > {
     const envRepos = await this.prisma.client.envRepo.findMany({
       where: { envId },
       include: { repo: { select: { name: true } } },
     });
-    if (envRepos.length === 0) return;
+    if (envRepos.length === 0) return { ok: false, reason: null };
 
     const env = await this.prisma.client.env.findUnique({
       where: { id: envId },
@@ -106,22 +120,23 @@ export class SandboxReposService {
     });
     const committer = await this.committerFor(envId);
     if (!committer) {
-      log(
-        `[repos] skipped: this env has no recorded creator, so there is no identity ` +
-          `to attribute commits to. Repositories can still be cloned from inside the sandbox.\n`
-      );
-      return;
+      return {
+        ok: false,
+        reason:
+          "this env has no recorded creator, so there is no identity to attribute commits to",
+      };
     }
 
     const repos: SandboxRepo[] = [];
     for (const er of envRepos) {
       const remote = this.gitProxy.remoteUrlFor(envId, er.repo.name);
       if (!remote) {
-        log(
-          `[repos] skipped: the api has no publicly reachable URL, so the sandbox ` +
-            `cannot reach the git proxy. Set FARGATE_API_BASE_URL on the api.\n`
-        );
-        return;
+        return {
+          ok: false,
+          reason:
+            "the api has no publicly reachable URL, so the sandbox cannot reach " +
+            "the git proxy. Set FARGATE_API_BASE_URL on the api",
+        };
       }
       repos.push({
         name: er.repo.name,
@@ -131,16 +146,40 @@ export class SandboxReposService {
       });
     }
 
-    let script: string;
     try {
-      script = buildRepoBootstrapScript(repos, committer);
+      return {
+        ok: true,
+        script: buildRepoBootstrapScript(repos, committer, requiredRepos),
+        env: {
+          // The proxy credential, scoped to this env and this user. It travels
+          // as process environment rather than being written into any
+          // repository's config, so it leaves nothing behind on the EFS volume
+          // for the next task to find.
+          ...this.gitProxy.gitConfigEnvFor(envId, committer.userId),
+          GIT_TERMINAL_PROMPT: "0",
+          HOME: `${SANDBOX_WORKSPACE_DIR}/.withvibe/home`,
+        },
+        repoCount: repos.length,
+        committer: { name: committer.name, email: committer.email },
+      };
     } catch (err) {
       if (err instanceof SandboxRepoScriptError) {
-        log(`[repos] ${err.message}\n`);
-        return;
+        return { ok: false, reason: err.message };
       }
       throw err;
     }
+  }
+
+  private async doBootstrap(
+    envId: string,
+    log: (line: string) => void
+  ): Promise<void> {
+    const planned = await this.plan(envId);
+    if (!planned.ok) {
+      if (planned.reason) log(`[repos] skipped: ${planned.reason}\n`);
+      return;
+    }
+    const { script, committer, repoCount: count } = planned;
 
     log(`[repos] waiting for the sandbox to accept commands…\n`);
     const ready = await this.waitForBridge(envId);
@@ -150,19 +189,11 @@ export class SandboxReposService {
     }
 
     log(
-      `[repos] setting up ${repos.length} repositor${repos.length === 1 ? "y" : "ies"} ` +
+      `[repos] setting up ${count} repositor${count === 1 ? "y" : "ies"} ` +
         `in ${SANDBOX_WORKSPACE_DIR} as ${committer.name} <${committer.email}>\n`
     );
 
-    const result = await this.run(envId, script, {
-      // The proxy credential, scoped to this env and this user. It reaches the
-      // sandbox as process environment for this one command rather than being
-      // written into any repository's config, so it leaves nothing behind on
-      // the EFS volume for the next task to find.
-      ...this.gitProxy.gitConfigEnvFor(envId, committer.userId),
-      GIT_TERMINAL_PROMPT: "0",
-      HOME: `${SANDBOX_WORKSPACE_DIR}/.withvibe/home`,
-    });
+    const result = await this.run(envId, script, planned.env);
 
     for (const line of result.output.split("\n")) {
       if (line.trim()) log(`${line}\n`);

@@ -55,6 +55,14 @@ import { InjectPinoLogger, PinoLogger } from "nestjs-pino";
  */
 const WORKSPACE_VOLUME = "withvibe-workspace";
 
+/**
+ * The container that clones the env's repositories. It runs to completion and
+ * exits; it exists as a container rather than as a command we send into the
+ * task because only a container can be depended on — a compose service that
+ * mounts a repository must not start until the code is actually there.
+ */
+const REPO_INIT_CONTAINER = "withvibe-repos";
+
 const START_TIMEOUT_MS = 5 * 60_000;
 const POLL_MS = 4_000;
 
@@ -153,6 +161,16 @@ export class FargateDriver implements EnvComputeDriver {
       const dotEnv = await this.readDotEnv(ctx.envDir);
 
       log(`[fargate] translating compose → ECS task definition…\n`);
+      // A compose file written for a local env bind-mounts its repositories
+      // from the host. The task clones those same repositories into its
+      // workspace, so the translator can resolve such a mount — but only if it
+      // knows which names are repositories rather than stray host paths.
+      const envRepos = await this.prisma.client.envRepo.findMany({
+        where: { envId },
+        include: { repo: { select: { name: true } } },
+      });
+      const repoNames = envRepos.map((er) => er.repo.name);
+
       // Which named volumes this compose uses — resolved by translating once
       // with no storage, so the access points we create match exactly the
       // volumes that will be mounted.
@@ -164,6 +182,7 @@ export class FargateDriver implements EnvComputeDriver {
         region: conn.region!,
         executionRoleArn: conn.taskExecutionRoleArn!,
         taskRoleArn: conn.taskRoleArn!,
+        repoNames,
       });
       const volumeNames = (probe.taskDefinition.volumes ?? [])
         .map((v) => v.name)
@@ -199,6 +218,32 @@ export class FargateDriver implements EnvComputeDriver {
         );
       }
 
+      // A repo bind mount resolves to a subdirectory of the workspace, which
+      // only an access point can express — a task-scoped volume has no way to
+      // name a path inside itself. Without a filesystem the mount is simply
+      // unsatisfiable, and saying so now beats a container that starts on an
+      // empty directory.
+      if (probe.repoMounts.length > 0 && !conn.fileSystemId) {
+        await this.fail(
+          envId,
+          `This compose file mounts ${probe.repoMounts
+            .map((m) => `./${m.workspacePath}`)
+            .join(", ")} from the repository clone, which needs the EFS ` +
+            `filesystem this AWS stack does not have. Redeploy ` +
+            `infra/aws/withvibe-client-compute.cfn.yaml to add it.`
+        );
+        return;
+      }
+      for (const mount of probe.repoMounts) {
+        const ap = await this.efs.ensureAccessPoint(
+          conn,
+          envId,
+          mount.volumeName,
+          `/${envId}/${WORKSPACE_VOLUME}/${mount.workspacePath}`
+        );
+        if (ap) volumeAccessPoints[mount.volumeName] = ap;
+      }
+
       const translated = translateComposeToTaskDef({
         composeYaml,
         dotEnv,
@@ -209,8 +254,39 @@ export class FargateDriver implements EnvComputeDriver {
         taskRoleArn: conn.taskRoleArn!,
         fileSystemId: conn.fileSystemId,
         volumeAccessPoints,
+        repoNames,
       });
       for (const note of translated.notes) log(`[fargate] note: ${note}\n`);
+
+      // Repo volumes are declared here rather than by the translator: it is
+      // pure, and only this layer can turn a workspace path into an access
+      // point id.
+      if (translated.repoMounts.length > 0) {
+        translated.taskDefinition.volumes = [
+          ...(translated.taskDefinition.volumes ?? []),
+          ...translated.repoMounts.map((mount) => ({
+            name: mount.volumeName,
+            efsVolumeConfiguration: {
+              fileSystemId: conn.fileSystemId!,
+              transitEncryption: "ENABLED" as const,
+              authorizationConfig: {
+                accessPointId: volumeAccessPoints[mount.volumeName],
+                iam: "ENABLED" as const,
+              },
+            },
+          })),
+        ];
+      }
+
+      // The clone that fills those mounts runs as a container in this task, so
+      // the services that mount them can wait for it.
+      const clonesInTask = await this.addRepoInitContainer(
+        envId,
+        translated.taskDefinition,
+        translated.requiredRepos,
+        translated.servicesNeedingRepos,
+        log
+      );
 
       // The sandbox AI: a runner container (claude CLI) rides in every
       // fargate task, serving the exec bridge the chat engine drives. The
@@ -307,11 +383,14 @@ export class FargateDriver implements EnvComputeDriver {
             }
           }
           // Repositories are cloned by the task itself, from the git proxy —
-          // see SandboxReposService. Done before the env is declared running
-          // so the agent never opens on a half-populated /workspace, and
-          // deliberately non-fatal: a repo that will not clone is a problem to
-          // show someone, not a reason to throw away a working sandbox.
-          await this.sandboxRepos.bootstrap(envId, log);
+          // see SandboxReposService. Normally that happens in the init
+          // container, which has already finished by the time the task reports
+          // RUNNING; re-running the same script here would mean a second fetch
+          // of every repo on every start. This is the fallback for the case
+          // where no init container could be added (a stack with no EFS, or an
+          // env whose repos could not be planned), where it is still worth
+          // trying and still deliberately non-fatal.
+          if (!clonesInTask) await this.sandboxRepos.bootstrap(envId, log);
 
           await this.setStatus(envId, "running", { error: null });
           log(`[fargate] env is running\n`);
@@ -666,6 +745,98 @@ export class FargateDriver implements EnvComputeDriver {
    * nothing secret ever crosses the bridge connection in cleartext because
    * the bridge itself is TLS with the generated cert.
    */
+  /** Image every WithVibe-owned container in the task runs. */
+  private runnerImage(): string {
+    const namespace = process.env.WITHVIBE_IMAGE_NAMESPACE || "ghcr.io/withvibe";
+    const tag =
+      process.env.CLAUDE_RUNNER_FARGATE_TAG ||
+      process.env.WITHVIBE_VERSION ||
+      "latest";
+    return `${namespace}/claude-runner:${tag}`;
+  }
+
+  /**
+   * Add the container that materialises the env's repositories, and make the
+   * services that mount them wait for it.
+   *
+   * The clone used to be driven from the platform once the task was up, which
+   * put it strictly *after* every compose service had already started — fine
+   * while nothing mounted the code, impossible once something does. As a
+   * container it is part of the task's own startup, so ECS can order it.
+   */
+  private async addRepoInitContainer(
+    envId: string,
+    taskDef: import("@aws-sdk/client-ecs").RegisterTaskDefinitionCommandInput,
+    requiredRepos: string[],
+    servicesNeedingRepos: string[],
+    log: (line: string) => void
+  ): Promise<boolean> {
+    const containers = taskDef.containerDefinitions ?? [];
+    if (containers.some((c) => c.name === REPO_INIT_CONTAINER)) {
+      throw new ComposeTranslateError(
+        `"${REPO_INIT_CONTAINER}" is a reserved service name on Fargate envs`
+      );
+    }
+
+    const planned = await this.sandboxRepos.plan(envId, requiredRepos);
+    if (!planned.ok) {
+      // With nothing mounting a repo this is survivable — the env comes up and
+      // the reason is reported. With a mount it is not: fail now, while the
+      // cause is still what gets shown.
+      if (requiredRepos.length > 0) {
+        throw new Error(
+          `cannot set up the repositories this compose file mounts: ${
+            planned.reason ?? "this env has no repositories attached"
+          }`
+        );
+      }
+      if (planned.reason) log(`[repos] skipped: ${planned.reason}\n`);
+      return false;
+    }
+
+    containers.push({
+      name: REPO_INIT_CONTAINER,
+      image: this.runnerImage(),
+      // Runs to completion. An essential container that exits takes the whole
+      // task down with it, which is exactly what must not happen here.
+      essential: false,
+      command: ["sh", "-c", planned.script],
+      environment: Object.entries(planned.env).map(([name, value]) => ({
+        name,
+        value,
+      })),
+      mountPoints: [
+        { sourceVolume: WORKSPACE_VOLUME, containerPath: "/workspace" },
+      ],
+      logConfiguration: containers[0]?.logConfiguration,
+    });
+
+    for (const service of servicesNeedingRepos) {
+      const container = containers.find((c) => c.name === service);
+      if (!container) continue;
+      container.dependsOn = [
+        ...(container.dependsOn ?? []),
+        // SUCCESS, not COMPLETE: a clone that failed leaves the directory this
+        // service is about to mount empty, and the script exits non-zero
+        // precisely so that this dependency stops the task here.
+        { containerName: REPO_INIT_CONTAINER, condition: "SUCCESS" },
+      ];
+    }
+
+    taskDef.containerDefinitions = containers;
+    log(
+      `[repos] clone runs in the task as "${REPO_INIT_CONTAINER}" ` +
+        `(${planned.repoCount} repositor${planned.repoCount === 1 ? "y" : "ies"}, ` +
+        `as ${planned.committer.name} <${planned.committer.email}>)\n`
+    );
+    if (servicesNeedingRepos.length > 0) {
+      log(
+        `[repos] ${servicesNeedingRepos.join(", ")} will not start until it succeeds\n`
+      );
+    }
+    return true;
+  }
+
   private async addRunnerContainer(
     envId: string,
     workspaceId: string,
@@ -733,11 +904,7 @@ export class FargateDriver implements EnvComputeDriver {
     }
 
     const { cert, key: tlsKey } = await this.bridge.generateBridgeCert(envId);
-    const image = `${process.env.WITHVIBE_IMAGE_NAMESPACE || "ghcr.io/withvibe"}/claude-runner:${
-      process.env.CLAUDE_RUNNER_FARGATE_TAG ||
-      process.env.WITHVIBE_VERSION ||
-      "latest"
-    }`;
+    const image = this.runnerImage();
 
     containers.push({
       name: "withvibe-runner",
@@ -774,6 +941,16 @@ export class FargateDriver implements EnvComputeDriver {
       mountPoints: [
         { sourceVolume: WORKSPACE_VOLUME, containerPath: "/workspace" },
       ],
+      // COMPLETE, not SUCCESS: the agent should open on a finished workspace,
+      // but a repository that would not clone is a thing to come in and
+      // diagnose — so the runner comes up either way.
+      ...(containers.some((c) => c.name === REPO_INIT_CONTAINER)
+        ? {
+            dependsOn: [
+              { containerName: REPO_INIT_CONTAINER, condition: "COMPLETE" as const },
+            ],
+          }
+        : {}),
       healthCheck: {
         command: [
           "CMD-SHELL",

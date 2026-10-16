@@ -37,7 +37,11 @@ function expect(name: string, cond: boolean, detail = "") {
   else bad(name, detail);
 }
 
-function translate(composeYaml: string, dotEnv: Record<string, string> = {}) {
+function translate(
+  composeYaml: string,
+  dotEnv: Record<string, string> = {},
+  repoNames: string[] = []
+) {
   return translateComposeToTaskDef({
     composeYaml,
     dotEnv,
@@ -46,6 +50,7 @@ function translate(composeYaml: string, dotEnv: Record<string, string> = {}) {
     region: "eu-west-1",
     executionRoleArn: "arn:aws:iam::111111111111:role/exec",
     taskRoleArn: "arn:aws:iam::111111111111:role/task",
+    repoNames,
   });
 }
 
@@ -345,6 +350,175 @@ expect(
     ) === true,
   JSON.stringify(envWeb?.environment)
 );
+
+// ---- repository bind mounts ------------------------------------------------
+// The one bind source that can be honoured: a path inside a repository the
+// task clones for itself. Everything else is still a host path with no sandbox
+// equivalent.
+
+const repoMount = translate(
+  `
+services:
+  aquarium:
+    image: nginx
+    volumes:
+      - ./vibe-aquarium:/usr/share/nginx/html:ro
+`,
+  {},
+  ["vibe-aquarium"]
+);
+const aquarium = repoMount.taskDefinition.containerDefinitions?.[0];
+expect(
+  "a repo bind mount becomes a task volume",
+  repoMount.repoMounts.length === 1 &&
+    repoMount.repoMounts[0].repoName === "vibe-aquarium" &&
+    repoMount.repoMounts[0].workspacePath === "vibe-aquarium",
+  JSON.stringify(repoMount.repoMounts)
+);
+expect(
+  "the container mounts that volume at the compose target",
+  aquarium?.mountPoints?.[0]?.sourceVolume === repoMount.repoMounts[0]?.volumeName &&
+    aquarium?.mountPoints?.[0]?.containerPath === "/usr/share/nginx/html",
+  JSON.stringify(aquarium?.mountPoints)
+);
+expect(
+  ":ro survives the translation",
+  aquarium?.mountPoints?.[0]?.readOnly === true,
+  JSON.stringify(aquarium?.mountPoints)
+);
+expect(
+  "the repo is reported as required, and its service as waiting",
+  JSON.stringify(repoMount.requiredRepos) === JSON.stringify(["vibe-aquarium"]) &&
+    JSON.stringify(repoMount.servicesNeedingRepos) === JSON.stringify(["aquarium"]),
+  JSON.stringify({
+    requiredRepos: repoMount.requiredRepos,
+    servicesNeedingRepos: repoMount.servicesNeedingRepos,
+  })
+);
+// A repo mount is NOT a compose named volume: it must not land in the volumes
+// the translator declares itself, because only the driver can resolve it to an
+// access point. Declaring it here with no efsVolumeConfiguration would quietly
+// give the service an empty scratch directory instead of the code.
+expect(
+  "a repo volume is left for the driver to declare",
+  (repoMount.taskDefinition.volumes ?? []).every(
+    (v) => v.name !== repoMount.repoMounts[0]?.volumeName
+  ),
+  JSON.stringify(repoMount.taskDefinition.volumes)
+);
+
+const subdir = translate(
+  `
+services:
+  web:
+    image: nginx
+    volumes:
+      - ./app/public:/srv
+`,
+  {},
+  ["app"]
+);
+expect(
+  "a subdirectory of a repo resolves to that subdirectory",
+  subdir.repoMounts.length === 1 &&
+    subdir.repoMounts[0].repoName === "app" &&
+    subdir.repoMounts[0].workspacePath === "app/public",
+  JSON.stringify(subdir.repoMounts)
+);
+
+const shared = translate(
+  `
+services:
+  web:
+    image: nginx
+    volumes:
+      - ./app:/srv
+  worker:
+    image: node
+    volumes:
+      - ./app:/code
+`,
+  {},
+  ["app"]
+);
+expect(
+  "two services mounting the same path share one volume",
+  shared.repoMounts.length === 1 &&
+    shared.taskDefinition.containerDefinitions?.[0]?.mountPoints?.[0]
+      ?.sourceVolume ===
+      shared.taskDefinition.containerDefinitions?.[1]?.mountPoints?.[0]
+        ?.sourceVolume,
+  JSON.stringify(shared.repoMounts)
+);
+expect(
+  "both of them are recorded as waiting on the clone",
+  JSON.stringify(shared.servicesNeedingRepos) ===
+    JSON.stringify(["web", "worker"]),
+  JSON.stringify(shared.servicesNeedingRepos)
+);
+
+const twoPaths = translate(
+  `
+services:
+  web:
+    image: nginx
+    volumes:
+      - ./app:/srv
+      - ./app/public:/public
+`,
+  {},
+  ["app"]
+);
+expect(
+  "a repo and a subdirectory of it get distinct volumes",
+  twoPaths.repoMounts.length === 2 &&
+    new Set(twoPaths.repoMounts.map((m) => m.volumeName)).size === 2,
+  JSON.stringify(twoPaths.repoMounts)
+);
+
+// Rejections. Each names what the user can actually do instead.
+const hostPathCompose = (source: string) => `
+services:
+  web:
+    image: nginx
+    volumes:
+      - ${source}:/srv
+`;
+rejects(
+  "an absolute host path is still refused",
+  hostPathCompose("/var/data"),
+  "host paths don't exist on Fargate"
+);
+rejects(
+  "a path climbing out of the env is refused",
+  hostPathCompose("../secrets"),
+  "host paths don't exist on Fargate"
+);
+rejects(
+  "a home-relative path is refused",
+  hostPathCompose("~/stuff"),
+  "host paths don't exist on Fargate"
+);
+try {
+  translate(hostPathCompose("./not-a-repo"), {}, ["app"]);
+  bad("a directory that is not a repo is refused", "expected a rejection");
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  expect(
+    "a directory that is not a repo is refused, naming the repos that work",
+    err instanceof ComposeTranslateError && msg.includes("./app"),
+    msg
+  );
+}
+try {
+  translate(hostPathCompose("."), {}, ["app"]);
+  bad("a bare . is refused", "expected a rejection");
+} catch {
+  // "." means the env directory in a template compose and the repository root
+  // in one read out of a repo. Guessing between them would silently mount the
+  // wrong tree, so it fails instead.
+  ok("a bare . is refused rather than guessed at");
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

@@ -2199,16 +2199,22 @@ function AwsComputeRow({ id, isAdmin }: { id: string; isAdmin: boolean }) {
     void navigator.clipboard.writeText(text).then(() => toast.success(`${what} copied`));
   }
 
+  // Run from the repo root — the path has to match where the template actually
+  // lives, and AllowedIngressCidr is spelled out on purpose: its template
+  // default is 0.0.0.0/0, so leaving it off would open every sandbox task to
+  // the internet. The placeholder makes the CLI reject the command rather than
+  // quietly deploying the open default.
   const deployCommand =
     data &&
     `aws cloudformation deploy \\
-  --template-file withvibe-client-compute.cfn.yaml \\
+  --template-file infra/aws/withvibe-client-compute.cfn.yaml \\
   --stack-name withvibe-compute \\
   --capabilities CAPABILITY_NAMED_IAM \\
   --region ${region || "<region>"} \\
   --parameter-overrides \\
     PlatformAccountId=${data.platformAccountId ?? "<platform-account-id>"} \\
-    ExternalId=${data.externalId}`;
+    ExternalId=${data.externalId} \\
+    AllowedIngressCidr=<this-server-public-ip>/32`;
 
   return (
     <SettingRow
@@ -2293,6 +2299,19 @@ function AwsComputeRow({ id, isAdmin }: { id: string; isAdmin: boolean }) {
                 <Copy className="size-3.5" />
               </Button>
             </div>
+            <p className="text-[11px] text-muted-foreground">
+              Run it from the repo root, and replace{" "}
+              <code className="px-1 py-0.5 bg-muted rounded font-mono">
+                &lt;this-server-public-ip&gt;
+              </code>{" "}
+              with this WithVibe server&apos;s public IP — that CIDR is the only
+              thing keeping sandbox tasks off the open internet. If the client
+              account is not your shell&apos;s default profile, add{" "}
+              <code className="px-1 py-0.5 bg-muted rounded font-mono">
+                --profile
+              </code>
+              .
+            </p>
           </div>
           <div className="space-y-2">
             <Label className="font-mono text-xs">

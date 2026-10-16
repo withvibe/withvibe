@@ -44,7 +44,14 @@ export class EfsStorageService {
   async ensureAccessPoint(
     conn: AwsComputeConnection,
     envId: string,
-    volume: string
+    volume: string,
+    /**
+     * Directory the access point pins, defaulting to this volume's own. Repo
+     * bind mounts override it to point *inside* the workspace volume, so a
+     * service container can mount one repository's clone without being handed
+     * the whole workspace.
+     */
+    rootPath = `/${envId}/${volume}`
   ): Promise<string | null> {
     if (!conn.fileSystemId) return null;
     const { efs } = this.aws.clientsFor({
@@ -71,7 +78,7 @@ export class EfsStorageService {
         // them; the directory is still private to this access point.
         PosixUser: { Uid: 0, Gid: 0 },
         RootDirectory: {
-          Path: `/${envId}/${volume}`,
+          Path: rootPath,
           // EFS only creates the path if CreationInfo is present.
           CreationInfo: {
             OwnerUid: 0,
