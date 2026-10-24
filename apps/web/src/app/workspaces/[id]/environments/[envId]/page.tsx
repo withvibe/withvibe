@@ -16,6 +16,7 @@ import {
   ScrollText,
   Settings2,
   Shield,
+  Smartphone,
   Square,
   Terminal as TerminalIcon,
   Trash2,
@@ -36,6 +37,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { cn } from "@/lib/utils";
 import { EnvironmentChat } from "./_chat";
 import { EnvPanel, LogsPanel, PreviewPanel } from "./_runtime";
+import { MobileSimulatorPanel } from "./_mobile-simulator";
 import { ComposeDialog } from "./_compose-dialog";
 import { SpecDialog, type EnvSpec } from "./_spec-dialog";
 import { TerminalPanel } from "./_terminal";
@@ -167,7 +169,7 @@ export default function EnvironmentDetailPage(
   const [composeOpen, setComposeOpen] = useState(false);
   const [specOpen, setSpecOpen] = useState(false);
   const [activePanel, setActivePanel] = useState<
-    "preview" | "logs" | "env" | "terminal" | "agents" | "git" | "database" | "qa-browser" | "context" | "security" | null
+    "preview" | "simulator" | "logs" | "env" | "terminal" | "agents" | "git" | "database" | "qa-browser" | "context" | "security" | null
   >(null);
   // Plugins (data-driven activity-bar entries). Cleared whenever the user
   // selects a built-in panel — only one panel is visible at a time.
@@ -200,6 +202,7 @@ export default function EnvironmentDetailPage(
   function togglePanel(
     p:
       | "preview"
+      | "simulator"
       | "logs"
       | "env"
       | "terminal"
@@ -592,6 +595,14 @@ export default function EnvironmentDetailPage(
                   serviceUrls={env.serviceUrls}
                 />
               )}
+              {activePanel === "simulator" && (
+                <MobileSimulatorPanel
+                  containerStatus={env.containerStatus}
+                  serviceReady={env.serviceReady}
+                  containerPorts={env.containerPorts}
+                  serviceUrls={env.serviceUrls}
+                />
+              )}
               {activePanel === "logs" && (
                 <LogsPanel
                   workspaceId={id}
@@ -698,6 +709,13 @@ export default function EnvironmentDetailPage(
             onClick={() => togglePanel("preview")}
           >
             <Eye className="size-4" />
+          </ActivityIcon>
+          <ActivityIcon
+            label="Mobile Simulator"
+            active={activePanel === "simulator"}
+            onClick={() => togglePanel("simulator")}
+          >
+            <Smartphone className="size-4" />
           </ActivityIcon>
           <ActivityIcon
             label="Logs"
